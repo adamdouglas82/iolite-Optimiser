@@ -1,7 +1,9 @@
-#/ Name: Advanced Spot Optimiser
-#/ Description: Calculates optimal spot size and dwell times based on sensitivity.
+#/ Name: iolite Optimiser
+#/ Description: Characterises your system's single-pulse washout to calculate the optimal balance of spot size, scan speed, and repetition rate that achieves your target data quality.
 #/ Type: UI
-#/ Author: Antigravity
+#/ Author: Adam Douglas
+#/ Version: 0.9.1
+#/ Contact: Adam.Douglas@icpms.com
 
 import math
 import os
@@ -9,6 +11,8 @@ import json
 import traceback
 import pandas as pd
 import numpy as np
+import random
+import colorsys
 
 try:
     from scipy.signal import find_peaks, peak_widths
@@ -21,10 +25,11 @@ try:
     import matplotlib.pyplot as plt
     matplotlib.use('Qt5Agg')
     from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+    from matplotlib.figure import Figure
     from matplotlib.ticker import MaxNLocator, EngFormatter, ScalarFormatter
     from cycler import cycler
+    from matplotlib.lines import Line2D
     import matplotlib.colors as mcolors
-    import colorsys
 except Exception as e:
     print(f"Import Error: {e}")
     print(traceback.format_exc())
@@ -91,9 +96,9 @@ MFR_DEFAULT_UNITS = {
 }
 
 TYPE_TO_TECH_MAP = {
-    "Quadrupole": "Quad",
-    "Sector-Field": "Quad",
-    "Multi-Collector": "MC",
+    "Quadrupole": "Quadrupole",
+    "Sector-Field": "Sector-Field",
+    "Multi-Collector": "Multi-Collector",
     "TOF": "TOF"
 }
 
@@ -152,9 +157,9 @@ PLOT_COLORS = [
 # --- EMBEDDED LOGIC ---
 class Logic:
     @staticmethod
-    def analyze_washout_peaks(df, isotope, prominence_threshold=100.0, min_distance=1, is_cps=True):
+    def analyse_washout_peaks(df, isotope, prominence_threshold=100.0, min_distance=1, is_cps=True):
         """
-        Analyzes washout peaks (Single Pulse Response) for a given isotope.
+        Analyses washout peaks (Single Pulse Response) for a given isotope.
         Calculates FW0.1M (10% Height) and FW0.01M (1% Height).
         Derived from logic.py
         """
@@ -255,6 +260,75 @@ class Logic:
         return stats
 
     @staticmethod
+    def generate_composite_peak(df, isotope, peaks_df):
+        """
+        Generates a composite (averaged) peak shape by aligning and normalizing detected peaks.
+        Uses asymmetric windows that split the baseline gap between adjacent pulses.
+        Aligned such that Relative Time 0 is at the 1% Rise Marker (l001).
+        """
+        if peaks_df.empty or isotope not in df.columns or "Time" not in df.columns:
+            return None
+
+        y_raw = df[isotope].values
+        t_raw = df['Time'].values
+        
+        # Calculate typical sample rate
+        dt = np.median(np.diff(t_raw)) if len(t_raw) > 1 else 1.0
+        
+        # 1. Calculate the core pulse dimensions
+        # Alignment is at l001. We want to cover from the start of the buffer to the end of the pulse + buffer.
+        max_fw001 = (peaks_df['r001'] - peaks_df['l001']).max()
+        
+        # 2. Calculate the baseline gap buffer
+        if len(peaks_df) > 1:
+            pdf = peaks_df.sort_values('Peak Time (s)')
+            gaps = pdf['l001'].values[1:] - pdf['r001'].values[:-1]
+            median_gap = np.median(gaps)
+            buffer_s = 0.5 * max(0, median_gap)
+        else:
+            buffer_s = 0.2 * max_fw001
+        
+        peak_segments = []
+        
+        for i, row in peaks_df.iterrows():
+            # Align at l001 absolute time
+            t_start_abs = row['l001'] - buffer_s
+            t_end_abs = row['r001'] + buffer_s
+            
+            # Convert to indices
+            idx_start = np.searchsorted(t_raw, t_start_abs)
+            idx_end = np.searchsorted(t_raw, t_end_abs, side='right')
+            
+            if idx_end <= idx_start: continue
+            
+            seg_y = y_raw[idx_start:idx_end]
+            seg_t = t_raw[idx_start:idx_end] - row['l001'] # Center t=0 at l001
+            
+            # Normalise intensity
+            mx = row['Max Intensity']
+            if mx > 0:
+                seg_y_norm = seg_y / mx
+                peak_segments.append((seg_t, seg_y_norm))
+
+        if not peak_segments:
+            return None
+
+        # Interpolation to a common grid
+        # Grid covers from -buffer to max_pulse_width + buffer
+        grid_t = np.arange(-buffer_s, max_fw001 + buffer_s + dt, dt)
+        sum_y = np.zeros_like(grid_t)
+        count_y = np.zeros_like(grid_t)
+        
+        for seg_t, seg_y in peak_segments:
+            interp_y = np.interp(grid_t, seg_t, seg_y, left=0, right=0)
+            sum_y += interp_y
+            count_y += 1
+            
+        avg_y = sum_y / count_y if len(peak_segments) > 0 else sum_y
+        
+        return pd.DataFrame({'Relative Time (s)': grid_t, 'Normalised Intensity': avg_y})
+
+    @staticmethod
     def calculate_constrained_at(inputs):
         """Helper to determine constrained Acquisition Time."""
         fw_s = inputs['washout_ms'] / 1000.0
@@ -262,7 +336,7 @@ class Logic:
         n_val = inputs['pulses_per_pixel']
         rr_max = inputs['max_rr_hz']
         ss_max = inputs['max_speed_um_s']
-        is_mc = inputs['icp_technology'] == "MC"
+        is_mc = inputs['icp_technology'] == "Multi-Collector"
         valid_times_s = [d/1000.0 for d in (inputs.get('allowed_dwells') or [])]
 
         at_from_washout = fw_s
@@ -380,7 +454,7 @@ class Logic:
                     break
         
         # --- REFINEMENT: Acq Time must match discrete Rep Rate Steps ---
-        optimized_n = n_val
+        optimised_n = n_val
         rr_actual = 0
         
         if is_mc:
@@ -391,7 +465,7 @@ class Logic:
             # and the resulting pulses-per-pixel will float.
             
             at_actual_s = at_needed
-            optimized_n = n_val 
+            optimised_n = n_val 
             
             # Since we are Time-Driven, we don't calculate an integer RR here for constraints.
             # We rely on calculate_laser_sync to pick the nearest RR.
@@ -428,19 +502,19 @@ class Logic:
                 # If Avoid Gaps (Overlapping), we prioritize maintaining the Dwell Time (and thus Overlap)
                 # over the exact Pulse Count. So we keep AT fixed (or slightly higher) and let N increase.
                 at_actual_s = at_final 
-                optimized_n = rr_actual * at_actual_s
+                optimised_n = rr_actual * at_actual_s
             else:
                 # If Standard (Flooring), we prioritize the exact Pulse Count, 
                 # so we adjust AT to match N / RR.
                 at_actual_s = n_val / rr_actual
-                optimized_n = n_val
+                optimised_n = n_val
         
         # Snap to hardware precision step (e.g. 0.1 ms for Agilent)
         p_s = inputs['precision_ms'] / 1000.0
         # Standard + MC systems: Snap to nearest hardware step
         at_actual_s = round(at_actual_s / p_s) * p_s
         
-        return at_actual_s, at_needed, harmonic, valid_times_s, notes, optimized_n
+        return at_actual_s, at_needed, harmonic, valid_times_s, notes, optimised_n
 
     @staticmethod
     def calculate_laser_sync(inputs):
@@ -456,7 +530,7 @@ class Logic:
         rr_max = inputs['max_rr_hz']
         ss_max = inputs['max_speed_um_s']
         allowed_rr = inputs.get('allowed_rr', None)
-        is_mc = inputs['icp_technology'] == "MC"
+        is_mc = inputs['icp_technology'] == "Multi-Collector"
         
         valid_times_s = [d/1000.0 for d in (inputs.get('allowed_dwells') or [])]
         
@@ -467,7 +541,7 @@ class Logic:
         inputs['pulses_per_pixel'] = opt_n
         
         # 2. Calculate Derived Laser Params based on AT
-        # Use OPTIMIZED pulses (if modified by MC logic or Avoid Gaps scaling)
+        # Use OPTIMISED pulses (if modified by MC logic or Avoid Gaps scaling)
         n_val = opt_n 
         rr_final_raw = n_val / at_final_s
         
@@ -492,7 +566,7 @@ class Logic:
             # We round to nearest to recover that integer.
             rr_final = round(rr_final_raw / rr_prec) * rr_prec
         
-        # Update inputs with optimized N so downstream usage (e.g. results table) is correct
+        # Update inputs with optimised N so downstream usage (e.g. results table) is correct
         inputs['pulses_per_pixel'] = opt_n
         
         warning = "" 
@@ -506,7 +580,7 @@ class Logic:
         
         # Check for Asynchronous Mapping (Integrated pixels v Laser shots mismatch)
         # Always report this to the user as per request
-        # Compare against ORIGINAL target (n_target), not the optimized one (which moves with logic)
+        # Compare against ORIGINAL target (n_target), not the optimised one (which moves with logic)
         sync_error = actual_pulses - n_target
         err_pct = (sync_error / n_target) * 100 if n_target != 0 else 0.0
         
@@ -599,24 +673,39 @@ class Logic:
             sig_cps = iso['sig_cps']
             blk_cps = iso['blk_cps']
             std_counts = iso['stdev_blank_counts'] 
-            poisson_sq = blk_cps 
+            # Handling for Zero Background (Infinite SNR protection)
+            # If blank rate is 0, we assume a minimum noise floor equivalent to 1 count over the baseline duration.
+            is_zero_bg = False
+            if blk_cps == 0 and bl_dt > 0:
+                 min_rate = 1.0 / bl_dt
+                 poisson_sq = min_rate  # Poisson variance rate = Rate
+                 is_zero_bg = True
+            else:
+                 poisson_sq = blk_cps
+
             flicker_noise_sq = (std_counts**2) / bl_dt if bl_dt > 0 else 0
             std_cps_per_sqrt_sec = (poisson_sq + flicker_noise_sq)**0.5
-            sig_cps_new_bs = sig_cps * scaling_factor * rr_scaling
+            
+            # FIX: Scale NET signal, not GROSS signal
+            # This prevents high-background channels from dropping below blank when spot size decreases
+            net_cps = sig_cps - blk_cps
+            scaled_net_cps = net_cps * scaling_factor * rr_scaling
+            sig_cps_new_bs = scaled_net_cps + blk_cps
             base_snr = 0
             if std_cps_per_sqrt_sec > 0:
                 base_snr = (sig_cps_new_bs - blk_cps) / std_cps_per_sqrt_sec
             
             initial_snr_display = iso.get('initial_snr', 0.0)
-            is_optimizable = (std_cps_per_sqrt_sec > 0 and base_snr > 0 and iso['status'] not in ["Exclude", "Set to Min", "Custom"])
+            is_optimisable = (std_cps_per_sqrt_sec > 0 and base_snr > 0 and iso['status'] not in ["Exclude", "Set to Min", "Custom"])
 
             processed_iso.append({
                 **iso, 'sig_cps_new_bs': sig_cps_new_bs, 'std_cps_per_sqrt_sec': std_cps_per_sqrt_sec,
                 'base_snr': base_snr, 'initial_snr_display': initial_snr_display,
-                'is_optimizable': is_optimizable, 'final_dt': 0.0, 'snapped_dt': 0.0
+                'is_optimisable': is_optimisable, 'final_dt': 0.0, 'snapped_dt': 0.0,
+                'is_zero_bg': is_zero_bg
             })
 
-        if tech == "MC":
+        if tech == "Multi-Collector":
             # For MC, we use the allowed_dwells from config (Integration Times)
             mc_times = [d/1000.0 for d in (config.get('allowed_dwells') or [])]
             if not mc_times:
@@ -639,10 +728,31 @@ class Logic:
                     selected_time = max(mc_times) # Should not happen if budget is reasonable
                 
             for iso in processed_iso:
-                iso['snapped_dt'] = 0 if iso['status'] == "Exclude" else selected_time
+                if iso['status'] == "Exclude":
+                    iso['snapped_dt'] = 0
+                else:
+                    # Check SNR
+                    resultant_snr = iso['base_snr'] * (selected_time**0.5)
+                    if resultant_snr < snr_threshold:
+                        # For MC, we CANNOT change the time (fixed system wide), but we FLAG it.
+                        iso['snapped_dt'] = selected_time
+                        iso['constraint'] = "Min SNR"
+                    else:
+                        iso['snapped_dt'] = selected_time
         elif tech == "TOF":
             simultaneous_time = math.floor(dwell_budget_s / precision_s) * precision_s
-            for iso in processed_iso: iso['snapped_dt'] = 0 if iso['status'] == "Exclude" else simultaneous_time
+            for iso in processed_iso:
+                if iso['status'] == "Exclude":
+                    iso['snapped_dt'] = 0
+                else:
+                    # Check SNR
+                    resultant_snr = iso['base_snr'] * (simultaneous_time**0.5)
+                    if resultant_snr < snr_threshold:
+                        # For TOF, we CANNOT change the time (fixed system wide), but we FLAG it.
+                        iso['snapped_dt'] = simultaneous_time
+                        iso['constraint'] = "Min SNR"
+                    else:
+                        iso['snapped_dt'] = simultaneous_time
         else:
             for _ in range(len(processed_iso) + 5):
                 current_budget = dwell_budget_s
@@ -651,10 +761,10 @@ class Logic:
                     if iso['status'] == "Exclude": iso['final_dt'] = 0.0
                     elif iso['status'] == "Set to Min": iso['final_dt'] = min_dwell_s; current_budget -= min_dwell_s
                     elif iso['status'] == "Custom": val = iso.get('custom_time_s', min_dwell_s); iso['final_dt'] = val; current_budget -= val
-                    elif not iso['is_optimizable']: iso['final_dt'] = min_dwell_s; current_budget -= min_dwell_s
+                    elif not iso['is_optimisable']: iso['final_dt'] = min_dwell_s; current_budget -= min_dwell_s
                     else: iso['final_dt'] = 0.0; inv_snr_sum += (1 / iso['base_snr'])
                 
-                valid_indices = [i for i, x in enumerate(processed_iso) if x['is_optimizable'] and x['final_dt'] == 0]
+                valid_indices = [i for i, x in enumerate(processed_iso) if x['is_optimisable'] and x['final_dt'] == 0]
                 num_valid = len(valid_indices)
                 reserved_time = num_valid * min_dwell_s
                 extra_budget = current_budget - reserved_time
@@ -675,7 +785,7 @@ class Logic:
                 if not failures: break
                 else:
                     failures.sort(key=lambda x: x[1])
-                    processed_iso[failures[0][0]]['is_optimizable'] = False
+                    processed_iso[failures[0][0]]['is_optimisable'] = False
 
             total_snapped = 0.0
             for iso in processed_iso:
@@ -683,7 +793,7 @@ class Logic:
                 else:
                     # Use floor to ensure we never overrun the budget
                     snapped = max(min_dwell_s, math.floor(iso['final_dt'] / precision_s + 1e-9) * precision_s)
-                    if not iso['is_optimizable'] and iso['status'] == "Auto": iso['constraint'] = "Min SNR"
+                    if not iso['is_optimisable'] and iso['status'] == "Auto": iso['constraint'] = "Min SNR"
                     elif abs(snapped - min_dwell_s) < 1e-9 and iso['status'] == "Auto": iso['constraint'] = "Min ICP"
                     elif iso['status'] == "Set to Min": iso['constraint'] = "Min ICP"
                     else: iso['constraint'] = ""
@@ -697,7 +807,7 @@ class Logic:
                 # REMOVED: constraint that they must already be above min_dwell.
                 # If everyone is at minimum, we still want to distribute the surplus.
                 candidates = [i for i, x in enumerate(processed_iso) 
-                              if x['is_optimizable'] 
+                              if x['is_optimisable'] 
                               and x['status'] not in ["Exclude", "Custom", "Set to Min"]]
                 
                 if candidates:
@@ -719,7 +829,7 @@ class Logic:
             val_ms = round(dt * 1000.0, decimals)
             output_rows.append({"Isotope": iso['name'], "Final Dwell (ms)": val_ms if decimals > 0 else int(val_ms),
                                 "Initial SNR": round(iso['initial_snr_display'], 2), "Sigma Sep": round(sep, 2),
-                                "Status": iso['status'], "Constraint": iso.get('constraint', "")})
+                                "Status": iso['status'], "Constraint": iso.get('constraint', ""), "IsZeroBG": iso.get('is_zero_bg', False)})
 
         return (min(separations) if separations else 999.0), output_rows
 
@@ -974,7 +1084,7 @@ class DwellDialog(QDialog):
         self.stack.setCurrentIndex(1 if checked else 0)
         
     def accept(self):
-        IoLog.information("AdvancedOptimiserPlugin: DwellDialog accept called")
+        IoLog.information("iolite Optimiser: DwellDialog accept called")
         try:
             if self.global_mode:
                 val = self._get(self.spin_global, 'value')
@@ -988,17 +1098,17 @@ class DwellDialog(QDialog):
                         self.result_dwells[ch] = v
 
             self.done(QDialog.Accepted) 
-            IoLog.information("AdvancedOptimiserPlugin: DwellDialog accept completed")
+            IoLog.information("iolite Optimiser: DwellDialog accept completed")
         except Exception as e:
-            IoLog.error(f"AdvancedOptimiserPlugin: DwellDialog accept Error: {e}")
+            IoLog.error(f"iolite Optimiser: DwellDialog accept Error: {e}")
             IoLog.error(traceback.format_exc())
 
     def reject(self):
-        IoLog.information("AdvancedOptimiserPlugin: DwellDialog reject called")
+        IoLog.information("iolite Optimiser: DwellDialog reject called")
         self.done(QDialog.Rejected)
 
 
-class AdvancedOptimiser(QWidget):
+class ioliteOptimiser(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.bg_times = None
@@ -1018,6 +1128,10 @@ class AdvancedOptimiser(QWidget):
         self.show_meta = {'Element': False, 'Mass': False}
         self.col_map = {} # Mapping of header names to current indices
         
+        # Plot Persistence (Optimisation Tab Only)
+        self._opt_palette_indices = None
+        self._opt_axis_limits = None
+        
         # Initialize System Theme Early
         self.system_is_dark = self.detect_theme()
         
@@ -1028,7 +1142,7 @@ class AdvancedOptimiser(QWidget):
         self.refresh_timer.timeout.connect(self._perform_auto_refresh)
 
         # Initialize hardware state
-        self.icp_tech = "Quad"
+        self.icp_tech = "Quadrupole"
         self.min_dwell = 0.1
         self.precision = 0.1
         self.max_rr = 1000
@@ -1038,21 +1152,21 @@ class AdvancedOptimiser(QWidget):
         
         try:
             home = os.path.expanduser("~")
-            ol_path = os.path.join(home, "Documents", "iolite", "Advanced Optimiser")
+            ol_path = os.path.join(home, "Documents", "iolite", "iolite Optimiser")
             if not os.path.exists(ol_path):
                  # Try OneDrive fallback
-                 alt_path = os.path.join(home, "OneDrive", "Documents", "iolite", "Advanced Optimiser")
+                 alt_path = os.path.join(home, "OneDrive", "Documents", "iolite", "iolite Optimiser")
                  if os.path.exists(os.path.join(home, "OneDrive", "Documents", "iolite")):
                      if not os.path.exists(alt_path): os.makedirs(alt_path)
                      ol_path = alt_path
                  else:
                      os.makedirs(ol_path)
 
-            self.settings_json_path = os.path.join(ol_path, "AdvancedOptimiserSettings.json")
+            self.settings_json_path = os.path.join(ol_path, "iolite Optimiser Settings.json")
             self.persistent_settings = self.load_persistent_settings()
         except Exception as e:
             self.persistent_settings = {}
-            IoLog.warning(f"AdvancedOptimiserPlugin: Error creating settings path: {e}")
+            IoLog.warning(f"iolite Optimiser: Error creating settings path: {e}")
 
         # Create Hardware Settings Dialog early
         self.settings_dlg = SettingsDialog(self)
@@ -1130,7 +1244,7 @@ class AdvancedOptimiser(QWidget):
                     except:
                         pass
                     self._block_signals(cb, False)
-        IoLog.information(f"AdvancedOptimiserPlugin: apply_theme called with text='{text}'")
+        IoLog.information(f"iolite Optimiser: apply_theme called with text='{text}'")
         
         # 1. Determine System Theme (Table/UI)
         self.system_is_dark = self.detect_theme()
@@ -1149,8 +1263,10 @@ class AdvancedOptimiser(QWidget):
             plt.style.use(style)
                     
             # Force update existing figure backgrounds
+            # Note: We do NOT pass update_plot here for the main figure, because we handle it explicitly 
+            # below with the is_theme_change flag. Calling it here without the flag wipes the zoom.
             for fig_attr, canvas_attr, update_func in [
-                ('figure', 'canvas', self.update_plot),
+                ('figure', 'canvas', None), # Main Optimiser Figure - Handled manually below
                 ('spr_figure', 'spr_canvas', self.run_spr_analysis)
             ]:
                 if hasattr(self, fig_attr):
@@ -1173,11 +1289,11 @@ class AdvancedOptimiser(QWidget):
             self.save_settings()
             
             # 3. Trigger Table Refresh to update highlights
-            # This ensures table colors match the newly detected system theme
-            # 3. Trigger Table Refresh to update highlights
-            # This ensures table colors match the newly detected system theme
+            # This ensures table colours match the newly detected system theme
             if trigger_opt and hasattr(self, 'opt_df') and self.opt_df is not None:
-                self.run_optimization(refresh=False)
+                self.run_optimisation(refresh=False, preserve_zoom=True)
+            else:
+                self.update_plot(preserve_zoom=True)
             
         except Exception as e:
             IoLog.warning(f"Theme Update Error: {e}")
@@ -1186,7 +1302,7 @@ class AdvancedOptimiser(QWidget):
     def _perform_auto_refresh(self):
         # Only refresh if widget is visible
         if self.isVisible():
-             self.run_optimization(refresh=True)
+             self.run_optimisation(refresh=True)
         
     def initUI(self):
         # Resize to 80% of screen
@@ -1196,6 +1312,8 @@ class AdvancedOptimiser(QWidget):
             self.resize(int(rect.width() * 0.9), int(rect.height() * 0.9))
         except:
             self.resize(1200, 900) 
+
+        self.setWindowTitle("iolite Optimiser") 
 
         # Main Layout (Tabs)
         main_layout = QVBoxLayout()
@@ -1223,6 +1341,15 @@ class AdvancedOptimiser(QWidget):
         right_layout = QVBoxLayout()
 
         # --- LEFT COLUMN (CONTROLS) ---
+        
+        # 0. Reload Button (Fixed at Top)
+        h_ctrl = QHBoxLayout()
+        self.btn_spr_run = QPushButton("Reload Data from iolite")
+        self.btn_spr_run.setFixedHeight(30)
+        self.btn_spr_run.clicked.connect(lambda: self.refresh_data(tab="spr"))
+        h_ctrl.addWidget(self.btn_spr_run)
+        left_layout.addLayout(h_ctrl)
+
         self.spr_scroll = QScrollArea()
         self.spr_scroll.setWidgetResizable(True)
         self.spr_scroll.setFrameShape(QScrollArea.NoFrame)
@@ -1230,12 +1357,6 @@ class AdvancedOptimiser(QWidget):
         
         scroll_content = QWidget()
         l_settings = QVBoxLayout(scroll_content)
-        
-        # 0. Reload Button
-        self.btn_spr_run = QPushButton("Reload Data from iolite")
-        self.btn_spr_run.setFixedHeight(30)
-        self.btn_spr_run.clicked.connect(lambda: self.refresh_data(tab="spr"))
-        l_settings.addWidget(self.btn_spr_run)
 
         # 1. Peak Detection Controls
         grp_det = QGroupBox("")
@@ -1288,6 +1409,7 @@ class AdvancedOptimiser(QWidget):
         self.cmb_spr_unit.currentTextChanged.connect(self.run_spr_analysis)
         self.cmb_spr_unit.currentTextChanged.connect(self.save_persistent_settings)
         form_det.addRow("Time Unit:", self.cmb_spr_unit)
+        
         
         v_det.addLayout(form_det)
         grp_det.setLayout(v_det)
@@ -1504,6 +1626,12 @@ class AdvancedOptimiser(QWidget):
         h_ctrl_spr.addWidget(self.chk_rescale_spr)
         h_ctrl_spr.addStretch()
         
+        # Hide Summary Stats Checkbox (Right Aligned)
+        self.chk_hide_stats = QCheckBox("Hide Summary Stats")
+        self.chk_hide_stats.setChecked(False)
+        self.chk_hide_stats.toggled.connect(self._on_stats_toggled)
+        h_ctrl_spr.addWidget(self.chk_hide_stats)
+        
         right_layout.addLayout(h_ctrl_spr)
 
         self.spr_figure = Figure(figsize=(5, 4), dpi=100, constrained_layout=True)
@@ -1574,7 +1702,7 @@ class AdvancedOptimiser(QWidget):
 
         # 1. Detect All Peaks (Cache or find new)
         # For simplicity we re-detect if prominence/distance changed, but we keep results_df for toggling
-        self.spr_raw_results_df = Logic.analyze_washout_peaks(self.spr_df, iso, prominence, min_distance=distance, is_cps=is_cps)
+        self.spr_raw_results_df = Logic.analyse_washout_peaks(self.spr_df, iso, prominence, min_distance=distance, is_cps=is_cps)
         
         # 2. Filter Excluded Peaks for Statistics
         if iso not in self.spr_excluded_peaks:
@@ -1618,30 +1746,43 @@ class AdvancedOptimiser(QWidget):
             if val >= 1e3: return f"{val/1e3:.2f}", " k"
             return f"{val:.2f}", " "
 
+        # Helper for Adaptive Precision (User Request)
+        def _adap(v):
+            if v >= 100: return f"{v:.0f}"
+            if v >= 10:  return f"{v:.1f}"
+            if v >= 1:   return f"{v:.2f}"
+            return f"{v:.3f}"
+
         # Forced "Counts" unit for Area
         area_unit_label = " Counts"
 
-        self.lbl_spr_fw10.setText(f"<b>{stats['FW0.1M Mean']*mult:.{prec}f}</b> {unit_label}")
+        self.lbl_spr_fw10.setText(f"<b>{_adap(stats['FW0.1M Mean']*mult)}</b> {unit_label}")
         self.lbl_spr_rsd10.setText(f"{stats['FW0.1M RSD']:.1f} %")
-        self.lbl_spr_fw_max10.setText(f"<b>{stats['FW0.1M Max']*mult:.{prec}f}</b> {unit_label}")
+        self.lbl_spr_fw_max10.setText(f"<b>{_adap(stats['FW0.1M Max']*mult)}</b> {unit_label}")
         # Use SI formatting for Area
         s_mean10, p_mean10 = _si(stats['Area 10% Mean'])
         self.lbl_spr_area10.setText(f"<b>{s_mean10}</b>{p_mean10}{area_unit_label}")
         self.lbl_spr_area_rsd10.setText(f"{stats['Area 10% RSD']:.1f} %")
 
-        self.lbl_spr_fw1.setText(f"<b>{stats['FW0.01M Mean']*mult:.{prec}f}</b> {unit_label}")
+        self.lbl_spr_fw1.setText(f"<b>{_adap(stats['FW0.01M Mean']*mult)}</b> {unit_label}")
         self.lbl_spr_rsd1.setText(f"{stats['FW0.01M RSD']:.1f} %")
-        self.lbl_spr_fw_max1.setText(f"<b>{stats['FW0.01M Max']*mult:.{prec}f}</b> {unit_label}")
+        self.lbl_spr_fw_max1.setText(f"<b>{_adap(stats['FW0.01M Max']*mult)}</b> {unit_label}")
         # Use SI formatting for Area
         s_mean1, p_mean1 = _si(stats['Area 1% Mean'])
         self.lbl_spr_area1.setText(f"<b>{s_mean1}</b>{p_mean1}{area_unit_label}")
         self.lbl_spr_area_rsd1.setText(f"{stats['Area 1% RSD']:.1f} %")
         
+        # Helper for adaptive rounding (float)
+        def _adap_round(v_ms):
+            if v_ms >= 100: return round(v_ms, 0)
+            if v_ms >= 10:  return round(v_ms, 1)
+            return round(v_ms, 2)
+        
         # Store for "Apply" logic (rounded to matching UI precision)
-        self._last_spr_fw10_avg_ms = round(stats['FW0.1M Mean'] * 1000.0, 2)
-        self._last_spr_fw10_max_ms = round(stats['FW0.1M Max'] * 1000.0, 2)
-        self._last_spr_fw1_avg_ms = round(stats['FW0.01M Mean'] * 1000.0, 2)
-        self._last_spr_fw1_max_ms = round(stats['FW0.01M Max'] * 1000.0, 2)
+        self._last_spr_fw10_avg_ms = _adap_round(stats['FW0.1M Mean'] * 1000.0)
+        self._last_spr_fw10_max_ms = _adap_round(stats['FW0.1M Max'] * 1000.0)
+        self._last_spr_fw1_avg_ms = _adap_round(stats['FW0.01M Mean'] * 1000.0)
+        self._last_spr_fw1_max_ms = _adap_round(stats['FW0.01M Max'] * 1000.0)
 
         # Update Table (Dynamic Units)
         headers = [
@@ -1655,77 +1796,74 @@ class AdvancedOptimiser(QWidget):
         ]
         self.spr_table.setHorizontalHeaderLabels(headers)
         self.spr_table.setRowCount(0)
+        self.spr_table.setRowCount(len(self.spr_raw_results_df))
         
-        for _, row in self.spr_raw_results_df.iterrows():
-            r = self._get(self.spr_table, 'rowCount')
-            if r is None: r = 0
-            self.spr_table.insertRow(r)
-            
+        # excluded = self.persistent_settings.get('spr_excluded_peaks', {}).get(iso, []) # REMOVED: Uses runtime variable 'excluded' defined above
+
+        for i, row in self.spr_raw_results_df.iterrows():
             p_idx = int(row['Peak Index'])
             is_excluded = p_idx in excluded
-
-            # Col 0: Peak Index
-            it = QTableWidgetItem(str(p_idx))
-            it.setTextAlignment(Qt.AlignCenter)
-            if is_excluded:
-                it.setForeground(QColor(150, 150, 150))
-            self.spr_table.setItem(r, 0, it)
-
-            # Col 1: Zeroed Time (Always seconds)
-            t_peak_zeroed = (row['Peak Time (s)'] - t0)
-            it = QTableWidgetItem(f"{t_peak_zeroed:.4f}")
-            it.setTextAlignment(Qt.AlignCenter)
-            if is_excluded: it.setForeground(QColor(150, 150, 150))
-            self.spr_table.setItem(r, 1, it)
             
-            # Col 2: FW0.1M (scaled)
-            it = QTableWidgetItem(f"{row['FW0.1M (s)'] * mult:.{prec}f}")
-            it.setTextAlignment(Qt.AlignCenter)
-            if is_excluded: it.setForeground(QColor(150, 150, 150))
-            self.spr_table.setItem(r, 2, it)
+            # Helper to create item
+            def _it(txt):
+                it = QTableWidgetItem(txt)
+                it.setTextAlignment(Qt.AlignCenter)
+                if is_excluded:
+                     it.setForeground(QColor("gray"))
+                     f = it.font(); f.setStrikeOut(True); it.setFont(f)
+                return it
 
-            # Col 3: FW0.1M Area (stays as is)
-            it = QTableWidgetItem(f"{row['Area 10%']:.4f}")
-            it.setTextAlignment(Qt.AlignCenter)
-            if is_excluded: it.setForeground(QColor(150, 150, 150))
-            self.spr_table.setItem(r, 3, it)
+            self.spr_table.setItem(i, 0, _it(str(p_idx)))
+            self.spr_table.setItem(i, 1, _it(f"{row['Peak Time (s)'] - t0:.2f}"))
             
-            # Col 4: FW0.01M (scaled)
-            it = QTableWidgetItem(f"{row['FW0.01M (s)'] * mult:.{prec}f}")
-            it.setTextAlignment(Qt.AlignCenter)
-            if is_excluded: it.setForeground(QColor(150, 150, 150))
-            self.spr_table.setItem(r, 4, it)
+            # Col 2: FW0.1M (scaled & adaptive)
+            self.spr_table.setItem(i, 2, _it(f"{_adap(row['FW0.1M (s)'] * mult)}"))
+            
+            # Col 3: FW0.1M Area (stays as is relative to key, but formatted)
+            s_a01, p_a01 = _si(row['Area 10%'])
+            self.spr_table.setItem(i, 3, _it(f"{s_a01}{p_a01}"))
+            
+            # Col 4: FW0.01M (scaled & adaptive)
+            self.spr_table.setItem(i, 4, _it(f"{_adap(row['FW0.01M (s)'] * mult)}"))
 
             # Col 5: FW0.01M Area
-            it = QTableWidgetItem(f"{row['Area 1%']:.4f}")
-            it.setTextAlignment(Qt.AlignCenter)
-            if is_excluded: it.setForeground(QColor(150, 150, 150))
-            self.spr_table.setItem(r, 5, it)
+            s_a001, p_a001 = _si(row['Area 1%'])
+            self.spr_table.setItem(i, 5, _it(f"{s_a001}{p_a001}"))
             
-            # Col 6: Max Intensity
-            it = QTableWidgetItem(f"{row['Max Intensity']:.2f}")
-            it.setTextAlignment(Qt.AlignCenter)
-            if is_excluded: it.setForeground(QColor(150, 150, 150))
-            self.spr_table.setItem(r, 6, it)
+            # Col 6: Max Intensity (SI)
+            s_mx, p_mx = _si(row['Max Intensity'])
+            self.spr_table.setItem(i, 6, _it(f"{s_mx}{p_mx}"))
 
+        
         # Plot
         self.spr_figure.clear()
         
         # Explicitly set figure facecolor from current rcParams
         self.spr_figure.patch.set_facecolor(plt.rcParams['figure.facecolor'])
         
-        ax = self.spr_figure.add_subplot(111)
+        # Determine layout (80:20 split if composite enabled)
+        show_composite = True # Always show composite peak (User Request)
+        fg_col = plt.rcParams['axes.labelcolor']
         
-        # ENSURE COLORS MATCH OPTIMISER TAB
-        custom_palette = self._get_adaptive_palette(10)
-        ax.set_prop_cycle(cycler(color=custom_palette))
+        if show_composite:
+            gs = self.spr_figure.add_gridspec(1, 2, width_ratios=[8, 2])
+            ax = self.spr_figure.add_subplot(gs[0, 0])
+            self.spr_ax_comp = self.spr_figure.add_subplot(gs[0, 1])
+        else:
+            ax = self.spr_figure.add_subplot(111)
+            self.spr_ax_comp = None
+        
+        # Theme-Aware Mega-Palette (Purple Index 8 Start) - Not persistent for SPR
+        safe_palette = self._get_theme_safe_palette(is_opt=False)
+        ax.set_prop_cycle(cycler(color=safe_palette))
         ax.set_facecolor(plt.rcParams['axes.facecolor'])
 
         # Get theme-aware foreground color
         fg_col = plt.rcParams['axes.labelcolor']
 
         # Plot individual channel (Always seconds X)
-        line, = ax.plot(t_zeroed, self.spr_df[iso], color=None, lw=1.5, alpha=0.9, label=iso)
+        # Uses first color from palette (now Purple)
+        line, = ax.plot(t_zeroed, self.spr_df[iso], lw=1.5, alpha=0.9, label=iso)
         
         # Peak Index Labels (Always seconds X)
         self.spr_peak_label_map = {}
@@ -1757,25 +1895,97 @@ class AdvancedOptimiser(QWidget):
             # FW0.1M (10%) Points (Always seconds X for plot alignment)
             h10, = ax.plot([(row['l01']-t0), (row['r01']-t0)], [row['h01'], row['h01']], 
                            linestyle='None', marker='s', markersize=5, alpha=0.3 if is_excluded else 0.9, 
-                           color='C1', picker=5, label="FW 0.1M (10 %)" if i == 0 else "")
+                           color='C6', picker=5, label="FW 0.1M (10 %)" if i == 0 else "")
             lines_10.append(h10)
             self.spr_peak_label_map[h10] = p_idx
             
             # FW0.01M (1%) Points (Always seconds X for plot alignment)
             h1, = ax.plot([(row['l001']-t0), (row['r001']-t0)], [row['h001'], row['h001']], 
                           linestyle='None', marker='d', markersize=5, alpha=0.3 if is_excluded else 0.9, 
-                          color='C2', picker=5, label="FW 0.01M (1 %)" if i == 0 else "")
+                          color='C9', picker=5, label="FW 0.01M (1 %)" if i == 0 else "")
             lines_1.append(h1)
             self.spr_peak_label_map[h1] = p_idx
+            
+        # Composite Peak Plotting
+        if show_composite and self.spr_ax_comp:
+            comp_df = Logic.generate_composite_peak(self.spr_df, iso, filtered_df)
+            if comp_df is not None:
+                # Use the anchor color (Index 0 of safe_palette)
+                self.spr_ax_comp.plot(comp_df['Relative Time (s)'], comp_df['Normalised Intensity'], color=safe_palette[0], lw=2)
+                self.spr_ax_comp.set_xlabel("Rel. Time (s)", fontsize='medium', color=fg_col)
+                self.spr_ax_comp.set_title("Average Peak", fontsize='medium', color=fg_col)
+                self.spr_ax_comp.set_ylim(-0.02, 1.05) # Tighter Y limit
+                self.spr_ax_comp.set_yticklabels([])    # Hide Y numbers
+                self.spr_ax_comp.set_yticks([])         # Hide Y ticks
+                self.spr_ax_comp.margins(x=0)         # Snap X axis to data
+                self.spr_ax_comp.set_facecolor(plt.rcParams['axes.facecolor'])
+                self.spr_ax_comp.tick_params(colors=fg_col)
+                for spine in self.spr_ax_comp.spines.values():
+                    spine.set_edgecolor(fg_col)
+                self.spr_ax_comp.grid(True, alpha=0.2, color=fg_col)
+                
+                # Draw FW Markers for Composite
+                comp_t = comp_df['Relative Time (s)'].values
+                comp_y = comp_df['Normalised Intensity'].values
+                
+                comp_widths = {0.1: 0.0, 0.01: 0.0} # Store for stats box
+                
+                for lvl, mkr, col in [(0.1, 's', 'C6'), (0.01, 'd', 'C9')]:
+                    above = np.where(comp_y >= lvl)[0]
+                    if len(above) >= 2:
+                        idx_l, idx_r = above[0], above[-1]
+                        # Linear interpolation for left
+                        if idx_l > 0:
+                            t_l = np.interp(lvl, [comp_y[idx_l-1], comp_y[idx_l]], [comp_t[idx_l-1], comp_t[idx_l]])
+                        else: t_l = comp_t[idx_l]
+                        # Linear interpolation for right
+                        if idx_r < len(comp_y) - 1:
+                            t_r = np.interp(lvl, [comp_y[idx_r+1], comp_y[idx_r]], [comp_t[idx_r+1], comp_t[idx_r]])
+                        else: t_r = comp_t[idx_r]
+                        
+                        # Store width
+                        comp_widths[lvl] = t_r - t_l
+                        
+                        self.spr_ax_comp.plot([t_l, t_r], [lvl, lvl], linestyle='None', marker=mkr, markersize=5, color=col, alpha=0.8)
+
+                # Summary Stats Box (Inlaid Legend)
+                # Summary Stats Box (Inlaid Legend)
+                # Create persistent legend reference (Always create, control visibility)
+                
+                f10 = filtered_df['FW0.1M (s)']
+                f1 = filtered_df['FW0.01M (s)']
+                
+                # Use calculated composite widths
+                val_10 = comp_widths.get(0.1, 0.0)
+                val_1 = comp_widths.get(0.01, 0.0)
+                
+                label_10 = f"FW0.1M (10%)\nAvg: {_adap(val_10*mult)} {unit_label}\nMax:  {_adap(f10.max()*mult)} {unit_label}"
+                label_1 = f"FW0.01M (1%)\nAvg: {_adap(val_1*mult)} {unit_label}\nMax:  {_adap(f1.max()*mult)} {unit_label}"
+                
+                h10 = Line2D([0], [0], linestyle='None', marker='s', markersize=4, color='C1', label=label_10)
+                h1 = Line2D([0], [0], linestyle='None', marker='d', markersize=4, color='C2', label=label_1)
+                
+                self.spr_stats_legend = self.spr_ax_comp.legend(handles=[h10, h1], loc='upper right', 
+                                                    fontsize=8.5, handletextpad=0.5, labelspacing=1.0,
+                                                    frameon=True, facecolor=plt.rcParams['axes.facecolor'],
+                                                    edgecolor=fg_col)
+                self.spr_stats_legend.get_frame().set_alpha(0.6)
+                for text in self.spr_stats_legend.get_texts():
+                    text.set_color(fg_col)
+                    
+                # Set initial visibility based on checkbox
+                self.spr_stats_legend.set_visible(not self.chk_hide_stats.isChecked())
 
         # Legend Frame Logic
         self.spr_legend_frame = None
         
-        # Create handles for legend (only unique labels)
-        handles = [line] 
-        if lines_10: handles.append(lines_10[0])
-        if lines_1: handles.append(lines_1[0])
-        labels = [h.get_label() for h in handles]
+        # Create Proxy Handles for Legend
+        # (Must use proxies so legend doesn't inherit 'excluded' alpha from 1st point)
+        legend_handles = [line]
+        if lines_10:
+             legend_handles.append(Line2D([0], [0], linestyle='None', marker='s', markersize=5, color='C6', alpha=0.9, label="FW 0.1M (10 %)"))
+        if lines_1:
+             legend_handles.append(Line2D([0], [0], linestyle='None', marker='d', markersize=5, color='C9', alpha=0.9, label="FW 0.01M (1 %)"))
 
         ax.set_xlabel("Time (s)", fontsize='medium', color=fg_col)
         
@@ -1787,16 +1997,19 @@ class AdvancedOptimiser(QWidget):
         # Matches main Optimiser plot style
         ax.yaxis.set_major_formatter(EngFormatter(places=0, sep=" "))
         ax.yaxis.get_offset_text().set_color(fg_col)
+        ax.grid(False, which='both')
         
         # Replace title with legend at top
-        leg = ax.legend(loc='lower center', bbox_to_anchor=(0.5, 1.01), ncol=3, frameon=True, fontsize='medium', handlelength=2.0)
+        leg = ax.legend(handles=legend_handles, loc='lower center', bbox_to_anchor=(0.5, 1.01), ncol=3, frameon=True, fontsize='medium', handlelength=2.0)
         leg.get_frame().set_alpha(0.0) # Transparent frame
         leg.get_frame().set_picker(5)
         self.spr_legend_frame = leg.get_frame()
         
         self.spr_map_legend_to_line = {}
-        for legline, legtext in zip(leg.get_lines(), leg.get_texts()):
+        # Use legendHandles to ensure we get all markers/lines correctly
+        for legline, legtext in zip(leg.legendHandles, leg.get_texts()):
             txt = legtext.get_text()
+            legline.set_alpha(1.0) # Ensure fully visible initially
             legline.set_picker(5)
             legtext.set_picker(5)
             
@@ -1817,7 +2030,13 @@ class AdvancedOptimiser(QWidget):
             spine.set_edgecolor(fg_col)
 
         # Consistent Grid
-        ax.grid(True, alpha=0.2, color=fg_col)
+        # ax.grid(True, alpha=0.2, color=fg_col) # REMOVED per user request
+        
+        # Ensure Composite Plot also has no grid
+        ax.grid(False, which='both')
+        if self.spr_ax_comp:
+            self.spr_ax_comp.minorticks_on()
+            self.spr_ax_comp.grid(True, which='both', alpha=0.2, color=fg_col)
 
         # Force tight borders
         ax.margins(x=0)
@@ -1835,11 +2054,15 @@ class AdvancedOptimiser(QWidget):
         if rescale is False and old_xlim is not None:
             ax.set_xlim(old_xlim)
             ax.set_ylim(old_ylim)
-            self.spr_canvas.draw()
         elif rescale is True or (rescale is None and self._get(self.chk_rescale_spr, 'isChecked')):
-            self.rescale_to_visible(ax=ax, canvas=self.spr_canvas)
-        else:
-            self.spr_canvas.draw()
+            self.rescale_to_visible(ax=ax, canvas=None) # Defer draw
+
+        # ALWAYS Rescale Composite Y (Autosize to 0-1 data + margin)
+        # This fixes the issue where exclusion (rescale=False) left the composite plot unscaled
+        if show_composite and self.spr_ax_comp:
+             self.rescale_to_visible(ax=self.spr_ax_comp, rescale_y=True, canvas=None)
+
+        self.spr_canvas.draw()
 
     def _auto_detect_spr_prominence(self, iso=None):
         if self.spr_df is None:
@@ -1870,7 +2093,7 @@ class AdvancedOptimiser(QWidget):
                 self._block_signals(self.spin_spr_prom, True)
                 self.spin_spr_prom.setValue(auto_val)
                 self._block_signals(self.spin_spr_prom, False)
-                IoLog.information(f"AdvancedOptimiserPlugin: Auto-detected SPR prominence for {iso}: {auto_val}")
+                IoLog.information(f"iolite Optimiser: Auto-detected SPR prominence for {iso}: {auto_val}")
             else:
                 # Fallback: small % of max if range is 0 (flat)
                 mx = np.nanmax(y)
@@ -1878,13 +2101,23 @@ class AdvancedOptimiser(QWidget):
                     auto_val = mx * 0.05
                     self.spin_spr_prom.setValue(auto_val)
         except Exception as e:
-            IoLog.error(f"AdvancedOptimiserPlugin: Error in auto-prominence detection: {e}")
+            IoLog.error(f"iolite Optimiser: Error in auto-prominence detection: {e}")
 
     def _on_spr_auto_prom_toggled(self, checked):
         if hasattr(self, 'spin_spr_prom'):
             self.spin_spr_prom.setEnabled(not checked)
         if checked:
             self.run_spr_analysis()
+
+    def _on_stats_toggled(self, checked):
+        # Toggle visibility without re-running analysis (Preserves Zoom)
+        if hasattr(self, 'spr_stats_legend') and self.spr_stats_legend:
+            self.spr_stats_legend.set_visible(not checked)
+            # Efficient redraw if available
+            if hasattr(self.spr_canvas, 'draw_idle'):
+                self.spr_canvas.draw_idle()
+            else:
+                self.spr_canvas.draw()
 
     def _on_spr_apply_clicked(self, mode):
         # mode can be '10avg', '10max', '1avg', '1max'
@@ -1897,7 +2130,7 @@ class AdvancedOptimiser(QWidget):
         val_ms = mapping.get(mode, 0)
         self.spin_wash.setValue(val_ms)
         self.tabs.setCurrentIndex(1) # Switch back to Optimiser
-        IoLog.information(f"AdvancedOptimiserPlugin: Applied {mode} washout value: {val_ms:.2f} ms")
+        IoLog.information(f"iolite Optimiser: Applied {mode} washout value: {val_ms:.2f} ms")
 
     def init_optimiser_tab(self):
         main_layout = QHBoxLayout()
@@ -1994,7 +2227,7 @@ class AdvancedOptimiser(QWidget):
         self.cmb_dwell_unit.addItems(["Auto", "ms", "s"])
         saved_unit = self.persistent_settings.get('dwell_unit_pref', "Auto")
         self.cmb_dwell_unit.setCurrentText(saved_unit)
-        self.cmb_dwell_unit.currentTextChanged.connect(lambda: self.run_optimization(refresh=False))
+        self.cmb_dwell_unit.currentTextChanged.connect(lambda: self.run_optimisation(refresh=False))
         self.form_icp.addRow(self.lbl_dwell_unit, self.cmb_dwell_unit)
 
         # ICP Status (Always Visible)
@@ -2176,7 +2409,7 @@ class AdvancedOptimiser(QWidget):
         lbl_init_rr = QLabel("Initial Rep-Rate (Hz):"); lbl_init_rr.setFixedWidth(lbl_w_in)
         grid_input.addWidget(lbl_init_rr, 1, 0)
         self.spin_init_rr = QDoubleSpinBox()
-        self.spin_init_rr.setRange(0, 10000); self.spin_init_rr.setValue(self.persistent_settings.get('init_rr', 20))
+        self.spin_init_rr.setRange(1, 10000); self.spin_init_rr.setValue(self.persistent_settings.get('init_rr', 20))
         self.spin_init_rr.setFixedWidth(spin_w_in)
         grid_input.addWidget(self.spin_init_rr, 1, 1)
 
@@ -2393,7 +2626,7 @@ class AdvancedOptimiser(QWidget):
         self.plot_panning = False; self.press_x = None
         
         h_ctrl = QHBoxLayout()
-        self.chk_norm = QCheckBox("Normalize")
+        self.chk_norm = QCheckBox("Normalise")
         self.chk_norm.setChecked(True) # Default On
         
         self.chk_y_zoom = QCheckBox("Pan / Zoom Y")
@@ -2463,7 +2696,7 @@ class AdvancedOptimiser(QWidget):
         self.table = CopyableTableWidget()
         self.table.setColumnCount(5)
         self.table.setStyleSheet("QHeaderView::section { padding-left: 10px; padding-right: 10px; }")
-        # Headers will be set dynamically in run_optimization
+        # Headers will be set dynamically in run_optimisation
         self.table.setHorizontalHeaderLabels(["Isotope", "Mode", "Optimised Dwell Times (ms)", "Initial SNR", "Resultant SNR"])
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
@@ -2491,14 +2724,14 @@ class AdvancedOptimiser(QWidget):
         
         
         # 1. Sync internal state with loaded settings (Silent population)
-        IoLog.information("AdvancedOptimiserPlugin: Applying hardware settings...")
+        IoLog.information("iolite Optimiser: Applying hardware settings...")
         self._handle_mfr_changed(self._get(self.cmb_mfr, 'currentText'))
         self._handle_laser_mfr_changed(self._get(self.cmb_laser_mfr, 'currentText'))
         self._update_hw_summary()
         self._update_ui_precisions()
 
         # 2. Connect signals after initial population to prevent startup save/opt spam
-        IoLog.information("AdvancedOptimiserPlugin: Connecting interactive signals...")
+        IoLog.information("iolite Optimiser: Connecting interactive signals...")
         self.cmb_mfr.currentTextChanged.connect(self._handle_mfr_changed)
         self.cmb_mfr.currentTextChanged.connect(self._on_ui_change)
         
@@ -2561,23 +2794,23 @@ class AdvancedOptimiser(QWidget):
         self.apply_theme(trigger_opt=False)
 
         # 3. Initial Data Loading & Optimization
-        IoLog.information("AdvancedOptimiserPlugin: Starting initial data load...")
+        IoLog.information("iolite Optimiser: Starting initial data load...")
         self.refresh_data()
         
         if self.opt_df is not None:
             if self.bg_times is not None and self.sig_times is not None:
-                IoLog.information("AdvancedOptimiserPlugin: Initial regions valid. Optimization triggered by refresh_data.")
-                # self.run_optimization(refresh=False) -> HANDLED BY refresh_data()
+                IoLog.information("iolite Optimiser: Initial regions valid. Optimisation triggered by refresh_data.")
+                # self.run_optimisation(refresh=False) -> HANDLED BY refresh_data()
             else:
-                IoLog.information("AdvancedOptimiserPlugin: Initial regions empty (Auto-Detect required).")
+                IoLog.information("iolite Optimiser: Initial regions empty (Auto-Detect required).")
         else:
-            IoLog.information("AdvancedOptimiserPlugin: No data found on startup.")
+            IoLog.information("iolite Optimiser: No data found on startup.")
             
-        IoLog.information("AdvancedOptimiserPlugin: UI initialization complete.")
+        IoLog.information("iolite Optimiser: UI initialization complete.")
     
     def _on_result_link_clicked(self, link):
         if link == "#set_dwells":
-            IoLog.information("AdvancedOptimiserPlugin: User clicked 'Set Dwell Times' link.")
+            IoLog.information("iolite Optimiser: User clicked 'Set Dwell Times' link.")
             # Determine missing channels again or just force open for all
             if hasattr(self, 'opt_df') and self.opt_df is not None:
                 self.resolve_dwell_times(set(self.opt_df.columns) - {'Time'})
@@ -2586,10 +2819,10 @@ class AdvancedOptimiser(QWidget):
                 if hasattr(self, 'detected_at_ms') and hasattr(self, 'channel_dwells'):
                     total_init_dwell_ms = self._get_total_dwell_time_ms()
                     self.detected_overhead_ms = max(0, self.detected_at_ms - total_init_dwell_ms)
-                    IoLog.information(f"AdvancedOptimiserPlugin: Overhead updated to {self.detected_overhead_ms:.3f}ms")
+                    IoLog.information(f"iolite Optimiser: Overhead updated to {self.detected_overhead_ms:.3f}ms")
 
                 # Re-run optimization to see if fixed
-                self.run_optimization(refresh=False)
+                self.run_optimisation(refresh=False)
 
     def _get_total_dwell_time_ms(self):
         """
@@ -2597,7 +2830,10 @@ class AdvancedOptimiser(QWidget):
         For Quads/Sector: Sum of all dwell times (sequential).
         For MC/TOF: Maximum dwell time (simultaneous).
         """
-        if not self.channel_dwells:
+        # Ensure source exists (Opt tab priority)
+        dwells_source = getattr(self, 'opt_dwells', getattr(self, 'channel_dwells', {}))
+
+        if not dwells_source:
             return 0.0
         
         # Robust Tech Check
@@ -2606,12 +2842,11 @@ class AdvancedOptimiser(QWidget):
         mapped = TYPE_TO_TECH_MAP.get(tech_raw, tech_raw)
         
         # Simultaneous Systems (Max Dwell)
-        if mapped in ["MC", "TOF", "Multi-Collector"]:
-            return max(self.channel_dwells.values())
-        # Sequential Systems (Sum Dwells)
+        if mapped in ["Multi-Collector", "TOF"]:
+            return max(dwells_source.values())
         # Sequential Systems (Sum Dwells)
         else:
-            return sum(self.channel_dwells.values())
+            return sum(dwells_source.values())
 
     def _recalculate_overhead(self):
         """
@@ -2626,10 +2861,10 @@ class AdvancedOptimiser(QWidget):
         # Precise calculation preserves imported file timing
         self.detected_overhead_ms = max(0, self.detected_at_ms - total_init_dwell_ms)
         
-        IoLog.information(f"AdvancedOptimiserPlugin: Overhead updated to {self.detected_overhead_ms:.3f}ms (AT={self.detected_at_ms:.3f}, Dwell={total_init_dwell_ms:.3f})")
+        IoLog.information(f"iolite Optimiser: Overhead updated to {self.detected_overhead_ms:.3f}ms (AT={self.detected_at_ms:.3f}, Dwell={total_init_dwell_ms:.3f})")
         
         # Re-run optimization to refresh results if needed
-        # self.run_optimization(refresh=False) # Optional: might be too aggressive on every change?
+        # self.run_optimisation(refresh=False) # Optional: might be too aggressive on every change?
 
     def _handle_model_changed(self, model):
         mfr = self._get(self.cmb_mfr, 'currentText')
@@ -2846,7 +3081,7 @@ class AdvancedOptimiser(QWidget):
                 self.allowed_dwells = None
         else:
             spec = ICP_SPECS.get(icp_mfr, {}).get(icp_mod, {})
-            raw_type = spec.get('type', "Quad")
+            raw_type = spec.get('type', "Quadrupole")
             self.icp_tech = TYPE_TO_TECH_MAP.get(raw_type, raw_type)
             self.min_dwell = spec.get('min_dwell', 0.1)
             self.precision = spec.get('prec', 0.1)
@@ -2925,8 +3160,8 @@ class AdvancedOptimiser(QWidget):
         # else:
         #    self.save_persistent_settings()
         
-        # Trigger Optimization
-        self.run_optimization(refresh=False)
+        # Trigger Optimization (Preserve Zoom for parameter tweaks)
+        self.run_optimisation(refresh=False, preserve_zoom=True)
         
         # Manually trigger rescale if enabled
         if hasattr(self, 'chk_rescale') and self._get(self.chk_rescale, 'isChecked'):
@@ -3070,7 +3305,7 @@ class AdvancedOptimiser(QWidget):
         self._on_ui_change()
 
     def _on_opt_spot_changed(self, val):
-        self.run_optimization(refresh=False, fixed_spot_um=val)
+        self.run_optimisation(refresh=False, fixed_spot_um=val, preserve_zoom=True)
 
     def _parse_rr_list(self, text):
         try:
@@ -3140,17 +3375,17 @@ class AdvancedOptimiser(QWidget):
 
 
     def load_persistent_settings(self):
-        IoLog.information(f"AdvancedOptimiserPlugin: Loading settings from {self.settings_json_path}")
+        IoLog.information(f"iolite Optimiser: Loading settings from {self.settings_json_path}")
         try:
             if os.path.exists(self.settings_json_path):
                 with open(self.settings_json_path, 'r') as f:
                     s_data = json.load(f)
-                    # IoLog.information("AdvancedOptimiserPlugin: Settings loaded successfully") # Silent
+                    # IoLog.information("iolite Optimiser: Settings loaded successfully") # Silent
                     return s_data
             else:
-                IoLog.information("AdvancedOptimiserPlugin: No settings file found")
+                IoLog.information("iolite Optimiser: No settings file found")
         except Exception as e:
-            IoLog.error(f"AdvancedOptimiserPlugin: Error loading settings: {e}")
+            IoLog.error(f"iolite Optimiser: Error loading settings: {e}")
         return {}
 
     def save_persistent_settings(self):
@@ -3174,7 +3409,7 @@ class AdvancedOptimiser(QWidget):
                 'min_duty': self._get(self.spin_duty, 'value'),
                 'cell_type': self._get(self.cmb_cell, 'currentText'),
                 # 'auto_detect': self._get(self.chk_auto, 'isChecked'), # Not saved
-                # 'normalize': self._get(self.chk_norm, 'isChecked'), # Not saved
+                # 'normalise': self._get(self.chk_norm, 'isChecked'), # Not saved
                 # 'y_zoom': self._get(self.chk_y_zoom, 'isChecked'), # Not saved
                 # Add internal states that are expensive or complex to derive
                 'icp_tech': self.icp_tech,
@@ -3205,72 +3440,95 @@ class AdvancedOptimiser(QWidget):
                 with open(self.settings_json_path, 'w') as f:
                     json.dump(self.persistent_settings, f, indent=4)
                 # Log success only once or rarely to avoid spam, but for now we log it:
-                # IoLog.information(f"AdvancedOptimiserPlugin: Settings saved to {self.settings_json_path}")
+                # IoLog.information(f"iolite Optimiser: Settings saved to {self.settings_json_path}")
         except Exception as e:
-            IoLog.error(f"AdvancedOptimiserPlugin: Error saving settings: {e}")
+            IoLog.error(f"iolite Optimiser: Error saving settings: {e}")
 
-    def _get_adaptive_palette(self, n):
-        """Generates a palette of N colors by cycling Tab10 with variations."""
-        base_colors = plt.cm.tab10.colors
-        generated = []
+    def _get_theme_safe_palette(self, is_opt=False):
+        """
+        Generates a 60-color Mega-Palette (b+c+std) with theme-aware lightness 
+        normalization and a fixed Purple (Tab20 Index 8) start.
         
-        # Define variation phases: (Lightness Mult, Saturation Mult)
-        variations = [
-            (1.0, 1.0),   # 0-9: Standard
-            (0.6, 1.0),   # 10-19: Darker (40% less light)
-            (1.3, 1.0),   # 20-29: Lighter (30% more light)
-            (1.0, 0.6),   # 30-39: Desaturated
-            (0.6, 0.6),   # 40-49: Dark & Desaturated
-            (1.3, 0.6)    # 50-59: Light & Desaturated
-        ]
+        If is_opt is True, it persists the random shuffle order so that 
+        isotope-color assignments remain stable across theme updates.
+        """
+        # Get raw colors from chained palettes
+        mega_raw = []
+        for cmap_name in ['tab20b', 'tab20c', 'tab20']:
+            mega_raw.extend(list(getattr(plt.cm, cmap_name).colors))
+            
+        # Specific Anchor: Purple from Tab20 (Index 8)
+        anchor_rgb = list(plt.cm.tab20.colors)[8]
         
-        for i in range(n):
-            # Which base color?
-            base_idx = i % 10
-            base_c = base_colors[base_idx]
+        # Detect Theme (is it dark?)
+        face_col = plt.rcParams['axes.facecolor']
+        rgb_face = mcolors.to_rgb(face_col)
+        is_dark = (sum(rgb_face)/3.0) < 0.5
+        
+        # Contrast Bounds
+        l_min, l_max = (0.55, 0.85) if is_dark else (0.2, 0.6)
+        
+        def normalise_rgb(c_rgb):
+            h, l, s = colorsys.rgb_to_hls(*c_rgb)
+            l = max(l_min, min(l_max, l))
+            if is_dark: s = max(0.4, min(1.0, s * 1.1))
+            c_new = colorsys.hls_to_rgb(h, l, s)
+            return mcolors.to_hex(c_new).lower()
+
+        # Generate normalised anchor
+        anchor_hex = normalise_rgb(anchor_rgb)
+        
+        # For the pool, we want stability if is_opt
+        # We store the indices of colors in mega_raw (excluding the anchor)
+        anchor_idx = 48 # tab20[8] in the [b, c, std] chain
+        
+        if is_opt and self._opt_palette_indices is not None:
+            # Reuse stored shuffle
+            indices = self._opt_palette_indices
+        else:
+            # Create new shuffle
+            indices = [i for i in range(len(mega_raw)) if i != anchor_idx]
+            random.shuffle(indices)
+            if is_opt:
+                self._opt_palette_indices = indices
+                
+        # Generate final palette
+        pool = [normalise_rgb(mega_raw[i]) for i in indices]
+        
+        # Ensure anchor is unique (unlikely but safe)
+        if anchor_hex in pool:
+            pool.remove(anchor_hex)
             
-            # Which variation phase?
-            phase_idx = (i // 10) % len(variations)
-            l_mult, s_mult = variations[phase_idx]
-            
-            try:
-                # Convert to RGB -> HLS
-                rgb = mcolors.to_rgb(base_c)
-                h, l, s = colorsys.rgb_to_hls(*rgb)
-                
-                # Apply multipliers with clamping
-                new_l = max(0.2, min(0.9, l * l_mult))
-                new_s = max(0.1, min(1.0, s * s_mult))
-                
-                new_rgb = colorsys.hls_to_rgb(h, new_l, new_s)
-                generated.append(new_rgb)
-            except:
-                generated.append(base_c)
-                
-        return generated
+        return [anchor_hex] + pool
+
+
 
     def refresh_data(self, tab=None):
         # Do NOT force tab index if None. None means "Refresh All".
-        self.channel_dwells = {}
-            
+
         try:
-            new_df = self.get_input_dataframe()
+            new_df, new_meta = self.get_input_dataframe()
             if new_df is not None:
-                IoLog.information(f"AdvancedOptimiserPlugin: Initial data loaded ({len(new_df)} rows)")
+                IoLog.information(f"iolite Optimiser: Initial data loaded ({len(new_df)} rows)")
                 # Log channel count here for correct order
                 cols = [c for c in new_df.columns if c != 'Time']
-                IoLog.information(f"AdvancedOptimiserPlugin: Found {len(cols)} channels")
+                IoLog.information(f"iolite Optimiser: Found {len(cols)} channels")
             
             # --- GLOBAL PRE-PROCESSING ---
+            local_resolved_dwells = {}
             if new_df is not None:
-                # Resolve Dwell Times & Units Globally (Needed for both tabs)
+                # Resolve Dwell Times & Units Globally (Need a snapshot for later assignment)
                 cols_all = [c for c in new_df.columns if c != 'Time']
                 if cols_all:
-                    self.resolve_dwell_times(cols_all)
+                    local_resolved_dwells = self.resolve_dwell_times(cols_all)
             
             # --- SPR TAB DATA ---
             if tab == "spr" or tab is None:
                 self.spr_df = new_df
+                if new_df is not None:
+                    self.spr_metadata = new_meta # Store specifically for SPR
+                    self.spr_dwells = local_resolved_dwells.copy() # Store specifically for SPR
+                    
                 if self.spr_df is not None and 'Time' in self.spr_df.columns and len(self.spr_df['Time']) > 0:
                      cols = [c for c in self.spr_df.columns if c != 'Time']
                      if hasattr(self, 'cmb_spr_iso'):
@@ -3284,6 +3542,13 @@ class AdvancedOptimiser(QWidget):
             # --- OPTIMISER TAB DATA ---
             if tab == "opt" or tab is None:
                 self.opt_df = new_df
+                if new_df is not None:
+                    self.opt_metadata = new_meta # Store specifically for Optimiser
+                    self.channel_metadata = self.opt_metadata # Backwards compat alias
+                    
+                    self.opt_dwells = local_resolved_dwells.copy() # Store specifically for Optimiser
+                    self.channel_dwells = self.opt_dwells # Backwards compat alias for calc functions
+
                 if self.opt_df is not None:
                      if 'Time' in self.opt_df.columns and len(self.opt_df['Time']) > 0:
                          self.t_start = float(self.opt_df['Time'].iloc[0])
@@ -3299,7 +3564,7 @@ class AdvancedOptimiser(QWidget):
                          self.detected_at_ms = self.opt_df['Time'].diff().median() * 1000.0
     
                          # Resolve Dwells & Calculate Overhead
-                         # self.channel_dwells already populated in Global block
+                         # Dwells already populated in local block and assigned to self.opt_dwells
                          if len(self.opt_df.columns) > 1:
                              self.lbl_result.setText(f"Loaded {len(self.opt_df.columns)-1} channels from iolite.")
                              # Unit/Dwell resolution moved global
@@ -3316,13 +3581,15 @@ class AdvancedOptimiser(QWidget):
                      else:
                          self.update_plot()
                          # Trigger real-time optimization when data refreshed with manual regions
-                         self.run_optimization(refresh=False)
+                         self.run_optimisation(refresh=False)
         except Exception as e:
             msg = f"Refresh Error: {e}"
             print(msg)
-            IoLog.error(f"AdvancedOptimiserPlugin: {msg}")
+            IoLog.error(f"iolite Optimiser: {msg}")
 
     def resolve_dwell_times(self, channel_names):
+        local_dwells = {} # Local dict instead of shared self.channel_dwells
+        
         try:
             # 1. Build map of existing properties
             ts_map = {ts.name: ts for ts in data.timeSeriesList(data.Input)}
@@ -3337,7 +3604,7 @@ class AdvancedOptimiser(QWidget):
                         ts = ts_map[name]
                         prop = ts.property("Dwell Time (ms)")
                         if prop and float(prop) > 0:
-                            self.channel_dwells[name] = float(prop)
+                            local_dwells[name] = float(prop)
                             found = True
                         
                         # Detect Units
@@ -3358,7 +3625,7 @@ class AdvancedOptimiser(QWidget):
             # Log Unit Detection Summary
             n_cps = sum(1 for v in self.channel_is_cps.values() if v)
             n_counts = len(self.channel_is_cps) - n_cps
-            IoLog.information(f"AdvancedOptimiserPlugin: Unit Detection - {n_cps} channels detected as CPS, {n_counts} as Counts")
+            IoLog.information(f"iolite Optimiser: Unit Detection - {n_cps} channels detected as CPS, {n_counts} as Counts")
             
             # Update Cached Unit Label
             self.cached_unit_label = "CPS" if n_cps > 0 else "Counts"
@@ -3369,7 +3636,7 @@ class AdvancedOptimiser(QWidget):
                 dlg = DwellDialog(missing, at_val, self)
                 if dlg.exec_():
                     # Merge dialog results
-                    self.channel_dwells.update(dlg.result_dwells)
+                    local_dwells.update(dlg.result_dwells)
                     
                     # SAVE BACK TO IOLITE PROPERTIES via setter logic
                     # We need to find the original C++ TimeSeriesData objects
@@ -3377,18 +3644,20 @@ class AdvancedOptimiser(QWidget):
                         for name, val in dlg.result_dwells.items():
                             if name in ts_map:
                                 ts_map[name].setProperty("Dwell Time (ms)", float(val))
-                                IoLog.information(f"AdvancedOptimiserPlugin: Saved dwell {val}ms to channel '{name}'")
+                                IoLog.information(f"iolite Optimiser: Saved dwell {val}ms to channel '{name}'")
                     except Exception as e:
-                        IoLog.warning(f"AdvancedOptimiserPlugin: Could not save property: {e}")
+                        IoLog.warning(f"iolite Optimiser: Could not save property: {e}")
                 else:
                     # Cancelled? Do NOT default. Let optimization fail.
-                    IoLog.warning("AdvancedOptimiserPlugin: Dwell configuration cancelled.")
-                    # for m in missing: self.channel_dwells[m] = 10.0
+                    IoLog.warning("iolite Optimiser: Dwell configuration cancelled.")
+                    # for m in missing: local_dwells[m] = 10.0
             
-            IoLog.information(f"AdvancedOptimiserPlugin: Resolved dwells for {len(self.channel_dwells)} channels")
+            IoLog.information(f"iolite Optimiser: Resolved dwells for {len(local_dwells)} channels")
+            return local_dwells
 
         except Exception as e:
-            IoLog.error(f"AdvancedOptimiserPlugin: Error resolving dwell times: {e}")
+            IoLog.error(f"iolite Optimiser: Error resolving dwell times: {e}")
+            return {}
 
     # --- PLOT INTERACTION ---
     def rescale_to_visible(self, rescale_x=False, rescale_y=False, ax=None, canvas=None):
@@ -3418,15 +3687,16 @@ class AdvancedOptimiser(QWidget):
             found_visible = False
             
             # Lines (Signal)
-            for line in ax.get_lines():
-                if line.get_visible():
-                    ydata = line.get_ydata()
-                    if ydata is not None and len(ydata) > 0:
-                        y_valid = ydata[~np.isnan(ydata)]
-                        if len(y_valid) > 0:
-                            ymin = min(ymin, np.min(y_valid))
-                            ymax = max(ymax, np.max(y_valid))
-                            found_visible = True
+            if hasattr(ax, 'get_lines'):
+                for line in ax.get_lines():
+                    if line.get_visible():
+                        ydata = line.get_ydata()
+                        if ydata is not None and len(ydata) > 0:
+                            y_valid = ydata[~np.isnan(ydata)]
+                            if len(y_valid) > 0:
+                                ymin = min(ymin, np.min(y_valid))
+                                ymax = max(ymax, np.max(y_valid))
+                                found_visible = True
             
             # If nothing found, check collections (e.g. hlines markers in SPR)
             if not found_visible:
@@ -3480,7 +3750,7 @@ class AdvancedOptimiser(QWidget):
         self.save_persistent_settings()
 
     def on_zoom(self, event):
-        if event.inaxes is None: return
+        if event.inaxes is None or event.inaxes == getattr(self, 'spr_ax_comp', None): return
         ax = event.inaxes
         canvas = event.canvas
         
@@ -3515,7 +3785,7 @@ class AdvancedOptimiser(QWidget):
         canvas.draw()
 
     def on_press(self, event):
-        if event.inaxes is None: return
+        if event.inaxes is None or event.inaxes == getattr(self, 'spr_ax_comp', None): return
         if event.dblclick:
             # RESET VIEW (X and Y)
             self.rescale_to_visible(rescale_x=True, rescale_y=True, ax=event.inaxes, canvas=event.canvas)
@@ -3527,7 +3797,9 @@ class AdvancedOptimiser(QWidget):
             self.press_y = event.ydata
 
     def on_drag(self, event):
+        if event.inaxes is None: return
         if self.plot_panning and event.inaxes and self.press_x is not None:
+             if event.inaxes == getattr(self, 'spr_ax_comp', None): return
              ax = event.inaxes
              canvas = event.canvas
              
@@ -3557,12 +3829,18 @@ class AdvancedOptimiser(QWidget):
         try:
             artist = event.artist
             mouse = event.mouseevent
+            # IGNORE SCROLL WHEEL EVENTS (Zooming should take precedence)
+            if mouse.button in ('up', 'down'):
+                return
+            
             canvas = mouse.canvas
             if canvas is None: return
 
             # 1. Identify context (Main or SPR)
             is_spr = (hasattr(self, 'spr_canvas') and canvas == self.spr_canvas)
-            fig = self.spr_figure if is_spr else self.figure
+            fig = getattr(self, 'spr_figure', None) if is_spr else getattr(self, 'figure', None)
+            if fig is None or not fig.axes: return
+            
             ax = fig.axes[0]
             l_frame = getattr(self, 'spr_legend_frame', None) if is_spr else getattr(self, 'legend_frame', None)
             l_map = getattr(self, 'spr_map_legend_to_line', {}) if is_spr else getattr(self, 'map_legend_to_line', {})
@@ -3672,6 +3950,7 @@ class AdvancedOptimiser(QWidget):
             # Repaint and rescale
             if l_chk_rescale and self._get(l_chk_rescale, 'isChecked'):
                 self.rescale_to_visible(ax=ax, canvas=canvas)
+            
             canvas.draw()
             canvas.flush_events()
             if hasattr(canvas, 'repaint'):
@@ -3680,7 +3959,7 @@ class AdvancedOptimiser(QWidget):
         except Exception as e:
             IoLog.error(f"Pick Error: {e}")
 
-    def update_plot(self, df=None):
+    def update_plot(self, df=None, preserve_zoom=False):
         try:
             target_df = df if df is not None else self.opt_df
             if target_df is None: return
@@ -3690,6 +3969,15 @@ class AdvancedOptimiser(QWidget):
                 ax = self.figure.add_subplot(111)
             else:
                 ax = self.figure.axes[0]
+                
+                # STORE LIMITS FOR STABILITY
+                # Only if explicitly requested (e.g. from apply_theme or param tweak)
+                if preserve_zoom:
+                    self._opt_axis_limits = (ax.get_xlim(), ax.get_ylim())
+                else:
+                    # FRESH DATA LOAD or USER RECALC -> Reset limits memory
+                    self._opt_axis_limits = None
+                
                 ax.clear()
             
             # Plot Logic
@@ -3699,12 +3987,10 @@ class AdvancedOptimiser(QWidget):
             numeric_cols = [c for c in numeric_cols if c != 'Time']
             
             if len(numeric_cols) > 0:
-                # --- ADAPTIVE COLOR PALETTE ---
-                # Check how many colors we need
-                n_colors = len(numeric_cols)
-                if n_colors > 0:
-                    custom_palette = self._get_adaptive_palette(n_colors)
-                    ax.set_prop_cycle(cycler(color=custom_palette))
+                # --- THEME-SAFE RANDOMIZED MEGA-PALETTE ---
+                # PERSISTENT for Optimisation Tab
+                safe_palette = self._get_theme_safe_palette(is_opt=True)
+                ax.set_prop_cycle(cycler(color=safe_palette))
 
                 # Time Zeroing
                 t_orig = target_df['Time'].values
@@ -3718,11 +4004,11 @@ class AdvancedOptimiser(QWidget):
                         sb.setRange(0, t_max)
                 
                 # Normalization
-                normalize = self._get(self.chk_norm, 'isChecked')
+                normalise = self._get(self.chk_norm, 'isChecked')
                 
                 plot_df = target_df.copy()
                 
-                if normalize:
+                if normalise:
                     for c in numeric_cols:
                         mn, mx = plot_df[c].min(), plot_df[c].max()
                         if mx > mn: plot_df[c] = (plot_df[c]-mn)/(mx-mn)
@@ -3737,23 +4023,71 @@ class AdvancedOptimiser(QWidget):
                 # Constrained Layout handles resizing automatically
                 
                 
-                leg = ax.legend(loc='lower center', bbox_to_anchor=(0.5, 1.01), 
-                                ncol=min(10, len(lines)), frameon=True, fontsize='medium', handlelength=2.0)
+                # Custom Legend Sorting (Row-First filling simulation)
+                n_items = len(lines)
+                if n_items > 0:
+                    ncols = min(10, n_items)
+                    nrows = math.ceil(n_items / ncols)
+                    
+                    grid_size = nrows * ncols
+                    ordered_handles = [None] * grid_size
+                    ordered_labels = [None] * grid_size
+                    
+                    for i, (h, lbl) in enumerate(zip(lines, numeric_cols)):
+                        # Visual r, c (Row Major)
+                        r = i // ncols
+                        c = i % ncols
+                        
+                        # MPL linear index for Col Major (c * nrows + r)
+                        mpl_idx = c * nrows + r
+                        
+                        if mpl_idx < grid_size:
+                            ordered_handles[mpl_idx] = h
+                            ordered_labels[mpl_idx] = lbl
+                            
+                    final_handles = []
+                    final_labels = []
+                    
+                    for h, l in zip(ordered_handles, ordered_labels):
+                        if h is None:
+                            # Invisible proxy for gap (use simple Line2D)
+                            final_handles.append(Line2D([0], [0], visible=False))
+                            final_labels.append("")
+                        else:
+                            final_handles.append(h)
+                            final_labels.append(l)
+
+                    leg = ax.legend(final_handles, final_labels, loc='lower center', bbox_to_anchor=(0.5, 1.01), 
+                                    ncol=ncols, frameon=True, fontsize='medium', handlelength=2.0)
+                else:
+                    leg = ax.legend(loc='lower center', bbox_to_anchor=(0.5, 1.01), 
+                                    ncol=min(10, len(lines)), frameon=True, fontsize='medium', handlelength=2.0)
+
                 leg.get_frame().set_alpha(0.0) # Transparent frame
                 leg.get_frame().set_picker(5)
                 self.legend_frame = leg.get_frame()
                 
                 self.map_legend_to_line = {}
-                for legline, legtext, origline in zip(leg.get_lines(), leg.get_texts(), lines):
-                    legline.set_picker(5)
-                    legtext.set_picker(5)
-                    self.map_legend_to_line[legline] = (origline, True)
-                    self.map_legend_to_line[legtext] = (origline, True)
-                    
-                    # Sync initial visibility
-                    vis = origline.get_visible()
-                    legline.set_alpha(1.0 if vis else 0.2)
-                    legtext.set_alpha(1.0 if vis else 0.2)
+                
+                # Use final_handles to safely map back to original lines (skipping proxies)
+                # Note: leg.get_lines() returns new artists created by legend, corresponding 1:1 with final_handles
+                if n_items > 0:
+                    for legline, legtext, source_h in zip(leg.get_lines(), leg.get_texts(), final_handles):
+                        # Detect proxy by checking if source_h is in our original lines list
+                        if source_h not in lines:
+                            legline.set_visible(False)
+                            legtext.set_visible(False)
+                            continue
+
+                        legline.set_picker(5)
+                        legtext.set_picker(5)
+                        self.map_legend_to_line[legline] = (source_h, True)
+                        self.map_legend_to_line[legtext] = (source_h, True)
+                        
+                        # Sync initial visibility
+                        vis = source_h.get_visible()
+                        legline.set_alpha(1.0 if vis else 0.2)
+                        legtext.set_alpha(1.0 if vis else 0.2)
                 
                 # Shaded regions (Adjusted for Time 0)
                 # Shaded regions (Adjusted for Time 0)
@@ -3779,12 +4113,12 @@ class AdvancedOptimiser(QWidget):
                 unit = getattr(self, 'cached_unit_label', "Counts")
 
                 ax.set_xlabel("Time (s)")
-                ax.set_ylabel("Norm. Intensity" if normalize else f"Intensity ({unit})")
+                ax.set_ylabel("Norm. Intensity" if normalise else f"Intensity ({unit})")
                 ax.xaxis.set_major_locator(MaxNLocator(nbins=10, prune='both'))
                 ax.ticklabel_format(useOffset=False, axis='x')
 
-                # Apply SI Formatting to Y-Axis (if not normalized)
-                if not normalize:
+                # Apply SI Formatting to Y-Axis (if not normalised)
+                if not normalise:
                     # EngFormatter with places=0 (no decimals) and sep=" " (space before unit)
                     ax.yaxis.set_major_formatter(EngFormatter(places=0, sep=" "))
                 
@@ -3814,10 +4148,24 @@ class AdvancedOptimiser(QWidget):
 
                 # Use unified rescaling logic if enabled to ensure consistent 10% margins from first draw
                 chk_rescale = getattr(self, 'chk_rescale', None)
-                if chk_rescale and self._get(chk_rescale, 'isChecked'):
-                    self.rescale_to_visible(ax=ax, canvas=self.canvas)
+                
+                # --- APPLY THEME-STABLE SCALING ---
+                if preserve_zoom and self._opt_axis_limits:
+                    ax.set_xlim(self._opt_axis_limits[0])
+                    ax.set_ylim(self._opt_axis_limits[1])
+                    self._opt_axis_limits = None # Done
                 else:
-                    self.canvas.draw()
+                    # FRESH LOAD, RECALC, or USER INTERACTION -> Rescale EVERYTHING (X and Y)
+                    self._opt_axis_limits = None
+                    
+                    # Explicitly set X limits to ensure we don't stay in (0,1) default
+                    if len(t_zeroed) > 0:
+                        ax.set_xlim(0, np.nanmax(t_zeroed))
+                    
+                    # Use robust Y-rescaling
+                    self.rescale_to_visible(rescale_x=True, rescale_y=True, ax=ax, canvas=self.canvas)
+                
+                self.canvas.draw()
                 
                 self.canvas.repaint() # Force Qt repaint
                 
@@ -3832,14 +4180,14 @@ class AdvancedOptimiser(QWidget):
     def get_input_dataframe(self):
         try:
             channels = data.timeSeriesList(data.Input)
-            # IoLog.information(f"AdvancedOptimiserPlugin: Found {len(channels) if channels else 0} channels") # Silent/Moved
+            # IoLog.information(f"iolite Optimiser: Found {len(channels) if channels else 0} channels") # Silent/Moved
             if not channels: return None
             
             ref_ch = channels[0]
             time_data = ref_ch.time()
             data_dict = {'Time': time_data}
             
-            self.channel_metadata = {}
+            local_metadata = {}
             has_el = False
             has_mass = False
             
@@ -3849,7 +4197,7 @@ class AdvancedOptimiser(QWidget):
                 # Extract Metadata
                 el = ch.property('Element')
                 ma = ch.property('Mass')
-                self.channel_metadata[ch.name] = {'Element': el, 'Mass': ma}
+                local_metadata[ch.name] = {'Element': el, 'Mass': ma}
                 if el: has_el = True
                 if ma: has_mass = True
                 
@@ -3857,9 +4205,9 @@ class AdvancedOptimiser(QWidget):
                     data_dict[ch.name] = ch.data()
             
             self.show_meta = {'Element': has_el, 'Mass': has_mass}
-            return pd.DataFrame(data_dict)
+            return pd.DataFrame(data_dict), local_metadata
         except:
-            return None
+            return None, {}
 
 
     def on_auto_toggled(self, checked):
@@ -3886,9 +4234,9 @@ class AdvancedOptimiser(QWidget):
             
             status = f"Manual: BG {rel_bg_s:.1f}-{rel_bg_e:.1f}s, SIG {rel_sig_s:.1f}-{rel_sig_e:.1f}s"
             self.lbl_result.setText(status)
-            self.update_plot()
+            self.update_plot(preserve_zoom=True)
             # Trigger recalc dynamically without saving settings to disk
-            self.run_optimization(refresh=False)
+            self.run_optimisation(refresh=False, preserve_zoom=True)
         except Exception as e:
             self.lbl_result.setText(f"Edit Error: {e}")
 
@@ -3932,20 +4280,24 @@ class AdvancedOptimiser(QWidget):
             
             self.update_plot()
             # Trigger real-time optimization after regions detected
-            self.run_optimization(refresh=False)
+            self.run_optimisation(refresh=False)
             
         except Exception as e:
             self.lbl_result.setText(f"Detection error: {e}")
  
-    def run_optimization(self, refresh=False, silent=False, fixed_spot_um=None):
+    def run_optimisation(self, refresh=False, silent=False, fixed_spot_um=None, preserve_zoom=False):
         if fixed_spot_um == 0:
             fixed_spot_um = None
             
         if refresh:
-            IoLog.information("AdvancedOptimiserPlugin: Refreshing data...")
+            # Force reset zoom on fresh data load
+            preserve_zoom = False
+            
+        if refresh:
+            IoLog.information("iolite Optimiser: Refreshing data...")
             self.lbl_result.setText("Refreshing Data...")
             self.refresh_data(tab="opt")
-            IoLog.information(f"AdvancedOptimiserPlugin: Data refreshed. Data frame is {'None' if self.opt_df is None else 'Valid'}")
+            IoLog.information(f"iolite Optimiser: Data refreshed. Data frame is {'None' if self.opt_df is None else 'Valid'}")
 
         # Cache theme for the entire run to ensure consistency
         # Uses cached value from showEvent/apply_theme instead of re-detecting
@@ -3966,7 +4318,7 @@ class AdvancedOptimiser(QWidget):
              self.lbl_opt_at.setText("- ms")
              self.lbl_opt_pulses.setText("- Pulses")
              if not silent:
-                 IoLog.information("AdvancedOptimiserPlugin: UI Cleared (No Data)")
+                 IoLog.information("iolite Optimiser: UI Cleared (No Data)")
              QApplication.processEvents()
              return
 
@@ -3975,7 +4327,7 @@ class AdvancedOptimiser(QWidget):
             self.lbl_result.setText("Please select Background and Signal regions.")
             return
 
-        self.lbl_result.setText("Optimizing...")
+        self.lbl_result.setText("Optimising...")
         try:
             # ... (spec fetching logic)
             mfr = self._get(self.cmb_mfr, 'currentText')
@@ -4023,11 +4375,14 @@ class AdvancedOptimiser(QWidget):
             isotope_data = []
             
             missing_dwell_channels = []
+        
+            # Ensure dwell source exists
+            dwells_source = getattr(self, 'opt_dwells', getattr(self, 'channel_dwells', {}))
             
             # 1. Pre-Check for Dwell Metadata
             for col in self.opt_df.columns:
                 if col == 'Time': continue
-                if col not in self.channel_dwells:
+                if col not in dwells_source:
                      missing_dwell_channels.append(col)
                      
             if missing_dwell_channels:
@@ -4036,15 +4391,15 @@ class AdvancedOptimiser(QWidget):
                  IoLog.warning(msg)
                  self.lbl_result.setText(msg)
                  return
-
+    
             # 2. Process Data (All dwells guaranteed to exist)
             for col in self.opt_df.columns:
                 if col == 'Time': continue
 
-                
+            
+            # Fetch Resolved Dwell
                 # Fetch Resolved Dwell
-                # Fetch Resolved Dwell
-                ref_dt_ms = self.channel_dwells.get(col, 10.0)
+                ref_dt_ms = dwells_source[col]
                 ref_dt_s = ref_dt_ms / 1000.0
                 
                 m_sig = df_sig[col].mean()
@@ -4097,7 +4452,7 @@ class AdvancedOptimiser(QWidget):
                 })
 
             # --- HARMONIC SCALING PRE-OPTIMIZATION ---
-            is_mc_sys = TYPE_TO_TECH_MAP.get(self.icp_tech) == "MC"
+            is_mc_sys = TYPE_TO_TECH_MAP.get(self.icp_tech) == "Multi-Collector"
             min_dwell_total = 0.0
             if isotope_data:
                 if is_mc_sys:
@@ -4179,7 +4534,7 @@ class AdvancedOptimiser(QWidget):
             # the ACTUAL selected dwell time (e.g. 131ms) from the optimization results.
             # Otherwise, calculate_laser_sync uses the initial minimum (66ms) and reports the wrong budget.
             if df_res is not None:
-                is_mc = (self.icp_tech == "MC")
+                is_mc = (self.icp_tech == "Multi-Collector")
                 if is_mc:
                      max_opt_dwell = max([r.get('Final Dwell (ms)', 0) for r in df_res], default=0)
                      if max_opt_dwell > 0:
@@ -4205,15 +4560,23 @@ class AdvancedOptimiser(QWidget):
             if df_res is not None:
                 min_snr_isos = [row['Isotope'] for row in df_res if row.get('Constraint') == "Min SNR"]
                 min_icp_isos = [row['Isotope'] for row in df_res if row.get('Constraint') == "Min ICP"]
+                zero_bg_isos = [row['Isotope'] for row in df_res if row.get('IsZeroBG') is True]
                 
                 target_sigma = c.get('lower_sigma_limit', 0)
                 snr_thresh = c.get('snr_threshold', 0)
                 min_dwell_ms = c.get('min_dwell_ms', 0)
                 
                 if min_snr_isos:
-                    final_notes.append(("The following channels could not reach the minimum SNR target and have been set to the minimum dwell time:", ", ".join(min_snr_isos), "orange"))
+                    is_mc_or_tof = (self.icp_tech in ["Multi-Collector", "TOF"])
+                    if is_mc_or_tof:
+                        final_notes.append(("The following channels do not meet the minimum SNR target:", ", ".join(min_snr_isos), "orange"))
+                    else:
+                        final_notes.append(("The following channels could not reach the minimum SNR target and have been set to the minimum dwell time:", ", ".join(min_snr_isos), "orange"))
                 if min_icp_isos:
                     final_notes.append((f"The following channels cannot be set lower than the hardware minimum&nbsp;({min_dwell_ms}&nbsp;ms):", ", ".join(min_icp_isos), "blue"))
+                
+                if zero_bg_isos:
+                    final_notes.append(("The following channels had zero counts in the background. The background has been assumed to be 1 count over the baseline duration:", ", ".join(zero_bg_isos), "gray"))
             
 
             
@@ -4224,16 +4587,16 @@ class AdvancedOptimiser(QWidget):
                     if isinstance(note, tuple):
                         if len(note) == 3 and note[1] is None:
                              # Legacy support or custom tuple without detail
-                             msg, _, color_key = note
-                             c_hex = "#FFFFFF" if color_key == "white" else "#FF6D00"
+                             msg, _, colour_key = note
+                             c_hex = "#FFFFFF" if colour_key == "white" else "#FF6D00"
                              summary += f"<div style='margin-left: 15px; text-indent: -15px;'><span style='color: {c_hex}'>•</span> {msg}</div>"
                         else:
-                            hdr, det, color_key = note
-                            if color_key == "blue": marker_color = "#3399FF"
-                            elif color_key == "red": marker_color = "#FF0000"
-                            else: marker_color = "#FF6D00" # Default/Orange
-                            summary += f"<div style='margin-left: 15px; text-indent: -15px;'><span style='color: {marker_color}'>•</span> {hdr}</div>"
-                            summary += f"<div style='margin-left: 30px; text-indent: -15px;'><span style='color: {marker_color}'>•</span> <b>{det}</b></div>"
+                            hdr, det, colour_key = note
+                            if colour_key == "blue": marker_colour = "#3399FF"
+                            elif colour_key == "red": marker_colour = "#FF0000"
+                            else: marker_colour = "#FF6D00" # Default/Orange
+                            summary += f"<div style='margin-left: 15px; text-indent: -15px;'><span style='color: {marker_colour}'>•</span> {hdr}</div>"
+                            summary += f"<div style='margin-left: 30px; text-indent: -15px;'><span style='color: {marker_colour}'>•</span> <b>{det}</b></div>"
                     else:
                         summary += f"<div style='margin-left: 15px; text-indent: -15px;'>• {note}</div>"
             
@@ -4289,7 +4652,7 @@ class AdvancedOptimiser(QWidget):
             sum_opt_dwells = 0.0
             if df_res is not None:
                 dwells = [r['Final Dwell (ms)'] for r in df_res]
-                is_mc_or_tof = (self.icp_tech in ["MC", "TOF"])
+                is_mc_or_tof = (self.icp_tech in ["Multi-Collector", "TOF"])
                 
                 if is_mc_or_tof:
                     # Simultaneous: Duty = Max Dwell / AT
@@ -4375,42 +4738,77 @@ class AdvancedOptimiser(QWidget):
             init_dwell_map = {d['name']: d['dwell'] for d in isotope_data}
 
             self.table.blockSignals(True) # Prevent infinite loops
-            self.table.setRowCount(0)
-            self.table.setRowCount(len(df_res))
             
-
+            # Smart Update: Only rebuild structure if row count changes
+            # This prevents flickering of ComboBoxes
+            rows_needed = len(df_res)
+            # Handle rowCount as property (int) or method depending on binding
+            rc = self.table.rowCount
+            rows_current = rc() if callable(rc) else rc
+            
+            if rows_needed != rows_current:
+                self.table.setRowCount(0)
+                self.table.setRowCount(rows_needed)
+                rebuild_widgets = True
+            else:
+                rebuild_widgets = False
             
             for i, row in enumerate(df_res):
                 iso_name = str(row['Isotope'])
                 val_final = row['Final Dwell (ms)'] / scaler
                 
                 # Channel Name
-                item_ch = QTableWidgetItem(iso_name)
-                item_ch.setTextAlignment(Qt.AlignCenter)
-                self.table.setItem(i, self.col_map['Channel'], item_ch)
+                item_ch = self.table.item(i, self.col_map['Channel'])
+                if not item_ch:
+                    item_ch = QTableWidgetItem(iso_name)
+                    item_ch.setTextAlignment(Qt.AlignCenter)
+                    self.table.setItem(i, self.col_map['Channel'], item_ch)
+                else:
+                    item_ch.setText(iso_name)
                 
                 # Metadata (if visible)
-                if self.show_meta.get('Element'):
-                    el = self.channel_metadata.get(iso_name, {}).get('Element', '')
-                    item_el = QTableWidgetItem(str(el) if el else "")
-                    item_el.setTextAlignment(Qt.AlignCenter)
-                    self.table.setItem(i, self.col_map['Element'], item_el)
-                if self.show_meta.get('Mass'):
-                    ma = self.channel_metadata.get(iso_name, {}).get('Mass', '')
-                    item_ma = QTableWidgetItem(str(ma) if ma else "")
-                    item_ma.setTextAlignment(Qt.AlignCenter)
-                    self.table.setItem(i, self.col_map['Mass'], item_ma)
+                # Ensure metadata dict exists
+                meta_source = getattr(self, 'opt_metadata', {})
                 
-                # Mode (Dropdown)
-                combo = QComboBox()
-                # Center text in combo if possible
-                # Note: Some versions of Qt require different approaches, but standard items are always centered now
-                combo.addItems(["Auto", "Set to Min", "Exclude", "Custom"])
+                if self.show_meta.get('Element'):
+                    el = meta_source.get(iso_name, {}).get('Element', '')
+                    item_el = self.table.item(i, self.col_map['Element'])
+                    if not item_el:
+                        item_el = QTableWidgetItem(str(el) if el else "")
+                        item_el.setTextAlignment(Qt.AlignCenter)
+                        self.table.setItem(i, self.col_map['Element'], item_el)
+                    else:
+                        item_el.setText(str(el) if el else "")
+
+                if self.show_meta.get('Mass'):
+                    ma = meta_source.get(iso_name, {}).get('Mass', '')
+                    item_ma = self.table.item(i, self.col_map['Mass'])
+                    if not item_ma:
+                        item_ma = QTableWidgetItem(str(ma) if ma else "")
+                        item_ma.setTextAlignment(Qt.AlignCenter)
+                        self.table.setItem(i, self.col_map['Mass'], item_ma)
+                    else:
+                        item_ma.setText(str(ma) if ma else "")
+                
+                # Mode (Dropdown) - Reuse existing if possible
                 current_status = self.isotope_configs.get(iso_name, {}).get("status", "Auto")
-                combo.setCurrentText(current_status)
-                combo.setProperty("iso_name", str(iso_name))
-                combo.activated.connect(lambda idx, n=iso_name, c=combo: self._on_mode_changed(n, c.itemText(idx)))
-                self.table.setCellWidget(i, self.col_map['Mode'], combo)
+                
+                combo = self.table.cellWidget(i, self.col_map['Mode'])
+                if not combo or rebuild_widgets:
+                    combo = QComboBox()
+                    # Centre text in combo if possible
+                    # Note: Some versions of Qt require different approaches, but standard items are always centered now
+                    combo.addItems(["Auto", "Set to Min", "Exclude", "Custom"])
+                    combo.setCurrentText(current_status)
+                    combo.setProperty("iso_name", str(iso_name))
+                    combo.activated.connect(lambda idx, n=iso_name, c=combo: self._on_mode_changed(n, c.itemText(idx)))
+                    self.table.setCellWidget(i, self.col_map['Mode'], combo)
+                else:
+                    # Update existing combo without recreating
+                    if self._get(combo, 'currentText') != current_status:
+                        combo.blockSignals(True)
+                        combo.setCurrentText(current_status)
+                        combo.blockSignals(False)
                 
                 # Optimised Dwell (Editable if Custom)
                 item_final = QTableWidgetItem(f"{val_final:.{disp_dps}f}")
@@ -4452,7 +4850,15 @@ class AdvancedOptimiser(QWidget):
                 self.table.setItem(i, self.col_map['Initial SNR'], item_snr)
                 
                 # Resultant SNR
-                item_sigma = QTableWidgetItem(f"{row['Sigma Sep']:.1f}")
+                val_sigma = row['Sigma Sep']
+                if constraint == "Min SNR":
+                    txt_sigma = "Below Minimum SNR"
+                elif val_sigma < 0:
+                    txt_sigma = "Undetectable"
+                else:
+                    txt_sigma = f"{val_sigma:.1f}"
+                
+                item_sigma = QTableWidgetItem(txt_sigma)
                 item_sigma.setTextAlignment(Qt.AlignCenter)
                 item_sigma.setFlags(item_sigma.flags() & ~Qt.ItemIsEditable)
                 self.table.setItem(i, self.col_map['Resultant SNR'], item_sigma)
@@ -4463,6 +4869,9 @@ class AdvancedOptimiser(QWidget):
             try: self.table.itemChanged.disconnect(self._on_dwell_changed)
             except: pass
             self.table.itemChanged.connect(self._on_dwell_changed)
+            
+            # TRIGGER PLOT UPDATE (Reflecting changes in scaling/labels)
+            self.update_plot(preserve_zoom=preserve_zoom)
                 
         except Exception as e:
             msg = f"Optimisation Error: {str(e)}"
@@ -4471,7 +4880,7 @@ class AdvancedOptimiser(QWidget):
             self.lbl_result.setText(msg)
 
     def _on_mode_changed(self, iso_name, text):
-        IoLog.information(f"AdvancedOptimiserPlugin: Mode Changed: {iso_name} -> {text}")
+        IoLog.information(f"iolite Optimiser: Mode Changed: {iso_name} -> {text}")
         
         if iso_name in self.isotope_configs:
             # If switching to Custom, try to seed with the current result from the table
@@ -4498,7 +4907,7 @@ class AdvancedOptimiser(QWidget):
 
             self.isotope_configs[iso_name]["status"] = text
             # Trigger real-time optimization
-            self.run_optimization(refresh=False)
+            self.run_optimisation(refresh=False, preserve_zoom=True)
 
     def _on_dwell_changed(self, item):
         column = item.column()
@@ -4527,16 +4936,16 @@ class AdvancedOptimiser(QWidget):
             
             unit, scaler, _ = self._get_dwell_unit_info()
             
-            IoLog.information(f"AdvancedOptimiserPlugin: Custom Dwell Adjusted (Text): {iso_name} -> {new_val} {unit}")
+            IoLog.information(f"iolite Optimiser: Custom Dwell Adjusted (Text): {iso_name} -> {new_val} {unit}")
             
             # Convert UI value to seconds (internal storage unit)
             self.isotope_configs[iso_name]["custom_time_s"] = (new_val * scaler) / 1000.0
                 
             # Trigger real-time optimization
-            self.run_optimization(refresh=False)
+            self.run_optimisation(refresh=False, preserve_zoom=True)
         except ValueError:
             # Re-run to reset the cell to its previously calculated valid value
-            self.run_optimization(refresh=False)
+            self.run_optimisation(refresh=False, preserve_zoom=True)
         except Exception as e:
             IoLog.error(f"Dwell Edit Error: {e}")
 
@@ -4551,7 +4960,7 @@ widget = None
 
 def create_widget():
     global widget
-    IoLog.information("AdvancedOptimiserPlugin: create_widget called")
+    IoLog.information("iolite Optimiser: create_widget called")
     
     try:
         if widget is not None:
@@ -4571,25 +4980,25 @@ def create_widget():
                 except Exception as e:
                     IoLog.warning(f"Failed to refresh theme on show: {e}")
                     
-                IoLog.information("AdvancedOptimiserPlugin: Existing widget shown")
+                IoLog.information("iolite Optimiser: Existing widget shown")
                 return
             except RuntimeError:
                 # Object has been deleted (C++ side), but Python wrapper remains
-                IoLog.information("AdvancedOptimiserPlugin: Dead C++ object detected")
+                IoLog.information("iolite Optimiser: Dead C++ object detected")
                 widget = None
     except Exception as e:
-        IoLog.error(f"AdvancedOptimiserPlugin: Error checking widget state: {e}")
+        IoLog.error(f"iolite Optimiser: Error checking widget state: {e}")
         widget = None
 
     # Zombie cleanup removed by user request
 
     # Use 'None' as the parent for the widget per official examples
-    IoLog.information("AdvancedOptimiserPlugin: Creating new widget (Parent: None)")
+    IoLog.information("iolite Optimiser: Creating new widget (Parent: None)")
     
     try:
-        widget = AdvancedOptimiser()
+        widget = ioliteOptimiser()
         # widget.setAttribute(Qt.WA_DeleteOnClose) # Keep widget alive to prevent PythonQt crashes
-        widget.setWindowTitle("Advanced Spot Optimiser")
+        widget.setWindowTitle("iolite Optimiser")
         
         # Connect destroyed signal to cleanup global reference
         # widget.destroyed.connect(cleanup_widget)
@@ -4614,15 +5023,15 @@ def create_widget():
         widget.show()
         widget.raise_()
         widget.activateWindow()
-        IoLog.information("AdvancedOptimiserPlugin: Widget initialized and shown")
+        IoLog.information("iolite Optimiser: Widget initialized and shown")
     except Exception as e:
-        IoLog.error(f"AdvancedOptimiserPlugin: Error creating widget: {str(e)}")
+        IoLog.error(f"iolite Optimiser: Error creating widget: {str(e)}")
         IoLog.error(traceback.format_exc())
 
 def createUIElements():
     # 'ui' is a global object provided by iolite for UI plugins
-    IoLog.information("AdvancedOptimiserPlugin: createUIElements called")
-    action = QAction("Advanced Spot Optimiser", None)
+    IoLog.information("iolite Optimiser: createUIElements called")
+    action = QAction("iolite Optimiser", None)
     action.triggered.connect(create_widget)
     ui.setAction(action)
     ui.setMenuName(['Tools'])
