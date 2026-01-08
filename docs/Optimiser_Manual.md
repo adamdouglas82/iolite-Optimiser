@@ -55,10 +55,11 @@ The "Goals" you want the algorithm to achieve.
 - **Pulses per Dwell Time**: The number of laser shots that must occur during a single mass spectrometer integration (dwell) to ensure signal stability.
 - **Target SNR (Sigma)**: The desired Signal-to-Noise ratio for the limiting isotope.
   - **Calculation Method**: The optimiser calculates SNR in the **Counts Domain** (Total Counts per Dwell) to robustly handle low signals:
-        1. **Poisson Variance (Counting Statistics)**: Assumed to be equal to the **Mean Background Counts**.
-        2. **Flicker Variance (Instrument Noise)**: Calculated as the **(Standard Deviation of Background Counts)²**.
-        3. **Total Noise**: `Sqrt(Poisson Variance + Flicker Variance)`.
-        4. **SNR**: `Net Signal Counts / Total Noise`.
+
+    1. **Poisson Variance (Counting Statistics)**: Assumed to be equal to the **Mean Background Counts**.
+    2. **Flicker Variance (Instrument Noise)**: Calculated as the **(Standard Deviation of Background Counts)²**.
+    3. **Total Noise**: `Sqrt(Poisson Variance + Flicker Variance)`.
+    4. **SNR**: `Net Signal Counts / Total Noise`.
   - This approach is conservative, effectively summing the theoretical minimum noise (Poisson) with the observed experimental noise (Flicker/Real) to ensure targets are met even under unstable conditions.
 - **Min Duty Cycle**: Sets a floor for efficiency (Time Measuring / Total Time).
   - If the calculated duty cycle is too low (mostly settling time), the optimiser will increase dwell times to improve the ratio.
@@ -95,10 +96,20 @@ The calculated "Ideal" instrument settings.
   - **Background (Blue)**: Time range for baseline calculation.
   - **Signal (Red)**: Time range for signal intensity calculation.
   - **Auto Select Regions**: Automatically finds the rising/falling edges of the signal.
-- **Controls**:
-  - **Theme**: Toggle Dark/Light mode.
-  - **Normalize**: Scales all traces to 0-1 range for easy comparison.
-  - **Pan/Zoom Y**: Enables vertical zooming interaction.
+
+#### **Plot Controls**
+
+- **Theme**: Toggle Dark/Light mode.
+- **Normalize**: Scales all traces to 0-1 range for easy comparison.
+- **Auto-Rescale Y**:
+  - **Checked (Default/Ephemeral)**: The plot automatically snaps to the full data range. This is reset to ON whenever new data is loaded or the application starts.
+  - **Unchecked**: The plot keeps your current zoom level. Switch this off to "lock" your view while adjusting parameters.
+- **Pan/Zoom Y**: Enables vertical zooming interaction.
+- **Double-Click**: Resets the plot to show the full data range (both X and Y).
+- **Interactive Region Adjustment**:
+  - **Shift + Click & Drag**: Hold the **Shift** key and click near a region edge (Blue or Red line) to drag it to a new location.
+  - **Auto-Swap Validation**: If you drag a region "start" line past its "end" line, the software automatically sorts the values on release. This ensures the start is always less than the end, preventing calculation errors.
+  - **Cursor Feedback**: When holding Shift, the cursor will change to a horizontal resize cursor ↔ when you are within the 1% selection "hitbox" of a region edge.
 
 #### **Optimised Dwell Time Distribution (Table)**
 
@@ -131,7 +142,11 @@ Detailed breakdown per channel.
     - **Set to Global**: Apply a single dwell time (e.g., 10ms) to all channels.
     - **Individual**: Manually enter the dwell time for specific channels if they differ.
 4. Verify the plot shows the signal traces.
-5. **Check Regions**: Ensure the **Background (Blue)** and **Signal (Red)** regions are correctly identifying the baseline and signal plateau. Use "Auto Select Regions" or adjust the spinboxes manually if needed.
+5. **Check Regions**: Ensure the **Background (Blue)** and **Signal (Red)** regions are correctly identifying the baseline and signal plateau.
+    - **Manual Selection**: Hold **Shift** and drag the lines in the plot for the fastest adjustment.
+    - **Precise Selection**: Use the spinboxes in the left panel.
+    - **Auto Select**: Click "Auto Select Regions" for a computer-estimated starting point.
+    - Note: Values are automatically swapped if the selection becomes inverted.
 
 ### Step 3: Define Goals
 
@@ -181,8 +196,9 @@ The Optimiser provides feedback through the status bar and log to explain why ce
 
 ### General Optimization Messages
 
-* **"Optimum Spot Size [X] µm - Based on Minimum SNR of [Isotope]"**
+- **"Optimum Spot Size [X] µm - Based on Minimum SNR of [Isotope]"**
   - Indicates that the Spot Size was calculated specifically to satisfy the SNR target for the weakest isotope listed.
+
 - **"Optimum Spot Size [X] µm - Overridden to [Y] µm"**
   - Appears when you have manually set the Spot Size spinbox to a specific value (Y), overriding the calculated optimum (X).
 - **"Calculated Pulses per Dwell Time: [X] (Error: [Y]%)"**
@@ -190,8 +206,9 @@ The Optimiser provides feedback through the status bar and log to explain why ce
 
 ### Hardware Constraints
 
-* **"Constraint: Acq Time increased for Rep Rate Limit"**
+- **"Constraint: Acq Time increased for Rep Rate Limit"**
   - The Acquisition Time had to be extended because the required Dwell Times + Washout would require a Laser Rep-Rate higher than the laser can physically fire.
+
 - **"Constraint: Acq Time increased for Stage Speed Limit"**
   - The Acquisition Time had to be extended because the stage would need to move faster than the cell's maximum speed to cover the spot size in the calculated time.
 - **"Constraint: Acq Time increased for Duty Cycle ([X]%)"**
@@ -202,6 +219,7 @@ The Optimiser provides feedback through the status bar and log to explain why ce
 ### Channel-Specific Warnings
 
 These messages list specific isotopes that are affecting the optimization logic.
+
 - **"The following channels do not meet the minimum SNR target..."**
   - **Orange Warning**: These channels have a calculated SNR below your "Minimum SNR" threshold.
   - For **MC/TOF** systems, this is just a warning.

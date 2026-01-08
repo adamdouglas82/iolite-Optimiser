@@ -27,6 +27,7 @@ Configure how the software identifies individual laser pulses in the signal.
   * **Auto**: Automatically estimates a threshold to identify peaks above the baseline noise.
   * **Manual**: Uncheck "Auto" to set a specific prominence value. Higher values filter out noise but may miss smaller peaks.
 * **Min. Distance**: The minimum number of data points required between two peaks. Increasing this helps prevent detecting multiple points on the same peak as separate events.
+* **Auto-Rescale Y**: Defaults to Checked. When enabled, the plot always scales to show the full pulse intensity.
 * **Time Unit**: Toggle between **Seconds (s)** and **Milliseconds (ms)** for display.
 
 #### **SPR Analysis Results**
@@ -44,6 +45,7 @@ Displays aggregate statistics for all detected (and included) peaks.
 
 * **Apply Average to Optimiser**: Sends the *Average* 10% washout time to the Optimiser tab for the selected channel.
 * **Apply Max to Optimiser**: Sends the *Maximum* 10% washout time (more conservative) to the Optimiser tab.
+* **Apply Composite to Optimiser**: Sends the calculated width of the **Composite Peak** (average pulse shape) to the Optimiser. This is often the most representative and stable value for washout.
 
 ### 2. Right Panel: Visualisation
 
@@ -59,6 +61,13 @@ Displays aggregate statistics for all detected (and included) peaks.
 
 * Shows the "Average Peak Shape" by stacking all valid pulses.
 * Useful for visualising the tailing behavior and verifying if the 10% or 1% widths are appropriate.
+
+#### **Mouse Interactions (Plots)**
+
+* **Zoom**: Use the **Mouse Wheel** over any plot to zoom in/out on the X-axis. If "Pan/Zoom Y" is enabled, it will also zoom the Y-axis.
+* **Pan**: **Left-Click & Drag** a plot to move the view.
+* **Double-Click**: Instantly resets the plot to show the full data range.
+* **Auto-Rescale Y**: When checked, the plot automatically snaps to show the full pulse intensity whenever values change. Uncheck this to manually zoom into specific features (like the peak tail).
 
 #### **Results Table (Bottom)**
 
@@ -100,10 +109,11 @@ Ensure you have a selection in iolite that contains single laser pulses (e.g., a
 
 ### Step 5: Apply to Optimiser
 
-1. Decide whether you want to use the **Average** or **Maximum** washout time.
+1. Decide whether you want to use the **Average**, **Maximum**, or **Composite** washout time.
     * *Average*: Good for stable systems.
     * *Max*: Safer to ensure zero overlap.
-2. Click **Apply Average/Max to Optimiser**.
+    * *Composite*: Best for noisy signals or when you want the most statistically representative shape.
+2. Click **Apply Average/Max/Composite to Optimiser**.
 3. A confirmation message will appear. This value is now set as the "Custom" dwell/wait time for this channel in the **Optimiser Tab**.
 
 ---

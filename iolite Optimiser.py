@@ -1,8 +1,8 @@
 #/ Name: iolite Optimiser
 #/ Description: Characterises your system's single-pulse washout to calculate the optimal balance of spot size, scan speed, and repetition rate that achieves your target data quality.
 #/ Type: UI
-#/ Author: Adam Douglas
-#/ Version: 0.9.1
+#/ Authors: Adam Douglas
+#/ Version: 0.9.2
 #/ Contact: Adam.Douglas@icpms.com
 
 import math
@@ -603,10 +603,6 @@ class Logic:
         
         # Diagnostic
         
-        # Diagnostic
-        prefix = inputs.get('log_prefix', "Logic Sync")
-        IoLog.debug(f"{prefix}: Spot={bs}, RR={rr_final}, n_req={n_target}, n_act={actual_pulses:.5f}, Speed={speed:.2f}, AT={at_final_s:.5f}, Ov={inputs.get('overhead_ms',0):.3f}, Bud={budget_ms:.3f}")
-        
         prec_ms = inputs['precision_ms']
         
         # Diagnostic
@@ -1116,6 +1112,12 @@ class ioliteOptimiser(QWidget):
         self.opt_df = None
         self.spr_df = None
         self.is_external_data = False
+        self._opt_palette_indices = None
+        self._opt_axis_limits = None
+        self._suppress_margin_update = False # Flag to prevent margin shudder during rebuilds
+        self.dragged_edge = None # For interactive region adjustment
+        self.last_opt_rows = 1
+        self.last_spr_rows = 1
         self.t_start = 0.0
         self.channel_dwells = {} # Map channel_name -> dwell_ms
         self.settings_json_path = None
@@ -1369,19 +1371,23 @@ class ioliteOptimiser(QWidget):
         lbl_det_title.setAlignment(Qt.AlignCenter)
         v_det.addWidget(lbl_det_title)
         
-        form_det = QFormLayout()
-        form_det.setVerticalSpacing(6)
+        # Use 4-column Grid Layout (Cols 2,3 empty)
+        grid_det = QGridLayout()
+        grid_det.setColumnStretch(3, 1) # Push content left
         
         self.cmb_spr_iso = QComboBox()
         self.cmb_spr_iso.currentTextChanged.connect(self.run_spr_analysis)
-        form_det.addRow("Select Channel:", self.cmb_spr_iso)
+        grid_det.addWidget(QLabel("Select Channel:"), 0, 0)
+        grid_det.addWidget(self.cmb_spr_iso, 0, 1)
         
         l_prom = QHBoxLayout()
+        l_prom.setContentsMargins(0, 0, 0, 0)
         self.spin_spr_prom = QDoubleSpinBox()
         self.spin_spr_prom.setRange(0, 1e9)
         self.spin_spr_prom.setDecimals(1)
         self.spin_spr_prom.setValue(100.0)
         self.spin_spr_prom.setSingleStep(100.0)
+        self.spin_spr_prom.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.spin_spr_prom.valueChanged.connect(self.run_spr_analysis)
         l_prom.addWidget(self.spin_spr_prom)
         
@@ -1391,7 +1397,8 @@ class ioliteOptimiser(QWidget):
         l_prom.addWidget(self.chk_spr_auto_prom)
         self.spin_spr_prom.setEnabled(False) # Start disabled if Auto is on
         
-        form_det.addRow("Peak Cutoff:", l_prom)
+        grid_det.addWidget(QLabel("Peak Cutoff:"), 1, 0)
+        grid_det.addLayout(l_prom, 1, 1)
         
         self.spin_spr_dist = QSpinBox()
         self.spin_spr_dist.setRange(1, 1000)
@@ -1400,7 +1407,8 @@ class ioliteOptimiser(QWidget):
         self.spin_spr_dist.setToolTip("Minimum distance between peaks. Prevents detecting multiple points on the same peak.")
         self.spin_spr_dist.valueChanged.connect(self.run_spr_analysis)
         self.spin_spr_dist.valueChanged.connect(self.save_persistent_settings)
-        form_det.addRow("Min. Distance:", self.spin_spr_dist)
+        grid_det.addWidget(QLabel("Min. Distance:"), 2, 0)
+        grid_det.addWidget(self.spin_spr_dist, 2, 1)
         
         self.cmb_spr_unit = QComboBox()
         self.cmb_spr_unit.addItems(["Seconds (s)", "Milliseconds (ms)"])
@@ -1408,10 +1416,10 @@ class ioliteOptimiser(QWidget):
         self.cmb_spr_unit.setCurrentText(self.persistent_settings.get('spr_time_unit', "Milliseconds (ms)"))
         self.cmb_spr_unit.currentTextChanged.connect(self.run_spr_analysis)
         self.cmb_spr_unit.currentTextChanged.connect(self.save_persistent_settings)
-        form_det.addRow("Time Unit:", self.cmb_spr_unit)
+        grid_det.addWidget(QLabel("Time Unit:"), 3, 0)
+        grid_det.addWidget(self.cmb_spr_unit, 3, 1)
         
-        
-        v_det.addLayout(form_det)
+        v_det.addLayout(grid_det)
         grp_det.setLayout(v_det)
         l_settings.addWidget(grp_det)
         
@@ -1446,7 +1454,7 @@ class ioliteOptimiser(QWidget):
         grid_res_10.setColumnStretch(3, 1)
         grid_res_10.setColumnStretch(4, 0)
         
-        # Row 0: Average & Area
+        # Row 0: Average & RSD
         lbl_fw10_label = QLabel("Average:")
         lbl_fw10_label.setStyleSheet("font-size: 8 pt;")
         lbl_fw10_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -1454,19 +1462,6 @@ class ioliteOptimiser(QWidget):
         self.lbl_spr_fw10.setStyleSheet("font-size: 8 pt;")
         self.lbl_spr_fw10.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         
-        lbl_area10_label = QLabel("Area:")
-        lbl_area10_label.setStyleSheet("font-size: 8 pt;")
-        lbl_area10_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.lbl_spr_area10 = QLabel("- Counts")
-        self.lbl_spr_area10.setStyleSheet("font-size: 8 pt;")
-        self.lbl_spr_area10.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        
-        grid_res_10.addWidget(lbl_fw10_label, 0, 0)
-        grid_res_10.addWidget(self.lbl_spr_fw10, 0, 1)
-        grid_res_10.addWidget(lbl_area10_label, 0, 2)
-        grid_res_10.addWidget(self.lbl_spr_area10, 0, 3)
-        
-        # Row 1: RSD & Area RSD
         lbl_rsd10_label = QLabel("RSD:")
         lbl_rsd10_label.setStyleSheet("font-size: 8 pt;")
         lbl_rsd10_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -1474,19 +1469,32 @@ class ioliteOptimiser(QWidget):
         self.lbl_spr_rsd10.setStyleSheet("font-size: 8 pt;")
         self.lbl_spr_rsd10.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         
-        lbl_area_rsd10_label = QLabel("Area RSD:")
+        grid_res_10.addWidget(lbl_fw10_label, 0, 0)
+        grid_res_10.addWidget(self.lbl_spr_fw10, 0, 1)
+        grid_res_10.addWidget(lbl_rsd10_label, 0, 2)
+        grid_res_10.addWidget(self.lbl_spr_rsd10, 0, 3)
+        
+        # Row 1: Area & Area RSD
+        lbl_area10_label = QLabel("Area:")
+        lbl_area10_label.setStyleSheet("font-size: 8 pt;")
+        lbl_area10_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.lbl_spr_area10 = QLabel("- Counts")
+        self.lbl_spr_area10.setStyleSheet("font-size: 8 pt;")
+        self.lbl_spr_area10.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        
+        lbl_area_rsd10_label = QLabel("RSD:")
         lbl_area_rsd10_label.setStyleSheet("font-size: 8 pt;")
         lbl_area_rsd10_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.lbl_spr_area_rsd10 = QLabel("- %")
         self.lbl_spr_area_rsd10.setStyleSheet("font-size: 8 pt;")
         self.lbl_spr_area_rsd10.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         
-        grid_res_10.addWidget(lbl_rsd10_label, 1, 0)
-        grid_res_10.addWidget(self.lbl_spr_rsd10, 1, 1)
+        grid_res_10.addWidget(lbl_area10_label, 1, 0)
+        grid_res_10.addWidget(self.lbl_spr_area10, 1, 1)
         grid_res_10.addWidget(lbl_area_rsd10_label, 1, 2)
         grid_res_10.addWidget(self.lbl_spr_area_rsd10, 1, 3)
         
-        # Row 2: Max
+        # Row 2: Max (Left) & Composite (Right)
         lbl_max10_label = QLabel("Max:")
         lbl_max10_label.setStyleSheet("font-size: 8 pt;")
         lbl_max10_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -1494,15 +1502,27 @@ class ioliteOptimiser(QWidget):
         self.lbl_spr_fw_max10.setStyleSheet("font-size: 8 pt;")
         self.lbl_spr_fw_max10.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         
+        lbl_comp10_label = QLabel("Composite:")
+        lbl_comp10_label.setStyleSheet("font-size: 8 pt;")
+        lbl_comp10_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.lbl_spr_fw_comp10 = QLabel("- s")
+        self.lbl_spr_fw_comp10.setStyleSheet("font-size: 8 pt;")
+        self.lbl_spr_fw_comp10.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        
         grid_res_10.addWidget(lbl_max10_label, 2, 0)
         grid_res_10.addWidget(self.lbl_spr_fw_max10, 2, 1)
+        grid_res_10.addWidget(lbl_comp10_label, 2, 2)
+        grid_res_10.addWidget(self.lbl_spr_fw_comp10, 2, 3)
         
         h_btns_10 = QHBoxLayout()
-        self.btn_apply10_avg = QPushButton("Apply Average to Optimiser")
+        self.btn_apply10_avg = QPushButton("Apply Average")
         self.btn_apply10_avg.clicked.connect(lambda: self._on_spr_apply_clicked("10avg"))
-        self.btn_apply10_max = QPushButton("Apply Max to Optimiser")
+        self.btn_apply10_comp = QPushButton("Apply Composite")
+        self.btn_apply10_comp.clicked.connect(lambda: self._on_spr_apply_clicked("10comp"))
+        self.btn_apply10_max = QPushButton("Apply Max")
         self.btn_apply10_max.clicked.connect(lambda: self._on_spr_apply_clicked("10max"))
         h_btns_10.addWidget(self.btn_apply10_avg)
+        h_btns_10.addWidget(self.btn_apply10_comp)
         h_btns_10.addWidget(self.btn_apply10_max)
         
         v_main_10.addLayout(grid_res_10)
@@ -1531,7 +1551,7 @@ class ioliteOptimiser(QWidget):
         grid_res_1.setColumnStretch(3, 1)
         grid_res_1.setColumnStretch(4, 0)
         
-        # Row 0: Average & Area
+        # Row 0: Average & RSD
         lbl_fw1_label = QLabel("Average:")
         lbl_fw1_label.setStyleSheet("font-size: 8 pt;")
         lbl_fw1_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -1539,19 +1559,6 @@ class ioliteOptimiser(QWidget):
         self.lbl_spr_fw1.setStyleSheet("font-size: 8 pt;")
         self.lbl_spr_fw1.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         
-        lbl_area1_label = QLabel("Area:")
-        lbl_area1_label.setStyleSheet("font-size: 8 pt;")
-        lbl_area1_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.lbl_spr_area1 = QLabel("- Counts")
-        self.lbl_spr_area1.setStyleSheet("font-size: 8 pt;")
-        self.lbl_spr_area1.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        
-        grid_res_1.addWidget(lbl_fw1_label, 0, 0)
-        grid_res_1.addWidget(self.lbl_spr_fw1, 0, 1)
-        grid_res_1.addWidget(lbl_area1_label, 0, 2)
-        grid_res_1.addWidget(self.lbl_spr_area1, 0, 3)
-        
-        # Row 1: RSD & Area RSD
         lbl_rsd1_label = QLabel("RSD:")
         lbl_rsd1_label.setStyleSheet("font-size: 8 pt;")
         lbl_rsd1_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -1559,19 +1566,32 @@ class ioliteOptimiser(QWidget):
         self.lbl_spr_rsd1.setStyleSheet("font-size: 8 pt;")
         self.lbl_spr_rsd1.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         
-        lbl_area_rsd1_label = QLabel("Area RSD:")
+        grid_res_1.addWidget(lbl_fw1_label, 0, 0)
+        grid_res_1.addWidget(self.lbl_spr_fw1, 0, 1)
+        grid_res_1.addWidget(lbl_rsd1_label, 0, 2)
+        grid_res_1.addWidget(self.lbl_spr_rsd1, 0, 3)
+        
+        # Row 1: Area & Area RSD
+        lbl_area1_label = QLabel("Area:")
+        lbl_area1_label.setStyleSheet("font-size: 8 pt;")
+        lbl_area1_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.lbl_spr_area1 = QLabel("- Counts")
+        self.lbl_spr_area1.setStyleSheet("font-size: 8 pt;")
+        self.lbl_spr_area1.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        
+        lbl_area_rsd1_label = QLabel("RSD:")
         lbl_area_rsd1_label.setStyleSheet("font-size: 8 pt;")
         lbl_area_rsd1_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.lbl_spr_area_rsd1 = QLabel("- %")
         self.lbl_spr_area_rsd1.setStyleSheet("font-size: 8 pt;")
         self.lbl_spr_area_rsd1.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         
-        grid_res_1.addWidget(lbl_rsd1_label, 1, 0)
-        grid_res_1.addWidget(self.lbl_spr_rsd1, 1, 1)
+        grid_res_1.addWidget(lbl_area1_label, 1, 0)
+        grid_res_1.addWidget(self.lbl_spr_area1, 1, 1)
         grid_res_1.addWidget(lbl_area_rsd1_label, 1, 2)
         grid_res_1.addWidget(self.lbl_spr_area_rsd1, 1, 3)
         
-        # Row 2: Max
+        # Row 2: Max (Left) & Composite (Right)
         lbl_max1_label = QLabel("Max:")
         lbl_max1_label.setStyleSheet("font-size: 8 pt;")
         lbl_max1_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -1579,15 +1599,27 @@ class ioliteOptimiser(QWidget):
         self.lbl_spr_fw_max1.setStyleSheet("font-size: 8 pt;")
         self.lbl_spr_fw_max1.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         
+        lbl_comp1_label = QLabel("Composite:")
+        lbl_comp1_label.setStyleSheet("font-size: 8 pt;")
+        lbl_comp1_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.lbl_spr_fw_comp1 = QLabel("- s")
+        self.lbl_spr_fw_comp1.setStyleSheet("font-size: 8 pt;")
+        self.lbl_spr_fw_comp1.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        
         grid_res_1.addWidget(lbl_max1_label, 2, 0)
         grid_res_1.addWidget(self.lbl_spr_fw_max1, 2, 1)
+        grid_res_1.addWidget(lbl_comp1_label, 2, 2)
+        grid_res_1.addWidget(self.lbl_spr_fw_comp1, 2, 3)
         
         h_btns_1 = QHBoxLayout()
-        self.btn_apply1_avg = QPushButton("Apply Average to Optimiser")
+        self.btn_apply1_avg = QPushButton("Apply Average")
         self.btn_apply1_avg.clicked.connect(lambda: self._on_spr_apply_clicked("1avg"))
-        self.btn_apply1_max = QPushButton("Apply Max to Optimiser")
+        self.btn_apply1_comp = QPushButton("Apply Composite")
+        self.btn_apply1_comp.clicked.connect(lambda: self._on_spr_apply_clicked("1comp"))
+        self.btn_apply1_max = QPushButton("Apply Max")
         self.btn_apply1_max.clicked.connect(lambda: self._on_spr_apply_clicked("1max"))
         h_btns_1.addWidget(self.btn_apply1_avg)
+        h_btns_1.addWidget(self.btn_apply1_comp)
         h_btns_1.addWidget(self.btn_apply1_max)
         
         v_main_1.addLayout(grid_res_1)
@@ -1616,7 +1648,7 @@ class ioliteOptimiser(QWidget):
         self.chk_y_zoom_spr.toggled.connect(self._on_spr_y_zoom_toggled)
         
         self.chk_rescale_spr = QCheckBox("Auto-Rescale Y")
-        self.chk_rescale_spr.setChecked(self.persistent_settings.get('spr_rescale_y', True))
+        self.chk_rescale_spr.setChecked(True) # Ephemeral: Always default to ON
         self.chk_rescale_spr.toggled.connect(self._on_spr_rescale_toggled)
         
         h_ctrl_spr.addWidget(QLabel("Theme:"))
@@ -1634,8 +1666,9 @@ class ioliteOptimiser(QWidget):
         
         right_layout.addLayout(h_ctrl_spr)
 
-        self.spr_figure = Figure(figsize=(5, 4), dpi=100, constrained_layout=True)
+        self.spr_figure = Figure(figsize=(5, 4), dpi=100, constrained_layout=False)
         self.spr_canvas = FigureCanvas(self.spr_figure)
+        self.spr_canvas.mpl_connect('resize_event', self._on_plot_resize)
         self.spr_canvas.mpl_connect('scroll_event', self.on_zoom)
         self.spr_canvas.mpl_connect('button_press_event', self.on_press)
         self.spr_canvas.mpl_connect('button_release_event', self.on_release)
@@ -1846,7 +1879,7 @@ class ioliteOptimiser(QWidget):
         fg_col = plt.rcParams['axes.labelcolor']
         
         if show_composite:
-            gs = self.spr_figure.add_gridspec(1, 2, width_ratios=[8, 2])
+            gs = self.spr_figure.add_gridspec(1, 2, width_ratios=[8, 2], wspace=0.02)
             ax = self.spr_figure.add_subplot(gs[0, 0])
             self.spr_ax_comp = self.spr_figure.add_subplot(gs[0, 1])
         else:
@@ -1913,7 +1946,8 @@ class ioliteOptimiser(QWidget):
                 # Use the anchor color (Index 0 of safe_palette)
                 self.spr_ax_comp.plot(comp_df['Relative Time (s)'], comp_df['Normalised Intensity'], color=safe_palette[0], lw=2)
                 self.spr_ax_comp.set_xlabel("Rel. Time (s)", fontsize='medium', color=fg_col)
-                self.spr_ax_comp.set_title("Average Peak", fontsize='medium', color=fg_col)
+                # Stable composite title anchored to axis top
+                self.spr_ax_comp.set_title("Composite Peak", fontsize='medium', color=fg_col, y=1.0, pad=10)
                 self.spr_ax_comp.set_ylim(-0.02, 1.05) # Tighter Y limit
                 self.spr_ax_comp.set_yticklabels([])    # Hide Y numbers
                 self.spr_ax_comp.set_yticks([])         # Hide Y ticks
@@ -1949,7 +1983,6 @@ class ioliteOptimiser(QWidget):
                         self.spr_ax_comp.plot([t_l, t_r], [lvl, lvl], linestyle='None', marker=mkr, markersize=5, color=col, alpha=0.8)
 
                 # Summary Stats Box (Inlaid Legend)
-                # Summary Stats Box (Inlaid Legend)
                 # Create persistent legend reference (Always create, control visibility)
                 
                 f10 = filtered_df['FW0.1M (s)']
@@ -1959,8 +1992,24 @@ class ioliteOptimiser(QWidget):
                 val_10 = comp_widths.get(0.1, 0.0)
                 val_1 = comp_widths.get(0.01, 0.0)
                 
-                label_10 = f"FW0.1M (10%)\nAvg: {_adap(val_10*mult)} {unit_label}\nMax:  {_adap(f10.max()*mult)} {unit_label}"
-                label_1 = f"FW0.01M (1%)\nAvg: {_adap(val_1*mult)} {unit_label}\nMax:  {_adap(f1.max()*mult)} {unit_label}"
+                # Helper for adaptive rounding (Same as Avg/Max logic)
+                def _adap_round_comp(v_ms):
+                    if v_ms >= 100: return round(v_ms, 0)
+                    if v_ms >= 10:  return round(v_ms, 1)
+                    return round(v_ms, 2)
+                
+                # Store for Apply Buttons using exact same logic as Avg/Max (Always MS)
+                self._last_spr_fw10_comp_ms = _adap_round_comp(val_10 * 1000.0)
+                self._last_spr_fw1_comp_ms = _adap_round_comp(val_1 * 1000.0)
+                
+                # Update Labels in Results Panel (Bold Number, Normal Unit)
+                if hasattr(self, 'lbl_spr_fw_comp10'):
+                    self.lbl_spr_fw_comp10.setText(f"<b>{_adap(val_10*mult)}</b> {unit_label}")
+                if hasattr(self, 'lbl_spr_fw_comp1'):
+                    self.lbl_spr_fw_comp1.setText(f"<b>{_adap(val_1*mult)}</b> {unit_label}")
+                
+                label_10 = f"FW0.1M (10%)\nComp: {_adap(val_10*mult)} {unit_label}\nMax:  {_adap(f10.max()*mult)} {unit_label}"
+                label_1 = f"FW0.01M (1%)\nComp: {_adap(val_1*mult)} {unit_label}\nMax:  {_adap(f1.max()*mult)} {unit_label}"
                 
                 h10 = Line2D([0], [0], linestyle='None', marker='s', markersize=4, color='C1', label=label_10)
                 h1 = Line2D([0], [0], linestyle='None', marker='d', markersize=4, color='C2', label=label_1)
@@ -1987,11 +2036,22 @@ class ioliteOptimiser(QWidget):
         if lines_1:
              legend_handles.append(Line2D([0], [0], linestyle='None', marker='d', markersize=5, color='C9', alpha=0.9, label="FW 0.01M (1 %)"))
 
+        # Snap top margin to legend height exactly
+        self.last_spr_rows = 1
+        self._on_plot_resize(type('obj', (object,), {'canvas': self.spr_canvas}))
+        
         ax.set_xlabel("Time (s)", fontsize='medium', color=fg_col)
         
-        # Dynamic Y-Axis Label and Formatting
+        # Anchored Y-Axis Label (Fixed 20px from left edge)
+        import matplotlib.transforms as mtransforms
         unit = getattr(self, 'cached_unit_label', "Counts")
         ax.set_ylabel(f"Intensity ({unit})", fontsize='medium', color=fg_col)
+        # Use 20px to be safe from bezel
+        ax.yaxis.set_label_coords(20/self.spr_figure.dpi/self.spr_figure.get_size_inches()[0], 0.5, 
+                                  transform=mtransforms.blended_transform_factory(self.spr_figure.transFigure, ax.transAxes))
+        
+        # Connect dynamic margin update on zoom/pan
+        ax.callbacks.connect('ylim_changed', lambda event: self._update_smart_margins(self.spr_canvas))
         
         # Engineering Notation (k, M, G)
         # Matches main Optimiser plot style
@@ -2000,7 +2060,10 @@ class ioliteOptimiser(QWidget):
         ax.grid(False, which='both')
         
         # Replace title with legend at top
-        leg = ax.legend(handles=legend_handles, loc='lower center', bbox_to_anchor=(0.5, 1.01), ncol=3, frameon=True, fontsize='medium', handlelength=2.0)
+        # Absolute top-anchored legend with fixed padding
+        leg = ax.legend(handles=legend_handles, loc='lower center', bbox_to_anchor=(0.5, 1.0), 
+                        borderaxespad=0.5, ncol=3, frameon=True, fontsize='medium', 
+                        handlelength=1.5, handletextpad=0.7, columnspacing=1.5)
         leg.get_frame().set_alpha(0.0) # Transparent frame
         leg.get_frame().set_picker(5)
         self.spr_legend_frame = leg.get_frame()
@@ -2041,14 +2104,10 @@ class ioliteOptimiser(QWidget):
         # Force tight borders
         ax.margins(x=0)
         
-        # Minimise constrained layout padding to maximize chart width
-        try:
-            self.spr_figure.get_layout_engine().set(w_pad=0.01, h_pad=0.01, wspace=0, hspace=0)
-        except: pass
+        # Consistent layout management
+        # (Removed constrained layout pad setting to preserve fixed subplots_adjust)
         
-        # Execute Constrained Layout manually
-        try: self.spr_figure.execute_constrained_layout()
-        except: pass
+        # Consistent with fixed subplots_adjust, we do not call execute_constrained_layout
 
 
         if rescale is False and old_xlim is not None:
@@ -2061,6 +2120,9 @@ class ioliteOptimiser(QWidget):
         # This fixes the issue where exclusion (rescale=False) left the composite plot unscaled
         if show_composite and self.spr_ax_comp:
              self.rescale_to_visible(ax=self.spr_ax_comp, rescale_y=True, canvas=None)
+
+        # Force margin update to ensure axis doesn't collapse (especially if rescale=False)
+        self._update_smart_margins(self.spr_canvas)
 
         self.spr_canvas.draw()
 
@@ -2120,12 +2182,14 @@ class ioliteOptimiser(QWidget):
                 self.spr_canvas.draw()
 
     def _on_spr_apply_clicked(self, mode):
-        # mode can be '10avg', '10max', '1avg', '1max'
+        # mode can be '10avg', '10max', '10comp', '1avg', '1max', '1comp'
         mapping = {
             '10avg': getattr(self, '_last_spr_fw10_avg_ms', 0),
             '10max': getattr(self, '_last_spr_fw10_max_ms', 0),
+            '10comp': getattr(self, '_last_spr_fw10_comp_ms', 0),
             '1avg': getattr(self, '_last_spr_fw1_avg_ms', 0),
-            '1max': getattr(self, '_last_spr_fw1_max_ms', 0)
+            '1max': getattr(self, '_last_spr_fw1_max_ms', 0),
+            '1comp': getattr(self, '_last_spr_fw1_comp_ms', 0)
         }
         val_ms = mapping.get(mode, 0)
         self.spin_wash.setValue(val_ms)
@@ -2606,7 +2670,8 @@ class ioliteOptimiser(QWidget):
         # --- RIGHT COLUMN (PLOT & RESULTS) ---
         # Plot Panel (Top)
         plot_widget = QWidget()
-        plot_widget.setMinimumHeight(320) # Prevent shrinking beyond readability (Adjusted to 300)
+        plot_widget.setMinimumHeight(320) # Allow more flexible resizing
+        plot_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         plot_layout = QVBoxLayout(plot_widget)
         plot_layout.setContentsMargins(0, 0, 0, 0)
         plot_layout.setSpacing(2)
@@ -2614,7 +2679,10 @@ class ioliteOptimiser(QWidget):
         right_layout = QVBoxLayout()
         right_layout.setContentsMargins(0, 0, 0, 0)
         
-        self.figure = Figure(figsize=(5, 3), dpi=100, constrained_layout=True); self.canvas = FigureCanvas(self.figure)
+        self.figure = Figure(figsize=(5, 3), dpi=100, constrained_layout=False); self.canvas = FigureCanvas(self.figure)
+        # Initialize with baseline margins (match resize logic)
+        self.figure.subplots_adjust(left=0.1, right=0.95, top=0.9, bottom=0.15)
+        self.canvas.mpl_connect('resize_event', self._on_plot_resize)
         self.canvas.setMinimumHeight(200) # Allow smaller resize
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.canvas.updateGeometry()
@@ -2634,7 +2702,7 @@ class ioliteOptimiser(QWidget):
         self.chk_y_zoom.toggled.connect(self._on_opt_y_zoom_toggled)
         
         self.chk_rescale = QCheckBox("Auto-Rescale Y")
-        self.chk_rescale.setChecked(self.persistent_settings.get('opt_rescale_y', True))
+        self.chk_rescale.setChecked(True) # Ephemeral: Always default to ON
         self.chk_rescale.toggled.connect(self._on_opt_rescale_toggled)
         
         # Theme Override
@@ -2674,6 +2742,7 @@ class ioliteOptimiser(QWidget):
         
         # Results Panel (Bottom)
         results_widget = QWidget()
+        results_widget.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         results_layout = QVBoxLayout(results_widget)
         results_layout.setContentsMargins(0, 0, 0, 0)
         
@@ -2712,9 +2781,9 @@ class ioliteOptimiser(QWidget):
         splitter = QSplitter(Qt.Vertical)
         splitter.addWidget(plot_widget)
         splitter.addWidget(results_widget)
-        splitter.setStretchFactor(0, 1) # Equal priority for 50:50 split
+        splitter.setStretchFactor(0, 1) 
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([10000, 10000]) # Force equal distribution ignoring size hints
+        splitter.setSizes([500, 500]) # Balanced initial distribution
         
         right_layout.addWidget(splitter)
         
@@ -2761,7 +2830,7 @@ class ioliteOptimiser(QWidget):
         self.spin_duty.valueChanged.connect(self._on_ui_change)
         self.chk_norm.toggled.connect(lambda: self.update_plot())
         self.chk_norm.toggled.connect(self._on_ui_change)
-        self.chk_y_zoom.toggled.connect(self._on_ui_change)
+        # self.chk_y_zoom.toggled.connect(self._on_ui_change) # Removed to prevent rescale on toggle
         self.chk_rescale.toggled.connect(self._on_ui_change)
         self.combo_theme.currentTextChanged.connect(self.apply_theme)
         self.chk_auto.toggled.connect(self.on_auto_toggled)
@@ -3432,9 +3501,9 @@ class ioliteOptimiser(QWidget):
                 'spr_time_unit': self._get(self.cmb_spr_unit, 'currentText'),
                 'spr_min_distance': self._get(self.spin_spr_dist, 'value'),
                 'opt_y_zoom': self._get(self.chk_y_zoom, 'isChecked'),
-                'opt_rescale_y': self._get(self.chk_rescale, 'isChecked'),
+                # 'opt_rescale_y': Ephemeral
                 'spr_y_zoom': self._get(self.chk_y_zoom_spr, 'isChecked'),
-                'spr_rescale_y': self._get(self.chk_rescale_spr, 'isChecked')
+                # 'spr_rescale_y': Ephemeral
             })
             if self.settings_json_path:
                 with open(self.settings_json_path, 'w') as f:
@@ -3513,6 +3582,10 @@ class ioliteOptimiser(QWidget):
                 # Log channel count here for correct order
                 cols = [c for c in new_df.columns if c != 'Time']
                 IoLog.information(f"iolite Optimiser: Found {len(cols)} channels")
+                
+                # Reset Auto-Rescale to ON for new data (Ephemeral)
+                if hasattr(self, 'chk_rescale'): self.chk_rescale.setChecked(True)
+                if hasattr(self, 'chk_rescale_spr'): self.chk_rescale_spr.setChecked(True)
             
             # --- GLOBAL PRE-PROCESSING ---
             local_resolved_dwells = {}
@@ -3660,6 +3733,139 @@ class ioliteOptimiser(QWidget):
             return {}
 
     # --- PLOT INTERACTION ---
+    def _on_plot_resize(self, event):
+        """
+        Dynamically adjusts margins to maintain constant pixel offsets for labels/legend.
+        This ensures the plot scales perfectly with the splitter and window.
+        """
+        canvas = getattr(event, 'canvas', None)
+        if not canvas:
+            # Fallback for manual calls
+            for c in [getattr(self, 'canvas', None), getattr(self, 'spr_canvas', None)]:
+                if c: self._on_plot_resize(type('obj', (object,), {'canvas': c}))
+            return
+
+        fig = canvas.figure
+        w, h = fig.get_size_inches() * fig.dpi
+        if w == 0 or h == 0: return
+
+        # Pixel Margins (Fixed offsets)
+        l_px = 85  # Y-axis label + SI numbers (Increased for large counts safe-zone)
+        r_px = 20  # Buffer
+        
+        # Dynamic row-aware top padding
+        rows = getattr(self, 'last_opt_rows', 1) if canvas == getattr(self, 'canvas', None) else getattr(self, 'last_spr_rows', 1)
+        t_px = 22 + (rows * 20) # snug 42px for 1 row, 62px for 2
+        
+        b_px = 50  # X-axis label + numbers
+
+        # Smart Margins Calculation
+        # Instead of fixed l_px, we calculate it!
+        self._update_smart_margins(canvas, override_margins={'top': t_px, 'bottom': b_px, 'right': r_px})
+
+    def _update_smart_margins(self, canvas, override_margins=None):
+        """
+        Calculates and applies the exact left margin needed to fit the Y-axis label and tick numbers.
+        Keeps the right edge fixed.
+        """
+        if not canvas: return
+        # Check suppression flag
+        if getattr(self, '_suppress_margin_update', False): return
+
+        fig = canvas.figure
+        ax = fig.axes[0] if fig.axes else None
+        if not ax: return
+
+        # Calculate dimensions first
+        w, h = fig.get_size_inches() * fig.dpi
+        if w == 0 or h == 0: return
+
+        # Get Renderer
+        try:
+            renderer = canvas.get_renderer()
+        except:
+            # If renderer not ready yet (before first draw), use estimate
+             renderer = None
+
+        l_px = 55 # Default fallback (Reduced to 55 to allow tighter fit for small numbers)
+        
+        if renderer:
+            try:
+                # FORCE TICK UPDATE: We must force matplotlib to update the tick strings based on the current formatter
+                # get_tightbbox triggers this internal update if it hasn't happened yet.
+                ax.yaxis.get_tightbbox(renderer)
+
+                # 1. Measure Y-Axis Tick Labels (Max Visible Width)
+                tick_width = 0
+                ylim = ax.get_ylim()
+                # Sort triggers correct view interval if inverted (though not usual here)
+                y_min, y_max = sorted(ylim)
+                
+                for tick in ax.yaxis.get_major_ticks():
+                    # Only measure ticks that are actually visible within limits
+                    loc = tick.get_loc()
+                    if y_min <= loc <= y_max:
+                        label = tick.label1 # Left label
+                        if label.get_visible():
+                            bbox = label.get_window_extent(renderer)
+                            if bbox.width > tick_width:
+                                tick_width = bbox.width
+                
+                # 2. Measure Y-Axis Label
+                # It is anchored to figure left, but let's assume we want (LabelWidth + Gap + TickWidth + Gap)
+                # But wait, we anchored label to 10px from left.
+                # So Left Margin should be: 10px + LabelWidth + Gap + TickWidth + Gap
+                ylabel = ax.yaxis.get_label()
+                label_width = ylabel.get_window_extent(renderer).width
+                
+                # Gap settings
+                gap = 2 
+                
+                # Total Required Left Margin
+                # 20px (Anchor) + LabelWidth + Gap + TickWidth + Gap
+                calc_l_px = 20 + label_width + gap + tick_width + 2
+                l_px = max(55, calc_l_px) # Floor at 55 to prevent collapse, but allow closeness
+                
+            except Exception as e:
+                # Fallback if calculation fails
+                pass
+        
+        # RE-ASSERT LABEL ANCHOR (Prevent drift during pan/zoom)
+        if ax:
+            import matplotlib.transforms as mtransforms
+            # 20px from left edge
+            ax.yaxis.set_label_coords(20/w, 0.5, 
+                                      transform=mtransforms.blended_transform_factory(fig.transFigure, ax.transAxes))
+
+        # Apply Margins (w, h already calculated above)
+        
+        # Use overrides or defaults
+        # We need to preserve current top/bottom/right if not provided?
+        # But subplots_adjust takes all.
+        # We should store them or recalculate them.
+        
+        # Recalculate defaults if not passed (similar to _on_plot_resize logic)
+        if not override_margins:
+            rows = getattr(self, 'last_opt_rows', 1) if canvas == getattr(self, 'canvas', None) else getattr(self, 'last_spr_rows', 1)
+            t_px = 22 + (rows * 20)
+            b_px = 50
+            r_px = 20
+        else:
+            t_px = override_margins.get('top', 42)
+            b_px = override_margins.get('bottom', 50)
+            r_px = override_margins.get('right', 20)
+
+        # Apply
+        fig.subplots_adjust(
+            left = l_px / w,
+            right = 1.0 - (r_px / w),
+            top = 1.0 - (t_px / h),
+            bottom = b_px / h
+        )
+        
+        # Force redraw if needed? No, subplots_adjust usually triggers draw if in event loop
+        # But update_geometry might be needed
+
     def rescale_to_visible(self, rescale_x=False, rescale_y=False, ax=None, canvas=None):
         if ax is None:
             if not hasattr(self, 'figure') or not self.figure.axes: return
@@ -3717,6 +3923,10 @@ class ioliteOptimiser(QWidget):
             self._block_signals(self.chk_y_zoom, True)
             self.chk_y_zoom.setChecked(False)
             self._block_signals(self.chk_y_zoom, False)
+            
+            # Explicitly clear saved zoom limits so rescale works
+            self._opt_axis_limits = None
+            
             # Trigger Rescale
             if hasattr(self, 'figure') and self.figure.axes:
                 self.rescale_to_visible(ax=self.figure.axes[0], canvas=self.canvas)
@@ -3791,39 +4001,170 @@ class ioliteOptimiser(QWidget):
             self.rescale_to_visible(rescale_x=True, rescale_y=True, ax=event.inaxes, canvas=event.canvas)
             return
             
-        if event.button == 1: # Left Click Pan
+        if event.button == 1: # Left Click
+            # REDUNDANT SHIFT DETECTION
+            mod = 0
+            try: mod = QApplication.instance().keyboardModifiers()
+            except: 
+                try: mod = QApplication.keyboardModifiers()
+                except: pass
+            
+            is_shift = bool(mod & Qt.ShiftModifier)
+            if not is_shift:
+                is_shift = str(getattr(event, 'key', '')).lower() in ('shift', 's')
+            
+            # 1. Handle Region Edge Picking (Optimiser Plot Only)
+            if is_shift and event.canvas == getattr(self, 'canvas', None) and event.inaxes:
+                if event.xdata is not None:
+                    xlim = event.inaxes.get_xlim()
+                    # Permissive threshold: 1% of plot width
+                    threshold = (xlim[1] - xlim[0]) * 0.01
+                    t_shift = getattr(self, 't_start', 0)
+                    
+                    found_edge = None
+                    if hasattr(self, 'bg_times') and self.bg_times:
+                        s_bg, e_bg = self.bg_times[0] - t_shift, self.bg_times[1] - t_shift
+                        if abs(event.xdata - s_bg) < threshold: found_edge = 'bg_start'
+                        elif abs(event.xdata - e_bg) < threshold: found_edge = 'bg_end'
+                        
+                    if not found_edge and hasattr(self, 'sig_times') and self.sig_times:
+                        s_sig, e_sig = self.sig_times[0] - t_shift, self.sig_times[1] - t_shift
+                        if abs(event.xdata - s_sig) < threshold: found_edge = 'sig_start'
+                        elif abs(event.xdata - e_sig) < threshold: found_edge = 'sig_end'
+                        
+                    if found_edge:
+                        self.dragged_edge = found_edge
+                        if hasattr(self, 'chk_auto'):
+                            self._block_signals(self.chk_auto, True)
+                            self.chk_auto.setChecked(False)
+                            self._block_signals(self.chk_auto, False)
+                        return # Edge dragging takes precedence
+            
+            # 2. Initiate Panning (Standard or SPR) - STORE STARTING STATE
             self.plot_panning = True
-            self.press_x = event.xdata
-            self.press_y = event.ydata
+            self.press_x_pix = event.x
+            self.press_y_pix = event.y
+            self.start_xlim = event.inaxes.get_xlim()
+            self.start_ylim = event.inaxes.get_ylim()
+            self.press_ax = event.inaxes
+            # Capture data width for each axis once at start
+            self.start_dx_per_pix = (self.start_xlim[1] - self.start_xlim[0]) / (event.inaxes.bbox.width or 1)
+            self.start_dy_per_pix = (self.start_ylim[1] - self.start_ylim[0]) / (event.inaxes.bbox.height or 1)
 
     def on_drag(self, event):
         if event.inaxes is None: return
-        if self.plot_panning and event.inaxes and self.press_x is not None:
-             if event.inaxes == getattr(self, 'spr_ax_comp', None): return
-             ax = event.inaxes
-             canvas = event.canvas
-             
-             # Always Pan X
-             dx = event.xdata - self.press_x
-             xlim = ax.get_xlim()
-             ax.set_xlim(xlim[0] - dx, xlim[1] - dx)
-             
-             # Determine if Y pan is enabled for this canvas
-             is_spr = (hasattr(self, 'spr_canvas') and canvas == self.spr_canvas)
-             chk_y = getattr(self, 'chk_y_zoom_spr', None) if is_spr else getattr(self, 'chk_y_zoom', None)
-             y_zoom = self._get(chk_y, 'isChecked') if chk_y else False
-             
-             if y_zoom:
-                 dy = event.ydata - self.press_y
-                 ylim = ax.get_ylim()
-                 ax.set_ylim(ylim[0] - dy, ylim[1] - dy)
+        
+        # 1. Handle Edge Dragging (Priority)
+        if self.dragged_edge and event.xdata is not None:
+            val = max(0, event.xdata)
+            t_shift = getattr(self, 't_start', 0)
+            
+            # Determine which spinbox and which internal times to update
+            sb = None
+            if self.dragged_edge == 'bg_start':
+                sb = self.spin_bg_start
+                self.bg_times = (val + t_shift, self.bg_times[1])
+            elif self.dragged_edge == 'bg_end':
+                sb = self.spin_bg_end
+                self.bg_times = (self.bg_times[0], val + t_shift)
+            elif self.dragged_edge == 'sig_start':
+                sb = self.spin_sig_start
+                self.sig_times = (val + t_shift, self.sig_times[1])
+            elif self.dragged_edge == 'sig_end':
+                sb = self.spin_sig_end
+                self.sig_times = (self.sig_times[0], val + t_shift)
+                
+            if sb:
+                self._block_signals(sb, True)
+                sb.setValue(val)
+                self._block_signals(sb, False)
+            
+            # Capture current limits to preserve zoom during full redraw
+            if event.inaxes:
+                self._opt_axis_limits = (event.inaxes.get_xlim(), event.inaxes.get_ylim())
+            
+            # Update plot visuals ONLY (no optimization)
+            self.update_plot(preserve_zoom=True)
+            return
 
-             canvas.draw()
+        # 2. Handle Panning (Fixed-reference for maximum stability)
+        if self.plot_panning and hasattr(self, 'press_x_pix') and hasattr(self, 'press_ax'):
+            ax = self.press_ax
+            canvas = event.canvas
+            if ax == getattr(self, 'spr_ax_comp', None): return
+            
+            # Calculate pixel displacement from START
+            dx_pix = event.x - self.press_x_pix
+            dy_pix = event.y - self.press_y_pix
+            
+            # Convert pixel displacement to data units using scaling factor from START
+            dx_data = dx_pix * getattr(self, 'start_dx_per_pix', 0)
+            dy_data = dy_pix * getattr(self, 'start_dy_per_pix', 0)
+            
+            # Update limits based on displacement from STARTing limits
+            if hasattr(self, 'start_xlim'):
+                ax.set_xlim(self.start_xlim[0] - dx_data, self.start_xlim[1] - dx_data)
+            
+            is_spr = (hasattr(self, 'spr_canvas') and canvas == self.spr_canvas)
+            chk_y = getattr(self, 'chk_y_zoom_spr', None) if is_spr else getattr(self, 'chk_y_zoom', None)
+            if self._get(chk_y, 'isChecked') and hasattr(self, 'start_ylim'):
+                ax.set_ylim(self.start_ylim[0] - dy_data, self.start_ylim[1] - dy_data)
+
+            canvas.draw() # More robust than draw_idle
+            return
+
+        # 3. Hover Cursor Feedback
+        mod = 0
+        try: mod = QApplication.instance().keyboardModifiers()
+        except: 
+            try: mod = QApplication.keyboardModifiers()
+            except: pass
+        is_shift = bool(mod & Qt.ShiftModifier) or str(getattr(event, 'key', '')).lower() in ('shift', 's')
+                   
+        if is_shift and event.canvas == getattr(self, 'canvas', None) and event.inaxes:
+            xlim = event.inaxes.get_xlim()
+            threshold = (xlim[1] - xlim[0]) * 0.01
+            t_shift = getattr(self, 't_start', 0)
+            
+            near_edge = False
+            for times in [self.bg_times, self.sig_times]:
+                if times:
+                    if abs(event.xdata - (times[0]-t_shift)) < threshold or \
+                       abs(event.xdata - (times[1]-t_shift)) < threshold:
+                        near_edge = True
+                        break
+            
+            if near_edge:
+                event.canvas.setCursor(Qt.SizeHorCursor)
+            else:
+                event.canvas.setCursor(Qt.ArrowCursor)
+        elif event.canvas:
+            event.canvas.setCursor(Qt.ArrowCursor)
+        else:
+            if getattr(event, 'canvas', None):
+                event.canvas.setCursor(Qt.ArrowCursor)
 
     def on_release(self, event):
+        was_dragging = self.dragged_edge is not None
         self.plot_panning = False
-        self.press_x = None
-        self.press_y = None
+        self.press_x_pix = None
+        self.press_y_pix = None
+        self.dragged_edge = None
+        if event.canvas:
+            event.canvas.setCursor(Qt.ArrowCursor)
+            
+        if was_dragging:
+            # Capture limits to prevent rescale on release
+            ax = getattr(event, 'inaxes', None)
+            # Fallback if release happened outside axes
+            if ax is None and hasattr(self, 'figure') and len(self.figure.axes) > 0:
+                 ax = self.figure.axes[0]
+            
+            if ax:
+                 self._opt_axis_limits = (ax.get_xlim(), ax.get_ylim())
+
+            # Trigger final optimization and sync
+            self.on_region_edited()
 
     def on_pick(self, event):
         try:
@@ -3965,20 +4306,33 @@ class ioliteOptimiser(QWidget):
             if target_df is None: return
 
             # Reuse existing axes if possible to prevent layout shrinking
-            if not self.figure.axes:
-                ax = self.figure.add_subplot(111)
-            else:
-                ax = self.figure.axes[0]
-                
-                # STORE LIMITS FOR STABILITY
-                # Only if explicitly requested (e.g. from apply_theme or param tweak)
-                if preserve_zoom:
+            # ADAPTING TO MATCH SPR LOGIC FOR STABILITY:
+            # We explicitly clear the figure to ensure a clean slate and consistent callback connections
+            # This prevents callback accumulation and ensures 'connected on creation' logic holds true.
+
+            # Auto-Capture Limits if preserving zoom but not externally set (Robustness Fix)
+            if preserve_zoom and self._opt_axis_limits is None:
+                if hasattr(self, 'figure') and self.figure.axes:
+                    ax = self.figure.axes[0]
                     self._opt_axis_limits = (ax.get_xlim(), ax.get_ylim())
-                else:
-                    # FRESH DATA LOAD or USER RECALC -> Reset limits memory
-                    self._opt_axis_limits = None
-                
-                ax.clear()
+
+            self.figure.clear()
+            
+            # Explicitly set figure facecolor from current rcParams
+            self.figure.patch.set_facecolor(plt.rcParams['figure.facecolor'])
+            
+            ax = self.figure.add_subplot(111)
+            # Connect dynamic margin update on zoom/pan (ONCE on creation)
+            ax.callbacks.connect('ylim_changed', lambda event: self._update_smart_margins(self.canvas))
+            
+            if preserve_zoom and self._opt_axis_limits:
+                 # We will restore these later
+                 pass
+            else:
+                 self._opt_axis_limits = None
+            
+            # Suppress smart margin updates during data loading/formatting to prevent "shudder"
+            self._suppress_margin_update = True
             
             # Plot Logic
             lines = []
@@ -4028,6 +4382,8 @@ class ioliteOptimiser(QWidget):
                 if n_items > 0:
                     ncols = min(10, n_items)
                     nrows = math.ceil(n_items / ncols)
+                    self.last_opt_rows = nrows
+                    self._on_plot_resize(type('obj', (object,), {'canvas': self.canvas}))
                     
                     grid_size = nrows * ncols
                     ordered_handles = [None] * grid_size
@@ -4057,11 +4413,19 @@ class ioliteOptimiser(QWidget):
                             final_handles.append(h)
                             final_labels.append(l)
 
-                    leg = ax.legend(final_handles, final_labels, loc='lower center', bbox_to_anchor=(0.5, 1.01), 
-                                    ncol=ncols, frameon=True, fontsize='medium', handlelength=2.0)
+                    import matplotlib.transforms as mtransforms
+                    leg = ax.legend(final_handles, final_labels, loc='lower center', 
+                                    bbox_to_anchor=(0.5, 1.0), 
+                                    bbox_transform=mtransforms.blended_transform_factory(ax.figure.transFigure, ax.transAxes),
+                                    borderaxespad=0.5, ncol=ncols, frameon=True, fontsize='medium', 
+                                    handlelength=1.5, handletextpad=0.7, columnspacing=1.5)
                 else:
-                    leg = ax.legend(loc='lower center', bbox_to_anchor=(0.5, 1.01), 
-                                    ncol=min(10, len(lines)), frameon=True, fontsize='medium', handlelength=2.0)
+                    import matplotlib.transforms as mtransforms
+                    leg = ax.legend(loc='lower center', 
+                                    bbox_to_anchor=(0.5, 1.0), 
+                                    bbox_transform=mtransforms.blended_transform_factory(ax.figure.transFigure, ax.transAxes),
+                                    borderaxespad=0.5, ncol=min(10, len(lines)), frameon=True, fontsize='medium', 
+                                    handlelength=1.5, handletextpad=0.7, columnspacing=1.5)
 
                 leg.get_frame().set_alpha(0.0) # Transparent frame
                 leg.get_frame().set_picker(5)
@@ -4113,9 +4477,23 @@ class ioliteOptimiser(QWidget):
                 unit = getattr(self, 'cached_unit_label', "Counts")
 
                 ax.set_xlabel("Time (s)")
-                ax.set_ylabel("Norm. Intensity" if normalise else f"Intensity ({unit})")
                 ax.xaxis.set_major_locator(MaxNLocator(nbins=10, prune='both'))
                 ax.ticklabel_format(useOffset=False, axis='x')
+
+                # Anchored Y-Axis Label (Fixed 20px from left edge)
+                import matplotlib.transforms as mtransforms
+                ax.set_ylabel("Norm. Intensity" if normalise else f"Intensity ({unit})")
+                ax.yaxis.set_label_coords(20/self.figure.dpi/self.figure.get_size_inches()[0], 0.5, 
+                                          transform=mtransforms.blended_transform_factory(self.figure.transFigure, ax.transAxes))
+                
+                
+                # Connect dynamic margin update on zoom/pan
+                # MOVED TO AXIS CREATION TO PREVENT CALLBACK ACCUMULATION
+                # ax.callbacks.connect('ylim_changed', lambda event: self._update_smart_margins(self.canvas))
+                
+                # Initial Smart Margin Calc (Post-draw simulation)
+                # We defer this slightly or call it if renderer is ready
+                # self._update_smart_margins(self.canvas) 
 
                 # Apply SI Formatting to Y-Axis (if not normalised)
                 if not normalise:
@@ -4137,14 +4515,10 @@ class ioliteOptimiser(QWidget):
                 # Force tight borders
                 ax.margins(x=0)
                 
-                # Minimise constrained layout padding to maximize chart width
-                try:
-                    self.figure.get_layout_engine().set(w_pad=0.01, h_pad=0.01, wspace=0, hspace=0)
-                except: pass
+                # Consistent layout management (Match SPR plot stability)
+                # (Removed constrained layout pad setting to preserve fixed subplots_adjust)
                 
-                # Execute Constrained Layout manually to ensure it applies to the current geometry
-                try: self.figure.execute_constrained_layout()
-                except: pass
+                # Consistent with fixed subplots_adjust, we do not call execute_constrained_layout
 
                 # Use unified rescaling logic if enabled to ensure consistent 10% margins from first draw
                 chk_rescale = getattr(self, 'chk_rescale', None)
@@ -4162,15 +4536,18 @@ class ioliteOptimiser(QWidget):
                     if len(t_zeroed) > 0:
                         ax.set_xlim(0, np.nanmax(t_zeroed))
                     
-                    # Use robust Y-rescaling
-                    self.rescale_to_visible(rescale_x=True, rescale_y=True, ax=ax, canvas=self.canvas)
+                    
+                    # Use robust Y-rescaling (Defer draw by passing canvas=None)
+                    self.rescale_to_visible(rescale_x=True, rescale_y=True, ax=ax, canvas=None)
+                
+                # FORCE SMART MARGIN UPDATE (Ensure Formatter is accounted for before draw)
+                # Re-enable smart margins now that layout is finalized
+                self._suppress_margin_update = False
+                self._update_smart_margins(self.canvas)
                 
                 self.canvas.draw()
                 
                 self.canvas.repaint() # Force Qt repaint
-                
-                # Post-draw resize trigger to fix initial geometry mismatch
-                QTimer.singleShot(0, lambda: self.canvas.draw())
         except Exception as e:
             msg = f"Plot Error: {e}"
             print(msg)
@@ -4222,6 +4599,30 @@ class ioliteOptimiser(QWidget):
         finally:
             self.chk_auto.blockSignals(False)
         
+        # 1. Validate and Swap Inverted Regions (Start > End)
+        bg_s_raw = self._get(self.spin_bg_start, 'value')
+        bg_e_raw = self._get(self.spin_bg_end, 'value')
+        bg_s, bg_e = sorted([bg_s_raw, bg_e_raw])
+        
+        sig_s_raw = self._get(self.spin_sig_start, 'value')
+        sig_e_raw = self._get(self.spin_sig_end, 'value')
+        sig_s, sig_e = sorted([sig_s_raw, sig_e_raw])
+        
+        # Sync internal state immediately (Fixes state de-sync on swap)
+        t_shift = getattr(self, 't_start', 0)
+        self.bg_times = (bg_s + t_shift, bg_e + t_shift)
+        self.sig_times = (sig_s + t_shift, sig_e + t_shift)
+        
+        # Update spinboxes (Block signals to prevent recursion)
+        for sb, val in [
+            (self.spin_bg_start, bg_s), (self.spin_bg_end, bg_e),
+            (self.spin_sig_start, sig_s), (self.spin_sig_end, sig_e)
+        ]:
+            if self._get(sb, 'value') != val:
+                sb.blockSignals(True)
+                sb.setValue(val)
+                sb.blockSignals(False)
+
         # Read values (Relative Time)
         try:
             rel_bg_s = self._get(self.spin_bg_start, 'value')
@@ -4229,17 +4630,22 @@ class ioliteOptimiser(QWidget):
             rel_sig_s = self._get(self.spin_sig_start, 'value')
             rel_sig_e = self._get(self.spin_sig_end, 'value')
             
-            self.bg_times = (rel_bg_s + self.t_start, rel_bg_e + self.t_start)
-            self.sig_times = (rel_sig_s + self.t_start, rel_sig_e + self.t_start)
-            
+            # Check for NaNs
+            if any(x is None for x in [rel_bg_s, rel_bg_e, rel_sig_s, rel_sig_e]):
+                return
+
             status = f"Manual: BG {rel_bg_s:.1f}-{rel_bg_e:.1f}s, SIG {rel_sig_s:.1f}-{rel_sig_e:.1f}s"
             self.lbl_result.setText(status)
-            self.update_plot(preserve_zoom=True)
+            
+            # Redundant update removed to prevents double-consumption of axis limits
+            # self.update_plot(preserve_zoom=True)
+            
             # Trigger recalc dynamically without saving settings to disk
             self.run_optimisation(refresh=False, preserve_zoom=True)
         except Exception as e:
-            self.lbl_result.setText(f"Edit Error: {e}")
-
+            # Silently handle transient UI read errors
+            pass
+ 
     def run_auto_detect(self):
         try:
             if self.opt_df is None:
