@@ -2,7 +2,7 @@
 
 ## Overview
 
-This guide provides a comprehensive, step-by-step workflow for using the **Advanced Optimiser Plugin**. It combines the **Single Pulse Response (SPR)** analysis with the **Optimiser** to ensure your laser ablation parameters are perfectly tuned for your specific hardware and analytical goals.
+This guide provides a comprehensive, step-by-step workflow for using the **iolite Optimiser**. It combines the **Single Pulse Response (SPR)** analysis with the **Optimiser** to ensure your laser ablation parameters are perfectly tuned for your specific hardware and analytical goals.
 
 ---
 
@@ -13,7 +13,7 @@ Before optimizing spot size or speed, you must know your system's washout time t
 ### Step 1.1: Load SPR Data
 
 1. Ensure your iolite session contains a file with single laser pulses (e.g., a "Test" or "Tune" line created with a low repetition rate, typically 1 Hz).
-2. Open the **Advanced Spot Optimiser** plugin.
+2. Open the **iolite Optimiser** plugin from the *Tools* menu.
 3. Go to the **SPR Tab**.
 4. Click **Reload Data from iolite** to ingest the current selection.
 

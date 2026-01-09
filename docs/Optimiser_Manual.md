@@ -54,13 +54,11 @@ The "Goals" you want the algorithm to achieve.
 
 - **Pulses per Dwell Time**: The number of laser shots that must occur during a single mass spectrometer integration (dwell) to ensure signal stability.
 - **Target SNR (Sigma)**: The desired Signal-to-Noise ratio for the limiting isotope.
-  - **Calculation Method**: The optimiser calculates SNR in the **Counts Domain** (Total Counts per Dwell) to robustly handle low signals:
-
-    1. **Poisson Variance (Counting Statistics)**: Assumed to be equal to the **Mean Background Counts**.
-    2. **Flicker Variance (Instrument Noise)**: Calculated as the **(Standard Deviation of Background Counts)²**.
-    3. **Total Noise**: `Sqrt(Poisson Variance + Flicker Variance)`.
-    4. **SNR**: `Net Signal Counts / Total Noise`.
-  - This approach is conservative, effectively summing the theoretical minimum noise (Poisson) with the observed experimental noise (Flicker/Real) to ensure targets are met even under unstable conditions.
+  - **Robust Methodology**: The optimiser calculates a **Detection Ratio** based on the scientific Critical Level ($L_c$), then scales it back to a familiar "Sigma SNR" for the UI. This provides a more rigorous assessment than simple background standard deviation:
+    1. **Noise Floor**: Determined by the maximum of the theoretical **Poisson Variance** (counting statistics) and the **Observed Variance** (experimental jitter) of the background.
+    2. **Critical Level ($L_c$)**: Calculated using the **Square Root Transform** rule (Stapleton's Rule) for variance stabilization. This defines the 95% confidence threshold for detection.
+    3. **Sigma-Equivalent Scaling**: The final Detection Ratio is multiplied by $z\sqrt{2}$ ($\approx 2.326$) so that a value of **10.0** in the UI corresponds to the standard 10-sigma **Limit of Quantification (LoQ)**.
+  - This approach is conservative and robust, ensuring that targets represent accurate confidence intervals rather than just multiples of potentially "lucky" low-noise baselines.
 - **Min Duty Cycle**: Sets a floor for efficiency (Time Measuring / Total Time).
   - If the calculated duty cycle is too low (mostly settling time), the optimiser will increase dwell times to improve the ratio.
 - **Minimum SNR**: Lower limit for acceptance; channels below this may trigger warnings.
@@ -226,5 +224,24 @@ These messages list specific isotopes that are affecting the optimization logic.
   - For **Quadrupole** systems, these channels have been forced to the minimum dwell time to save budget.
 - **"The following channels cannot be set lower than the hardware minimum ([X] ms)..."**
   - **Blue Warning**: The algorithm wants to reduce the dwell time for these channels (usually high-signal ones) to optimize speed, but is blocked by the hard limit of the instrument (e.g., 1ms or 10ms minimum dwell).
-- **"The following channels had zero counts in the background. The background has been assumed to be 1 count over the baseline duration..."**
-  - **Gray Warning**: Indicates that the background signal was perfectly zero (common in simulated data or extremely short baselines). To prevent division-by-zero errors in the SNR calculation, a theoretical noise floor of 1 count was assumed.
+- **"The following channels had zero counts in the background. The detection limit (Lc) has been calculated using the Square Root Transform rule..."**
+  - **Gray Warning**: Indicates that the background signal was perfectly zero (common in simulated data or extremely short baselines). To prevent division-by-zero errors in the SNR calculation, a theoretical detection limit ($L_c$) was calculated using the Square Root Transform rule for variance stabilization.
+
+---
+
+## Scientific References
+
+The algorithms and logic used in the iolite Optimiser are based on established statistical principles and laser ablation literature:
+
+- **SNR and Detection Limits**:
+  - Tanner, S. D. (2010). "The assessment of detection limits in quadrupole ICP-MS." *Journal of Analytical Atomic Spectrometry (JAAS)*, 25, 405-414.
+  - Donard, A., et al. (2015). "Optimization and performance of a high-sensitivity ICP-MS." *JAAS*, 30, 2420.
+- **Optimization Workflow & Loop Logic**:
+  - Van Malderen, S. J., et al. (2018). "Laser ablation-inductively coupled plasma-mass spectrometry: on the importance of periodic sampling and the prevention of aliasing." *JAAS*, 33, 20.
+  - Van Elteren, J. T., et al. (2019). "A systematic methodology for selecting laser ablation-inductively coupled plasma-mass spectrometry imaging conditions." *Analytica Chimica Acta*, 1054, 1-11.
+- **Single Pulse Response and Washout Analysis**:
+  - Ulianov, A., et al. (2015). "Single-pulse responses of laser ablation cells." *JAAS*, 30, 1297.
+- **Statistical Framework**:
+  - Currie, L. A. (1968). "Limits for qualitative detection and quantitative determination. Application to radiochemistry." *Analytical Chemistry*, 40, 586-593.
+  - Currie, L. A. (1972). "The Measurement of Environmental Levels of Rare Gas Nuclides and the Treatment of Very Low-Level Counting Data." *IEEE Transactions on Nuclear Science*, NS19 (1), 119-126.
+  - Based on the Square Root Transform rule for variance stabilization in counting statistics (Stapleton's Rule).

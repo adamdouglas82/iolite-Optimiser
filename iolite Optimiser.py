@@ -668,36 +668,63 @@ class Logic:
             bl_dt = iso['baseline_dt_s']
             sig_cps = iso['sig_cps']
             blk_cps = iso['blk_cps']
-            std_counts = iso['stdev_blank_counts'] 
-            # Handling for Zero Background (Infinite SNR protection)
-            # If blank rate is 0, we assume a minimum noise floor equivalent to 1 count over the baseline duration.
-            is_zero_bg = False
-            if blk_cps == 0 and bl_dt > 0:
-                 min_rate = 1.0 / bl_dt
-                 poisson_sq = min_rate  # Poisson variance rate = Rate
-                 is_zero_bg = True
-            else:
-                 poisson_sq = blk_cps
-
-            flicker_noise_sq = (std_counts**2) / bl_dt if bl_dt > 0 else 0
-            std_cps_per_sqrt_sec = (poisson_sq + flicker_noise_sq)**0.5
+            std_counts = iso['stdev_blank_counts']
             
-            # FIX: Scale NET signal, not GROSS signal
-            # This prevents high-background channels from dropping below blank when spot size decreases
+            # 1. Determine the Noise Floor (Count Domain)
+            total_bg_counts = blk_cps * bl_dt
+            
+            # Theoretical Poisson Variance
+            theoretical_var = total_bg_counts
+            
+            # Observed Variance
+            observed_var = std_counts**2
+            
+            # FIX 1: Use MAX, not SUM. Avoid double-counting noise.
+            effective_noise_var = max(theoretical_var, observed_var)
+            
+            # 2. Calculate Critical Level (Lc) for Detection
+            d = 0.4
+            z = 1.645  # 95% Confidence
+            
+            if total_bg_counts == 0:
+                is_zero_bg = True
+                L_c_counts = (z**2)/2 + z * math.sqrt(2 * d) 
+            else:
+                is_zero_bg = False
+                L_c_counts = z * math.sqrt(2 * effective_noise_var)
+
+            # 3. Calculate "Robust SNR" (Detection Metric)
             net_cps = sig_cps - blk_cps
+            
+            # SCALING: Apply spot size and rep rate scaling to the net counts
+            scaled_net_counts_expected = (net_cps * scaling_factor * rr_scaling) * bl_dt
+            
+            # We calculate internal Detection Ratio (DR = net / Lc)
+            # then scale it back to "Sigma-equivalent" units so the UI remains familiar.
+            # Factor = z * sqrt(2) ~ 2.326
+            sigma_factor = z * math.sqrt(2)
+            
+            base_snr = 0
+            if L_c_counts > 0:
+                detection_ratio = scaled_net_counts_expected / L_c_counts
+                base_snr = detection_ratio * sigma_factor # Now back in "Sigma SNR" language
+
+            # Scaling logic
             scaled_net_cps = net_cps * scaling_factor * rr_scaling
             sig_cps_new_bs = scaled_net_cps + blk_cps
-            base_snr = 0
-            if std_cps_per_sqrt_sec > 0:
-                base_snr = (sig_cps_new_bs - blk_cps) / std_cps_per_sqrt_sec
-            
+
             initial_snr_display = iso.get('initial_snr', 0.0)
-            is_optimisable = (std_cps_per_sqrt_sec > 0 and base_snr > 0 and iso['status'] not in ["Exclude", "Set to Min", "Custom"])
+            is_optimisable = (base_snr > 0 and iso['status'] not in ["Exclude", "Set to Min", "Custom"])
 
             processed_iso.append({
-                **iso, 'sig_cps_new_bs': sig_cps_new_bs, 'std_cps_per_sqrt_sec': std_cps_per_sqrt_sec,
-                'base_snr': base_snr, 'initial_snr_display': initial_snr_display,
-                'is_optimisable': is_optimisable, 'final_dt': 0.0, 'snapped_dt': 0.0,
+                **iso, 
+                'sig_cps_new_bs': sig_cps_new_bs, 
+                'std_cps_per_sqrt_sec': math.sqrt(effective_noise_var) / bl_dt if bl_dt > 0 else 0,
+                'base_snr': base_snr,  # This is now "Detection Ratio" at bl_dt
+                'initial_snr_display': initial_snr_display,
+                'is_optimisable': is_optimisable, 
+                'final_dt': 0.0, 
+                'snapped_dt': 0.0,
                 'is_zero_bg': is_zero_bg
             })
 
@@ -705,13 +732,8 @@ class Logic:
             # For MC, we use the allowed_dwells from config (Integration Times)
             mc_times = [d/1000.0 for d in (config.get('allowed_dwells') or [])]
             if not mc_times:
-                # Fallback to defaults if missing
                 mc_times = [0.066, 0.131, 0.262, 0.524, 1.049] if system == "Neptune" else [0.050, 0.100, 0.250, 0.500, 1.000]
             
-            # Selection Logic: With Overlap Strategy (Ceil Hz), Budget is slightly LESS than Target.
-            # We want the smallest available dwell that matches or exceeds this budget.
-            
-            # CHECK FOR CUSTOM OVERRIDES FIRST
             custom_dwells = [iso.get('custom_time_s', min_dwell_s) for iso in processed_iso if iso['status'] == "Custom"]
             
             if custom_dwells:
@@ -721,16 +743,17 @@ class Logic:
                 if potential_times:
                     selected_time = min(potential_times)
                 else:
-                    selected_time = max(mc_times) # Should not happen if budget is reasonable
+                    selected_time = max(mc_times)
                 
             for iso in processed_iso:
                 if iso['status'] == "Exclude":
                     iso['snapped_dt'] = 0
                 else:
-                    # Check SNR
-                    resultant_snr = iso['base_snr'] * (selected_time**0.5)
+                    # Resultant SNR Adjustment: 
+                    # base_snr is Detection Ratio at bl_dt. New DR scales with sqrt(dt / bl_dt).
+                    bl_dt = iso['baseline_dt_s']
+                    resultant_snr = iso['base_snr'] * math.sqrt(selected_time / bl_dt) if bl_dt > 0 else 0
                     if resultant_snr < snr_threshold:
-                        # For MC, we CANNOT change the time (fixed system wide), but we FLAG it.
                         iso['snapped_dt'] = selected_time
                         iso['constraint'] = "Min SNR"
                     else:
@@ -741,15 +764,15 @@ class Logic:
                 if iso['status'] == "Exclude":
                     iso['snapped_dt'] = 0
                 else:
-                    # Check SNR
-                    resultant_snr = iso['base_snr'] * (simultaneous_time**0.5)
+                    bl_dt = iso['baseline_dt_s']
+                    resultant_snr = iso['base_snr'] * math.sqrt(simultaneous_time / bl_dt) if bl_dt > 0 else 0
                     if resultant_snr < snr_threshold:
-                        # For TOF, we CANNOT change the time (fixed system wide), but we FLAG it.
                         iso['snapped_dt'] = simultaneous_time
                         iso['constraint'] = "Min SNR"
                     else:
                         iso['snapped_dt'] = simultaneous_time
         else:
+            # Quad/Optimization Mode
             for _ in range(len(processed_iso) + 5):
                 current_budget = dwell_budget_s
                 inv_snr_sum = 0
@@ -758,7 +781,13 @@ class Logic:
                     elif iso['status'] == "Set to Min": iso['final_dt'] = min_dwell_s; current_budget -= min_dwell_s
                     elif iso['status'] == "Custom": val = iso.get('custom_time_s', min_dwell_s); iso['final_dt'] = val; current_budget -= val
                     elif not iso['is_optimisable']: iso['final_dt'] = min_dwell_s; current_budget -= min_dwell_s
-                    else: iso['final_dt'] = 0.0; inv_snr_sum += (1 / iso['base_snr'])
+                    else: 
+                        iso['final_dt'] = 0.0
+                        # We normalize the SNR to 1s for the share calculation.
+                        # base_snr is at bl_dt. SNR_at_1s = base_snr / sqrt(bl_dt).
+                        # inv_snr = 1 / (base_snr / sqrt(bl_dt)) = sqrt(bl_dt) / base_snr.
+                        bl_dt = iso['baseline_dt_s']
+                        inv_snr_sum += (math.sqrt(bl_dt) / iso['base_snr']) if iso['base_snr'] > 0 else 0
                 
                 valid_indices = [i for i, x in enumerate(processed_iso) if x['is_optimisable'] and x['final_dt'] == 0]
                 num_valid = len(valid_indices)
@@ -769,14 +798,17 @@ class Logic:
                     for idx in valid_indices: processed_iso[idx]['final_dt'] = min_dwell_s
                 elif num_valid > 0 and inv_snr_sum > 0:
                     for idx in valid_indices:
-                        share_ratio = (1 / processed_iso[idx]['base_snr']) / inv_snr_sum
+                        bl_dt = processed_iso[idx]['baseline_dt_s']
+                        share_ratio = (math.sqrt(bl_dt) / processed_iso[idx]['base_snr']) / inv_snr_sum
                         processed_iso[idx]['final_dt'] = min_dwell_s + (extra_budget * share_ratio)
 
                 failures = []
                 for idx in valid_indices:
                     dt = processed_iso[idx]['final_dt']
-                    if (processed_iso[idx]['base_snr'] * (dt**0.5)) < snr_threshold:
-                        failures.append((idx, processed_iso[idx]['base_snr'] * (dt**0.5)))
+                    bl_dt = processed_iso[idx]['baseline_dt_s']
+                    res_snr = processed_iso[idx]['base_snr'] * math.sqrt(dt / bl_dt) if bl_dt > 0 else 0
+                    if res_snr < snr_threshold:
+                        failures.append((idx, res_snr))
                 
                 if not failures: break
                 else:
@@ -787,7 +819,6 @@ class Logic:
             for iso in processed_iso:
                 if iso['status'] == "Exclude": snapped = 0.0
                 else:
-                    # Use floor to ensure we never overrun the budget
                     snapped = max(min_dwell_s, math.floor(iso['final_dt'] / precision_s + 1e-9) * precision_s)
                     if not iso['is_optimisable'] and iso['status'] == "Auto": iso['constraint'] = "Min SNR"
                     elif abs(snapped - min_dwell_s) < 1e-9 and iso['status'] == "Auto": iso['constraint'] = "Min ICP"
@@ -796,19 +827,10 @@ class Logic:
                 iso['snapped_dt'] = snapped; total_snapped += snapped
             
             drift = dwell_budget_s - total_snapped
-            
-            # Distribute positive drift (remaining budget) in precision increments
             if drift >= (precision_s * 0.9):
-                # Filter: Exclude those manually set/excluded
-                # REMOVED: constraint that they must already be above min_dwell.
-                # If everyone is at minimum, we still want to distribute the surplus.
-                candidates = [i for i, x in enumerate(processed_iso) 
-                              if x['is_optimisable'] 
-                              and x['status'] not in ["Exclude", "Custom", "Set to Min"]]
-                
+                candidates = [i for i, x in enumerate(processed_iso) if x['is_optimisable'] and x['status'] not in ["Exclude", "Custom", "Set to Min"]]
                 if candidates:
-                    # Sort by Projected Resultant SNR (Ascending) -> Helping the weakest link
-                    candidates.sort(key=lambda i: processed_iso[i]['base_snr'] * (processed_iso[i]['snapped_dt']**0.5))
+                    candidates.sort(key=lambda i: processed_iso[i]['base_snr'] * math.sqrt(processed_iso[i]['snapped_dt'] / processed_iso[i]['baseline_dt_s']))
                     num_steps = int(round(drift / precision_s))
                     for idx in range(num_steps):
                         processed_iso[candidates[idx % len(candidates)]]['snapped_dt'] += precision_s
@@ -816,10 +838,8 @@ class Logic:
         separations = []; output_rows = []
         for iso in processed_iso:
             dt = iso['snapped_dt']
-            sig = iso['sig_cps_new_bs'] * dt
-            blk = iso['blk_cps'] * dt
-            std = iso['std_cps_per_sqrt_sec'] * (dt**0.5)
-            sep = (sig - blk) / std if std > 0 else 0
+            bl_dt = iso['baseline_dt_s']
+            sep = iso['base_snr'] * math.sqrt(dt / bl_dt) if bl_dt > 0 else 0
             if iso['status'] not in ["Exclude", "Set to Min", "Custom"]: separations.append(sep)
             
             val_ms = round(dt * 1000.0, decimals)
@@ -851,10 +871,26 @@ class Logic:
         for col in isotope_cols:
             dwell_s = edited_dwells_df[col].iloc[0] / 1000.0 if col in edited_dwells_df.columns else estimated_dwell_ms / 1000.0
             m_sig, m_blk, s_blk = df_sig[col].mean(), df_blk[col].mean(), df_blk[col].std()
-            math_sig = m_sig if is_raw_counts else m_sig * dwell_s
-            math_blk = m_blk if is_raw_counts else m_blk * dwell_s
-            math_std_blk = s_blk if is_raw_counts else s_blk * dwell_s
-            snr = (math_sig - math_blk) / (max(0, math_blk) + math_std_blk**2)**0.5 if (math_blk + math_std_blk**2) > 0 else 0
+            
+            # Robust SNR (Detection Ratio) Calculation for Display
+            # This must match the Logic.calculate_sigma_for_spot implementation
+            sig_cps = m_sig if not is_raw_counts else m_sig / dwell_s
+            blk_cps = m_blk if not is_raw_counts else m_blk / dwell_s
+            std_counts = s_blk if is_raw_counts else s_blk * dwell_s
+            
+            bl_dt = dwell_s
+            total_bg_counts = blk_cps * bl_dt
+            theoretical_var = total_bg_counts
+            observed_var = std_counts**2
+            effective_noise_var = max(theoretical_var, observed_var)
+            
+            # Factor = z * sqrt(2) ~ 2.326 to restore familiar Sigma scaling
+            sigma_factor = z * math.sqrt(2)
+            
+            net_counts = (sig_cps - blk_cps) * bl_dt
+            detection_ratio = net_counts / L_c_counts if L_c_counts > 0 else 0
+            snr = detection_ratio * sigma_factor # Back to "Sigma SNR" for UI consistency
+
             factor = 1.0 if (is_raw_counts == show_counts_check) else (dwell_s if show_counts_check else 1/dwell_s)
             temp_data.append({"name": col, "current_dwell_ms": dwell_s*1000, "disp_sig": m_sig*factor, "disp_std_sig": df_sig[col].std()*factor, "disp_blk": m_blk*factor, "disp_std_blk": s_blk*factor, "initial_snr": snr})
         return temp_data
@@ -871,7 +907,7 @@ class Logic:
             dwell_s = row['current_dwell_ms'] / 1000.0
             row['sig_cps'] = df_sig[name].mean() if not is_raw_counts else df_sig[name].mean() / dwell_s
             row['blk_cps'] = df_blk[name].mean() if not is_raw_counts else df_blk[name].mean() / dwell_s
-            row['std_counts'] = df_blk[name].std() if is_raw_counts else df_blk[name].std() * dwell_s
+            row['stdev_blank_counts'] = df_blk[name].std() if is_raw_counts else df_blk[name].std() * dwell_s
             row['baseline_dt_s'] = dwell_s
             rows.append(row)
         return rows, df_sig.copy(), df_blk.copy()
@@ -4982,7 +5018,7 @@ class ioliteOptimiser(QWidget):
                     final_notes.append((f"The following channels cannot be set lower than the hardware minimum&nbsp;({min_dwell_ms}&nbsp;ms):", ", ".join(min_icp_isos), "blue"))
                 
                 if zero_bg_isos:
-                    final_notes.append(("The following channels had zero counts in the background. The background has been assumed to be 1 count over the baseline duration:", ", ".join(zero_bg_isos), "gray"))
+                    final_notes.append(("The following channels had zero counts in the background. The detection limit ($L_c$) has been calculated using the Square Root Transform rule for variance stabilization:", ", ".join(zero_bg_isos), "gray"))
             
 
             
