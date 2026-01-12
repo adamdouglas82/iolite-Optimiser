@@ -2,7 +2,7 @@
 #/ Description: Characterises your system's single-pulse washout to calculate the optimal balance of spot size, scan speed, and repetition rate that achieves your target data quality.
 #/ Type: UI
 #/ Authors: Adam Douglas
-#/ Version: 0.9.2
+#/ Version: 0.9.4
 #/ Contact: Adam.Douglas@icpms.com
 
 import math
@@ -37,19 +37,31 @@ except Exception as e:
 
 # iolite-specific imports (PythonQt)
 try:
-    from iolite.QtGui import QAction, QSizePolicy, QWidget, QLabel, QDoubleSpinBox, QSpinBox, QCheckBox, QComboBox, QGridLayout, QHBoxLayout, QVBoxLayout, QGroupBox, QFormLayout, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QMenu, QColorDialog, QDialog, QPushButton, QScrollArea, QSplitter, QFrame, QLineEdit, QTabWidget, QStackedWidget, QApplication, QPalette, QColor
+    from iolite.QtGui import (QAction, QSizePolicy, QWidget, QLabel, QDoubleSpinBox, QSpinBox, QCheckBox, 
+                              QComboBox, QGridLayout, QHBoxLayout, QVBoxLayout, QGroupBox, QFormLayout, 
+                              QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QMenu, 
+                              QColorDialog, QDialog, QPushButton, QScrollArea, QSplitter, QFrame, 
+                              QLineEdit, QTabWidget, QStackedWidget, QApplication, QPalette, QColor,
+                              QListWidget, QListWidgetItem, QTextEdit, QInputDialog, QMessageBox)
     from iolite.QtCore import Qt, QTimer, QSize, QEvent, QUrl
     from iolite import data, IoLog
 except ImportError:
     # Fallback for non-iolite environments (VSCode)
     try:
-        from PyQt5.QtWidgets import (QAction, QSizePolicy, QWidget, QLabel, QDoubleSpinBox, QSpinBox, QCheckBox, QComboBox, QGridLayout, QHBoxLayout, QVBoxLayout, QGroupBox, QFormLayout, QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QMenu, QColorDialog, QDialog, QPushButton, QScrollArea, QSplitter, QFrame, QLineEdit, QTabWidget, QStackedWidget, QApplication)
+        from PyQt5.QtWidgets import (QAction, QSizePolicy, QWidget, QLabel, QDoubleSpinBox, QSpinBox, QCheckBox, 
+                                     QComboBox, QGridLayout, QHBoxLayout, QVBoxLayout, QGroupBox, QFormLayout, 
+                                     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QMenu, 
+                                     QColorDialog, QDialog, QPushButton, QScrollArea, QSplitter, QFrame, 
+                                     QLineEdit, QTabWidget, QStackedWidget, QApplication,
+                                     QListWidget, QListWidgetItem, QTextEdit, QInputDialog, QMessageBox)
         from PyQt5.QtCore import Qt, QTimer, QSize, QEvent, QUrl
         from PyQt5.QtGui import QPalette, QColor
     except ImportError:
         pass
 
 # --- EMBEDDED CONSTANTS ---
+VERSION = "0.9.4"
+
 ICP_SPECS = {
     "Agilent": {
         "7900": {"type": "Quadrupole", "min_dwell": 0.1, "prec": 0.1},
@@ -279,21 +291,33 @@ class Logic:
         # Alignment is at l001. We want to cover from the start of the buffer to the end of the pulse + buffer.
         max_fw001 = (peaks_df['r001'] - peaks_df['l001']).max()
         
-        # 2. Calculate the baseline gap buffer
+        # 2. Asymmetric baseline buffers (User Request: Show more peak, peak to the left)
         if len(peaks_df) > 1:
             pdf = peaks_df.sort_values('Peak Time (s)')
             gaps = pdf['l001'].values[1:] - pdf['r001'].values[:-1]
-            median_gap = np.median(gaps)
-            buffer_s = 0.5 * max(0, median_gap)
+            median_gap = max(0, np.median(gaps))
+            
+            # User Request: Exactly 10% margin on both sides
+            b_left = 0.1 * max_fw001
+            b_right = 0.20 * max_fw001
+            
+            # Safety: Ensure we don't clip next peak (40% of gap)
+            b_right = min(b_right, 0.4 * median_gap)
         else:
-            buffer_s = 0.2 * max_fw001
+            # Single peak fallbacks
+            b_left = 0.1 * max_fw001
+            b_right = 0.20 * max_fw001
+            
+        # Global minimums (0.1ms / 0.1ms) - Fixes "needle" peaks
+        b_left = max(b_left, 0.0001)
+        b_right = max(b_right, 0.0001)
         
         peak_segments = []
         
         for i, row in peaks_df.iterrows():
             # Align at l001 absolute time
-            t_start_abs = row['l001'] - buffer_s
-            t_end_abs = row['r001'] + buffer_s
+            t_start_abs = row['l001'] - b_left
+            t_end_abs = row['r001'] + b_right
             
             # Convert to indices
             idx_start = np.searchsorted(t_raw, t_start_abs)
@@ -314,8 +338,8 @@ class Logic:
             return None
 
         # Interpolation to a common grid
-        # Grid covers from -buffer to max_pulse_width + buffer
-        grid_t = np.arange(-buffer_s, max_fw001 + buffer_s + dt, dt)
+        # Grid covers from -b_left to max_pulse_width + b_right
+        grid_t = np.arange(-b_left, max_fw001 + b_right + dt, dt)
         sum_y = np.zeros_like(grid_t)
         count_y = np.zeros_like(grid_t)
         
@@ -917,25 +941,79 @@ class Logic:
         try:
             numeric_cols = [c for c in df.columns if c != 'Time' and np.issubdtype(df[c].dtype, np.number)]
             if not numeric_cols: return (0.0, 1.0), (2.0, 3.0)
-            norm_df = df[numeric_cols].copy()
-            for col in norm_df.columns:
-                mn, mx = norm_df[col].min(), norm_df[col].max()
-                norm_df[col] = (norm_df[col] - mn) / (mx - mn) if mx > mn else 0.0
-            total_signal = norm_df.sum(axis=1).values
+            
+            y = df[numeric_cols].sum(axis=1).values
             time_vals = df['Time'].values
-            bg_idx = max(5, int(len(df) * 0.15))
-            bg_mean, bg_std = np.mean(total_signal[:bg_idx]), np.std(total_signal[:bg_idx])
-            thresh = bg_mean + (10 * bg_std)
-            if thresh == bg_mean: thresh = bg_mean * 1.5
-            sig_indices = np.where(total_signal > thresh)[0]
+            
+            # 1. Very sensitive baseline estimation
+            init_window = max(10, int(len(y) * 0.05))
+            bg_est = y[:init_window]
+            bg_mean = np.mean(bg_est)
+            bg_std = np.std(bg_est) if len(bg_est) > 1 else 0
+            
+            y_max = np.max(y)
+            # Threshold: 10.0 sigma above noise, or 10% of max range (User Request: Stricter filtering)
+            thresh = max(bg_mean + 10.0 * bg_std, bg_mean + (y_max - bg_mean) * 0.1)
+            
+            # 2. Narrower rolling max to handle pulsed data without excessive smear
+            dt = time_vals[1] - time_vals[0] if len(time_vals) > 1 else 0.1
+            window_size = max(3, int(0.5 / dt)) # 0.5s window
+            y_series = pd.Series(y)
+            y_smooth = y_series.rolling(window=window_size, center=True).max().fillna(y_series).values
+            
+            sig_indices = np.where(y_smooth > thresh)[0]
+            
             if len(sig_indices) > 5:
-                s_idx, e_idx = sig_indices[0], sig_indices[-1]
-                sig_crop = int((e_idx - s_idx) * 0.10)
+                # 3. Island-based noise filtering (User Request: Ignore pre-pulse noise)
+                # Group into contiguous clusters (islands)
+                islands = []
+                if len(sig_indices) > 0:
+                    curr = [sig_indices[0]]
+                    for i in range(1, len(sig_indices)):
+                        if sig_indices[i] == sig_indices[i-1] + 1:
+                            curr.append(sig_indices[i])
+                        else:
+                            islands.append(curr)
+                            curr = [sig_indices[i]]
+                    islands.append(curr)
+                
+                # Filter noise spikes: Real signal has "mass" (duration or intensity)
+                y_max_excess = y_max - bg_mean
+                valid_islands = []
+                for isl in islands:
+                    duration = time_vals[isl[-1]] - time_vals[isl[0]]
+                    peak_ex = np.max(y[isl]) - bg_mean
+                    # Laser pulses usually have duration > 0.5s OR > 10% of global intensity
+                    if duration > 0.5 or peak_ex > 0.1 * y_max_excess:
+                        valid_islands.append(isl)
+                
+                # If we have valid islands, use them. Otherwise fallback to raw clusters to be safe.
+                filtered_indices = [idx for isl in (valid_islands if valid_islands else islands) for idx in isl]
+                
+                s_idx, e_idx = filtered_indices[0], filtered_indices[-1]
+                
+                # Signal Region: Symmetric 5% crop
+                sig_len = e_idx - s_idx
+                sig_crop = int(sig_len * 0.05)
                 rec_sig = (time_vals[s_idx + sig_crop], time_vals[e_idx - sig_crop])
-                bg_crop = int(s_idx * 0.10)
-                rec_bg = (time_vals[bg_crop], time_vals[s_idx - bg_crop]) if s_idx > 5 else (time_vals[0], time_vals[bg_idx])
+                
+                # Background Region: Asymmetric crop to ensure clearing
+                # We pull back significantly (15%) from the detected signal start
+                gap_len = s_idx
+                bg_start_idx = int(gap_len * 0.05)
+                bg_end_idx = s_idx - int(gap_len * 0.15)
+                
+                if bg_end_idx > bg_start_idx + 2:
+                    rec_bg = (time_vals[bg_start_idx], time_vals[bg_end_idx])
+                else:
+                    # Fallback if space is very tight
+                    rec_bg = (time_vals[0], time_vals[max(1, s_idx // 2)])
+                
                 return rec_bg, rec_sig
-        except: pass
+        except Exception as e:
+            # IoLog.warning(f"iolite Optimiser: Auto-detect error: {e}")
+            pass
+            
         t = df['Time'].values
         return (t[0], t[len(t)//5]), (t[len(t)//3], t[-1])
 
@@ -1023,120 +1101,456 @@ class SettingsDialog(QDialog):
         self.main_layout.addLayout(btns)
 
 
-class DwellDialog(QDialog):
-    def __init__(self, channels, detected_at=None, parent=None):
+class PresetManagerDialog(QDialog):
+    """Dialog to list, view, and delete saved channel presets."""
+    def __init__(self, presets, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Configure Dwell Times")
-        self.resize(400, 520)
-        self.channels = channels
-        self.result_dwells = {}
-        self.global_mode = False
+        self.setWindowTitle("Manage Presets")
+        self.resize(450, 400)
+        self.presets = presets.copy()
         
         layout = QVBoxLayout(self)
         
-        # 0. Information Header
-        if detected_at:
-            lbl_info = QLabel(f"Detected Acquisition Time: <b>{detected_at:.3f} ms</b>")
-            lbl_info.setStyleSheet("color: white; margin-bottom: 5px;")
-            layout.addWidget(lbl_info)
+        lbl = QLabel("Saved Presets:")
+        lbl.setStyleSheet("font-weight: bold;")
+        layout.addWidget(lbl)
         
-        # 1. Toggle Mode
-        self.chk_same = QCheckBox("Set to Global Dwell Time")
-        self.chk_same.toggled.connect(self._toggle_mode)
-        layout.addWidget(self.chk_same)
+        self.list_widget = QListWidget()
+        for name in self.presets.keys():
+            self.list_widget.addItem(name)
+        self.list_widget.itemSelectionChanged.connect(self._update_preview)
+        layout.addWidget(self.list_widget)
         
-        # 2. Stacked Widget
-        self.stack = QStackedWidget()
-        layout.addWidget(self.stack)
+        # Preview Area
+        layout.addWidget(QLabel("Channels in selected preset:"))
+        self.preview = QTextEdit()
+        self.preview.setReadOnly(True)
+        layout.addWidget(self.preview)
         
-        # Page 0: Individual Table
-        self.page_table = QWidget()
-        l_table = QVBoxLayout(self.page_table)
-        l_table.setContentsMargins(0,0,0,0)
-        
-        self.table = QTableWidget()
-        self.table.setColumnCount(2)
-        self.table.setHorizontalHeaderLabels(["Isotope", "Dwell (ms)"])
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        self.table.setRowCount(len(channels))
-        
-        self.spin_map = {} # row -> spinbox
-        
-        for i, ch_name in enumerate(channels):
-            self.table.setItem(i, 0, QTableWidgetItem(ch_name))
-            sp = QDoubleSpinBox()
-            sp.setRange(0.001, 10000)
-            sp.setValue(10) # Default 10ms
-            sp.setDecimals(3)
-            self.table.setCellWidget(i, 1, sp)
-            self.spin_map[ch_name] = sp
-            
-        l_table.addWidget(self.table)
-        self.stack.addWidget(self.page_table)
-        
-        # Page 1: Global Spinbox
-        self.page_global = QWidget()
-        l_global = QVBoxLayout(self.page_global)
-        
-        l_global.addWidget(QLabel("Global Dwell Time (ms):"))
-        self.spin_global = QDoubleSpinBox()
-        self.spin_global.setRange(0.001, 10000)
-        self.spin_global.setValue(10)
-        self.spin_global.setDecimals(3)
-        l_global.addWidget(self.spin_global)
-        l_global.addStretch()
-        
-        self.stack.addWidget(self.page_global)
-        
-        # 3. Buttons (Manual implementation for stability)
+        # Buttons
         h_btns = QHBoxLayout()
+        btn_del = QPushButton("Delete Selected")
+        btn_del.clicked.connect(self._delete_preset)
+        h_btns.addWidget(btn_del)
+        
         h_btns.addStretch()
         
-        self.btn_save = QPushButton("Save and Close")
-        self.btn_save.clicked.connect(self.accept)
-        h_btns.addWidget(self.btn_save)
+        btn_close = QPushButton("Done")
+        btn_close.clicked.connect(lambda: self.done(1))
+        h_btns.addWidget(btn_close)
+        
+        layout.addLayout(h_btns)
+
+    def _update_preview(self):
+        item = self.list_widget.currentItem()
+        if item:
+            name = item.text()
+            if callable(name): name = name()
+            channels = self.presets.get(name, [])
+            self.preview.setText(", ".join(channels))
+        else:
+            self.preview.clear()
+
+    def _delete_preset(self):
+        item = self.list_widget.currentItem()
+        if not item:
+            return
+        
+        name = item.text()
+        if callable(name): name = name()
+        
+        res = QMessageBox.question(self, "Delete Preset", f"Are you sure you want to delete preset '{name}'?",
+                                 QMessageBox.Yes | QMessageBox.No)
+        
+        if res == QMessageBox.Yes:
+            if name in self.presets:
+                del self.presets[name]
+                self.list_widget.takeItem(self.list_widget.row(item))
+                self.preview.clear()
+
+
+class DataConfigDialog(QDialog):
+    """
+    Unified dialog for data configuration:
+    - For TOF/Vitesse: Channel selection checkboxes + global dwell time
+    - For Quad/Sector: Just dwell time configuration (per-channel or global)
+    """
+    def __init__(self, channels, detected_at=None, is_tof=False, parent=None):
+        super().__init__(parent)
+        self.is_tof = is_tof
+        # Filter out 'TotalBeam'
+        channels = [c for c in channels if str(c).strip().lower() != "totalbeam"]
+        self.channels = channels
+        self.result_channels = channels.copy()  # Default: all channels selected
+        self.result_dwells = {}
+        
+        if is_tof:
+            self.setWindowTitle("Import TOF Data")
+            self.resize(400, 550)
+        else:
+            self.setWindowTitle("Configure Dwell Times")
+            self.resize(400, 520)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(5)
+        
+        # 0. Detected AT Header
+        if detected_at:
+            lbl_at = QLabel(f"Detected Acquisition Time: <b>{detected_at:.3f} ms</b>")
+            lbl_at.setIndent(0)
+            lbl_at.setStyleSheet("margin: 0px; padding: 0px; margin-bottom: 5px;")
+            layout.addWidget(lbl_at)
+        
+        # --- TOF MODE: Channel Selection ---
+        if is_tof:
+            lbl = QLabel("Select channels to load:")
+            lbl.setWordWrap(True)
+            lbl.setIndent(0)
+            lbl.setStyleSheet("font-weight: bold; margin: 0px; padding: 0px;")
+            layout.addWidget(lbl)
+            
+            # Select All / None
+            h_sel = QHBoxLayout()
+            btn_all = QPushButton("Select All")
+            btn_all.setAutoDefault(False)
+            btn_all.setDefault(False)
+            btn_none = QPushButton("Select None")
+            btn_none.setAutoDefault(False)
+            btn_none.setDefault(False)
+            btn_all.clicked.connect(self.select_all)
+            btn_none.clicked.connect(self.select_none)
+            h_sel.addWidget(btn_all)
+            h_sel.addWidget(btn_none)
+            h_sel.addStretch()
+            
+            # Channel counter
+            self.lbl_count = QLabel(f"0 / {len(channels)} selected")
+            h_sel.addWidget(self.lbl_count)
+            layout.addLayout(h_sel)
+            
+            # Scroll Area for Checkboxes
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            self.scroll_content = QWidget()
+            self.scroll_layout = QVBoxLayout(self.scroll_content)
+            self.scroll_layout.setContentsMargins(5,5,5,5)
+            self.scroll_layout.setSpacing(2)
+            
+            self.checks = []
+            for ch in channels:
+                chk = QCheckBox(ch)
+                chk.setChecked(False)  # Default off for TOF
+                chk.toggled.connect(self._update_count)
+                self.scroll_layout.addWidget(chk)
+                self.checks.append(chk)
+                
+            self.scroll_layout.addStretch()
+            scroll.setWidget(self.scroll_content)
+            layout.addWidget(scroll)
+            
+            # Preset Selection
+            layout.addWidget(QLabel("Load Preset:"))
+            self.cmb_preset = QComboBox()
+            self.cmb_preset.addItem("-- Select --")
+            self._load_presets()
+            self.cmb_preset.currentTextChanged.connect(self._apply_preset)
+            layout.addWidget(self.cmb_preset)
+            
+            # Global Dwell for TOF
+            h_dwell = QHBoxLayout()
+            h_dwell.addWidget(QLabel("Global Dwell Time (ms):"))
+            self.spin_dwell = QDoubleSpinBox()
+            self.spin_dwell.setRange(0.001, 10000)
+            self.spin_dwell.setValue(detected_at if detected_at else 10.0)
+            self.spin_dwell.setDecimals(3)
+            h_dwell.addWidget(self.spin_dwell)
+            h_dwell.addStretch()
+            layout.addLayout(h_dwell)
+            
+        # --- QUAD/SECTOR MODE: Dwell Configuration ---
+        else:
+            self.checks = None
+            
+            # Toggle: Global vs Per-Channel
+            # User Request: Default to Global, Label "Set individual dwell times"
+            self.chk_same = QCheckBox("Set individual dwell times")
+            self.chk_same.setChecked(False) # Unchecked = Global (Default)
+            self.chk_same.toggled.connect(self._toggle_mode)
+            layout.addWidget(self.chk_same)
+            
+            self.stack = QStackedWidget()
+            layout.addWidget(self.stack)
+            
+            # Page 0: Global Spinbox (Default)
+            self.page_global = QWidget()
+            l_global = QVBoxLayout(self.page_global)
+            l_global.setContentsMargins(0,0,0,0)
+            l_global.addWidget(QLabel("Global Dwell Time (ms):"))
+            self.spin_dwell = QDoubleSpinBox()
+            self.spin_dwell.setRange(0.001, 10000)
+            self.spin_dwell.setValue(detected_at if detected_at else 10.0)
+            self.spin_dwell.setDecimals(3)
+            l_global.addWidget(self.spin_dwell)
+            l_global.addStretch()
+            self.stack.addWidget(self.page_global) # Index 0
+            
+            # Page 1: Individual Table
+            self.page_table = QWidget()
+            l_table = QVBoxLayout(self.page_table)
+            l_table.setContentsMargins(0,0,0,0)
+            
+            self.table = QTableWidget()
+            self.table.setColumnCount(2)
+            self.table.setHorizontalHeaderLabels(["Isotope", "Dwell (ms)"])
+            self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+            self.table.setRowCount(len(channels))
+            
+            self.spin_map = {}
+            for i, ch_name in enumerate(channels):
+                self.table.setItem(i, 0, QTableWidgetItem(ch_name))
+                sp = QDoubleSpinBox()
+                sp.setRange(0.001, 10000)
+                sp.setValue(detected_at if detected_at else 10.0)
+                sp.setDecimals(3)
+                self.table.setCellWidget(i, 1, sp)
+                self.spin_map[ch_name] = sp
+                
+            l_table.addWidget(self.table)
+            self.stack.addWidget(self.page_table)  # Index 1
+        
+        # --- Buttons ---
+        btns = QHBoxLayout()
+        
+        # Preset buttons on left (only for TOF mode)
+        if is_tof:
+            btn_save_preset = QPushButton("Save Preset")
+            btn_save_preset.setAutoDefault(False)
+            btn_save_preset.clicked.connect(self._save_preset)
+            btns.addWidget(btn_save_preset)
+            
+            btn_manage = QPushButton("Manage Presets")
+            btn_manage.setAutoDefault(False)
+            btn_manage.clicked.connect(self._manage_presets)
+            btns.addWidget(btn_manage)
+        
+        btns.addStretch()
+        self.btn_ok = QPushButton("OK")
+        self.btn_ok.clicked.connect(self.accept)
+        btns.addWidget(self.btn_ok)
         
         self.btn_cancel = QPushButton("Cancel")
         self.btn_cancel.clicked.connect(self.reject)
-        h_btns.addWidget(self.btn_cancel)
+        btns.addWidget(self.btn_cancel)
+        layout.addLayout(btns)
+    
+    def _toggle_mode(self, checked):
+        if hasattr(self, 'stack'):
+            self.stack.setCurrentIndex(1 if checked else 0)
+    
+    def _update_count(self):
+        if hasattr(self, 'lbl_count') and self.checks:
+            count = sum(1 for chk in self.checks if chk.isChecked())
+            total = len(self.checks)
+            self.lbl_count.setText(f"{count} / {total} selected")
+    
+    def select_all(self):
+        if self.checks:
+            for chk in self.checks: chk.setChecked(True)
+            self._update_count()
+            if hasattr(self, 'cmb_preset'):
+                self.cmb_preset.blockSignals(True)
+                self.cmb_preset.setCurrentIndex(0)
+                self.cmb_preset.blockSignals(False)
         
-        layout.addLayout(h_btns)
+    def select_none(self):
+        if self.checks:
+            for chk in self.checks: chk.setChecked(False)
+            self._update_count()
+            if hasattr(self, 'cmb_preset'):
+                self.cmb_preset.blockSignals(True)
+                self.cmb_preset.setCurrentIndex(0)
+                self.cmb_preset.blockSignals(False)
+    
+    def _get_preset_file(self):
+        import os
+        home = os.path.expanduser("~")
+        # Define the base directory (matches main class logic)
+        base_dir = os.path.join(home, "Documents", "iolite", "iolite Optimiser")
+        if not os.path.exists(base_dir):
+            alt_path = os.path.join(home, "OneDrive", "Documents", "iolite", "iolite Optimiser")
+            if os.path.exists(alt_path):
+                base_dir = alt_path
         
+        # Ensure directory exists if we're trying to save
+        if not os.path.exists(base_dir):
+            try:
+                os.makedirs(base_dir)
+            except: pass
+            
+        return os.path.join(base_dir, 'iolite Optimiser Channel Presets.json')
+    
+    def _load_presets(self):
+        """Load presets from JSON file into the dropdown."""
+        try:
+            path = self._get_preset_file()
+            if os.path.exists(path):
+                with open(path, 'r') as f:
+                    self._presets = json.load(f)
+                for name in self._presets.keys():
+                    self.cmb_preset.addItem(name)
+            else:
+                self._presets = {}
+        except Exception as e:
+            IoLog.warning(f"iolite Optimiser: Could not load presets: {e}")
+            self._presets = {}
+    
+    def _save_presets_to_file(self):
+        """Save all presets to JSON file."""
+        import json
+        try:
+            path = self._get_preset_file()
+            # Ensure we are saving clean Python types
+            clean_presets = {}
+            for k, v in self._presets.items():
+                clean_k = str(k)
+                clean_v = [str(x) for x in v]
+                clean_presets[clean_k] = clean_v
 
+            with open(path, 'w') as f:
+                json.dump(clean_presets, f, indent=2)
+            IoLog.information(f"iolite Optimiser: Presets saved to {path} ({len(clean_presets)} presets)")
+        except Exception as e:
+            IoLog.error(f"iolite Optimiser: Error saving presets to file: {e}")
+            IoLog.error(traceback.format_exc())
+    
+    def _apply_preset(self, preset_name):
+        """Apply a preset to the checkboxes."""
+        if not hasattr(self, '_presets'):
+            return
+            
+        if preset_name == "-- Select --":
+            # Manual return to default: Uncheck all
+            if self.checks:
+                for chk in self.checks: chk.setChecked(False)
+            self._update_count()
+            return
+        
+        preset_channels = self._presets.get(preset_name, [])
+        if not preset_channels:
+            return
+        
+        # Uncheck all, then check matching
+        for chk in self.checks:
+            t = chk.text
+            if callable(t): t = t()
+            chk.setChecked(t in preset_channels)
+        
+        self._update_count()
+    
+    def _save_preset(self):
+        """Prompt for name and save current selection as a preset."""
+        try:
+            res = QInputDialog.getText(self, "Save Preset", "Enter preset name:")
+            
+            # Handle variable return types from different Qt wrappers (PythonQt vs PyQt)
+            if isinstance(res, (list, tuple)):
+                name = str(res[0]).strip()
+                ok = res[1] if len(res) > 1 else bool(name)
+            else:
+                name = str(res).strip()
+                ok = bool(name)
+                
+            if ok and name:
+                name = str(name).strip() # Explicit Python string
+                selected = []
+                for chk in self.checks:
+                    if chk.isChecked():
+                        t = chk.text
+                        if callable(t): t = t()
+                        selected.append(str(t)) # Explicit Python string
+                
+                if not selected:
+                    QMessageBox.warning(self, "Empty Preset", "No channels selected to save.")
+                    return
+                
+                self._presets[name] = selected
+                self._save_presets_to_file()
+                
+                # Add to dropdown if not already there
+                if self.cmb_preset.findText(name) == -1:
+                    self.cmb_preset.addItem(name)
+                
+                # Explicitly set and apply
+                self.cmb_preset.setCurrentText(name)
+                self._apply_preset(name) # Force apply in case setCurrentText didn't trigger signal
+                
+                IoLog.information(f"iolite Optimiser: Saved preset '{name}' with {len(selected)} channels")
+        except Exception as e:
+            IoLog.error(f"iolite Optimiser: Failed to save preset: {e}")
+            IoLog.error(traceback.format_exc())
+    
+    def _manage_presets(self):
+        """Show dialog to manage (view/delete) presets."""
+        dlg = PresetManagerDialog(self._presets, self)
+        if dlg.exec_():
+            self._presets = dlg.presets
+            self._save_presets_to_file()
+            # Refresh dropdown
+            self.cmb_preset.clear()
+            self.cmb_preset.addItem("-- Select --")
+            for name in self._presets.keys():
+                self.cmb_preset.addItem(name)
+    
     def _get(self, obj, attr):
         if not obj or not hasattr(obj, attr): return None
         try:
             val = getattr(obj, attr)
             return val() if callable(val) else val
-        except Exception:
+        except:
             return None
-
-    def _toggle_mode(self, checked):
-        self.global_mode = checked
-        self.stack.setCurrentIndex(1 if checked else 0)
         
     def accept(self):
-        IoLog.information("iolite Optimiser: DwellDialog accept called")
         try:
-            if self.global_mode:
-                val = self._get(self.spin_global, 'value')
-                if val is not None:
-                    for ch in self.channels:
-                        self.result_dwells[ch] = val
+            # TOF Mode: Collect selected channels + global dwell
+            if self.is_tof:
+                selected = []
+                for chk in self.checks:
+                    if chk.isChecked():
+                        t = chk.text
+                        if callable(t): t = t()
+                        selected.append(t)
+                self.result_channels = selected
+                
+                dwell_val = self._get(self.spin_dwell, 'value')
+                for ch in selected:
+                    self.result_dwells[ch] = dwell_val
+                    
+                IoLog.information(f"iolite Optimiser: TOF config - {len(selected)} channels, global dwell {dwell_val}ms")
+            
+            # Quad Mode: Collect dwell config
             else:
-                for ch, sp in self.spin_map.items():
-                    v = self._get(sp, 'value')
-                    if v is not None:
-                        self.result_dwells[ch] = v
-
-            self.done(QDialog.Accepted) 
-            IoLog.information("iolite Optimiser: DwellDialog accept completed")
+                self.result_channels = self.channels  # All channels
+                
+                if hasattr(self, 'chk_same') and self._get(self.chk_same, 'isChecked'):
+                    # Per-channel mode (Checked = Individual)
+                    for ch, sp in self.spin_map.items():
+                        v = self._get(sp, 'value')
+                        if v: self.result_dwells[ch] = v
+                else:
+                    # Global mode (Unchecked = Global)
+                    dwell_val = self._get(self.spin_dwell, 'value')
+                    for ch in self.channels:
+                        self.result_dwells[ch] = dwell_val
+                        
+                IoLog.information(f"iolite Optimiser: Dwell config for {len(self.result_dwells)} channels")
+            
+            self.done(QDialog.Accepted)
         except Exception as e:
-            IoLog.error(f"iolite Optimiser: DwellDialog accept Error: {e}")
-            IoLog.error(traceback.format_exc())
-
+            IoLog.error(f"iolite Optimiser: DataConfigDialog Error: {e}")
+            self.done(QDialog.Rejected)
+    
     def reject(self):
-        IoLog.information("iolite Optimiser: DwellDialog reject called")
         self.done(QDialog.Rejected)
 
 
@@ -1178,6 +1592,18 @@ class ioliteOptimiser(QWidget):
         self.refresh_timer.setSingleShot(True)
         self.refresh_timer.setInterval(500)
         self.refresh_timer.timeout.connect(self._perform_auto_refresh)
+
+        # Delayed click detection for legend (ensures double-click works with large datasets)
+        self._legend_click_timer = QTimer()
+        self._legend_click_timer.setSingleShot(True)
+        self._legend_click_timer.setInterval(300)  # 300ms window for double-click
+        self._legend_click_timer.timeout.connect(self._execute_legend_single_click)
+        self._pending_legend_click = None  # Stores (target_obj, target_list, canvas, ax, l_map, l_chk_rescale)
+        
+        # Debounce timer for SPR peak detection
+        self.spr_debounce_timer = QTimer()
+        self.spr_debounce_timer.setSingleShot(True)
+        self.spr_debounce_timer.timeout.connect(self.run_spr_analysis)
 
         # Initialize hardware state
         self.icp_tech = "Quadrupole"
@@ -1351,7 +1777,7 @@ class ioliteOptimiser(QWidget):
         except:
             self.resize(1200, 900) 
 
-        self.setWindowTitle("iolite Optimiser") 
+        self.setWindowTitle(f"iolite Optimiser - v{VERSION}")
 
         # Main Layout (Tabs)
         main_layout = QVBoxLayout()
@@ -1420,28 +1846,28 @@ class ioliteOptimiser(QWidget):
         l_prom.setContentsMargins(0, 0, 0, 0)
         self.spin_spr_prom = QDoubleSpinBox()
         self.spin_spr_prom.setRange(0, 1e9)
-        self.spin_spr_prom.setDecimals(1)
+        self.spin_spr_prom.setDecimals(0)
         self.spin_spr_prom.setValue(100.0)
         self.spin_spr_prom.setSingleStep(100.0)
         self.spin_spr_prom.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.spin_spr_prom.valueChanged.connect(self.run_spr_analysis)
+        self.spin_spr_prom.valueChanged.connect(self._on_spr_prom_changed)
         l_prom.addWidget(self.spin_spr_prom)
         
         self.chk_spr_auto_prom = QCheckBox("Auto")
         self.chk_spr_auto_prom.setChecked(True)
         self.chk_spr_auto_prom.toggled.connect(self._on_spr_auto_prom_toggled)
         l_prom.addWidget(self.chk_spr_auto_prom)
-        self.spin_spr_prom.setEnabled(False) # Start disabled if Auto is on
+        # self.spin_spr_prom.setEnabled(False) # Removed: User wants always clickable
         
         grid_det.addWidget(QLabel("Peak Cutoff:"), 1, 0)
         grid_det.addLayout(l_prom, 1, 1)
         
         self.spin_spr_dist = QSpinBox()
-        self.spin_spr_dist.setRange(1, 1000)
+        self.spin_spr_dist.setRange(1, 100000)
         self.spin_spr_dist.setValue(self.persistent_settings.get('spr_min_distance', 10))
         self.spin_spr_dist.setSuffix(" data pts.")
         self.spin_spr_dist.setToolTip("Minimum distance between peaks. Prevents detecting multiple points on the same peak.")
-        self.spin_spr_dist.valueChanged.connect(self.run_spr_analysis)
+        self.spin_spr_dist.valueChanged.connect(self._on_spr_dist_changed)
         self.spin_spr_dist.valueChanged.connect(self.save_persistent_settings)
         grid_det.addWidget(QLabel("Min. Distance:"), 2, 0)
         grid_det.addWidget(self.spin_spr_dist, 2, 1)
@@ -1980,8 +2406,9 @@ class ioliteOptimiser(QWidget):
             comp_df = Logic.generate_composite_peak(self.spr_df, iso, filtered_df)
             if comp_df is not None:
                 # Use the anchor color (Index 0 of safe_palette)
-                self.spr_ax_comp.plot(comp_df['Relative Time (s)'], comp_df['Normalised Intensity'], color=safe_palette[0], lw=2)
-                self.spr_ax_comp.set_xlabel("Rel. Time (s)", fontsize='medium', color=fg_col)
+                # Switch to ms for X-axis readability (User Request)
+                self.spr_ax_comp.plot(comp_df['Relative Time (s)'] * 1000.0, comp_df['Normalised Intensity'], color=safe_palette[0], lw=2)
+                self.spr_ax_comp.set_xlabel("Rel. Time (ms)", fontsize='medium', color=fg_col)
                 # Stable composite title anchored to axis top
                 self.spr_ax_comp.set_title("Composite Peak", fontsize='medium', color=fg_col, y=1.0, pad=10)
                 self.spr_ax_comp.set_ylim(-0.02, 1.05) # Tighter Y limit
@@ -2016,7 +2443,8 @@ class ioliteOptimiser(QWidget):
                         # Store width
                         comp_widths[lvl] = t_r - t_l
                         
-                        self.spr_ax_comp.plot([t_l, t_r], [lvl, lvl], linestyle='None', marker=mkr, markersize=5, color=col, alpha=0.8)
+                        # Plot in ms
+                        self.spr_ax_comp.plot([t_l * 1000.0, t_r * 1000.0], [lvl, lvl], linestyle='None', marker=mkr, markersize=5, color=col, alpha=0.8)
 
                 # Summary Stats Box (Inlaid Legend)
                 # Create persistent legend reference (Always create, control visibility)
@@ -2047,8 +2475,8 @@ class ioliteOptimiser(QWidget):
                 label_10 = f"FW0.1M (10%)\nComp: {_adap(val_10*mult)} {unit_label}\nMax:  {_adap(f10.max()*mult)} {unit_label}"
                 label_1 = f"FW0.01M (1%)\nComp: {_adap(val_1*mult)} {unit_label}\nMax:  {_adap(f1.max()*mult)} {unit_label}"
                 
-                h10 = Line2D([0], [0], linestyle='None', marker='s', markersize=4, color='C1', label=label_10)
-                h1 = Line2D([0], [0], linestyle='None', marker='d', markersize=4, color='C2', label=label_1)
+                h10 = Line2D([0], [0], linestyle='None', marker='s', markersize=4, color='C6', label=label_10)
+                h1 = Line2D([0], [0], linestyle='None', marker='d', markersize=4, color='C9', label=label_1)
                 
                 self.spr_stats_legend = self.spr_ax_comp.legend(handles=[h10, h1], loc='upper right', 
                                                     fontsize=8.5, handletextpad=0.5, labelspacing=1.0,
@@ -2176,34 +2604,58 @@ class ioliteOptimiser(QWidget):
         if len(y) < 2:
             return
             
-        # Strategy: Use 20% of the 5th to 95th percentile range
-        # Use nanpercentile to handle possible NaNs in the signal
+        # Strategy: Use robust background noise estimation (similar to region auto-detect)
         try:
-            p5 = np.nanpercentile(y, 5)
-            p95 = np.nanpercentile(y, 95)
-            range_val = p95 - p5
+            # 1. Estimate baseline noise from the beginning (typically gas blank)
+            init_window = max(10, int(len(y) * 0.05))
+            bg_est = y[:init_window]
+            bg_mean = np.nanmean(bg_est)
+            bg_std = np.nanstd(bg_est) if len(bg_est) > 1 else 0
             
-            if range_val > 0:
-                auto_val = range_val * 0.2
-                # Round to something sensible
-                auto_val = round(auto_val, 1) if auto_val > 1 else round(auto_val, 3)
+            y_max = np.nanmax(y)
+            y_range = y_max - bg_mean
+            
+            # 2. Robust threshold: 10% of total range OR 10 sigma (to clear noise floor)
+            # This prevents picking up noise spikes as valid peaks
+            auto_val = max(y_range * 0.1, 10 * bg_std)
+            
+            # Round to integer for UI readability (User Request)
+            auto_val = round(auto_val, 0)
                 
-                self._block_signals(self.spin_spr_prom, True)
-                self.spin_spr_prom.setValue(auto_val)
-                self._block_signals(self.spin_spr_prom, False)
-                IoLog.information(f"iolite Optimiser: Auto-detected SPR prominence for {iso}: {auto_val}")
-            else:
-                # Fallback: small % of max if range is 0 (flat)
-                mx = np.nanmax(y)
-                if mx > 0:
-                    auto_val = mx * 0.05
-                    self.spin_spr_prom.setValue(auto_val)
+            self._block_signals(self.spin_spr_prom, True)
+            self.spin_spr_prom.setValue(auto_val)
+            self._block_signals(self.spin_spr_prom, False)
         except Exception as e:
-            IoLog.error(f"iolite Optimiser: Error in auto-prominence detection: {e}")
+            # IoLog.error(f"iolite Optimiser: Error in auto-prominence detection: {e}")
+            pass
+
+    def _on_spr_prom_changed(self):
+        """
+        Called when SPR peak cutoff (prominence) is manually adjusted.
+        Auto-deselects the 'Auto' checkbox and applies 300ms debouncing.
+        """
+        # 1. Uncheck the Auto box if it's currently checked
+        if self._get(self.chk_spr_auto_prom, 'isChecked'):
+            self._block_signals(self.chk_spr_auto_prom, True)
+            self.chk_spr_auto_prom.setChecked(False)
+            self._block_signals(self.chk_spr_auto_prom, False)
+            # Ensure the spinbox remains enabled (it might have been disabled while Auto was on)
+            self.spin_spr_prom.setEnabled(True)
+        
+        # 2. Restart/Start the 500ms debounce timer
+        # This prevents the plot from flickering/re-calculating on every digit entered
+        self.spr_debounce_timer.start(500)
+
+    def _on_spr_dist_changed(self):
+        """
+        Called when SPR Min Distance is manually adjusted.
+        Applies 500ms debouncing.
+        """
+        # Start/Restart the 500ms debounce timer
+        self.spr_debounce_timer.start(500)
 
     def _on_spr_auto_prom_toggled(self, checked):
-        if hasattr(self, 'spin_spr_prom'):
-            self.spin_spr_prom.setEnabled(not checked)
+        # Removed: self.spin_spr_prom.setEnabled(not checked)
         if checked:
             self.run_spr_analysis()
 
@@ -2467,10 +2919,45 @@ class ioliteOptimiser(QWidget):
         # Move to Dialog
         self.settings_dlg.main_layout.insertWidget(1, grp_laser)
 
+        # 1.6 Plot Options (New Section)
+        grp_plot = QGroupBox("")
+        v_plot = QVBoxLayout()
+        v_plot.setSpacing(0)
+        v_plot.setContentsMargins(5, 2, 5, 2)
+        
+        lbl_p_title = QLabel("Plot Options")
+        lbl_p_title.setStyleSheet("font-weight: bold; font-size: 10pt; padding: 0px; margin: 0px;")
+        lbl_p_title.setAlignment(Qt.AlignCenter)
+        v_plot.addWidget(lbl_p_title)
+        
+        l_plot = QHBoxLayout()
+        l_plot.setContentsMargins(10, 5, 10, 5)
+        
+        self.chk_limit_vis = QCheckBox("Limit Visible Plots:")
+        self.chk_limit_vis.setChecked(self.persistent_settings.get('limit_vis', True))
+        self.chk_limit_vis.toggled.connect(lambda: self.update_plot(preserve_zoom=True))
+        
+        self.spin_max_vis = QSpinBox()
+        self.spin_max_vis.setRange(1, 100)
+        self.spin_max_vis.setValue(int(self.persistent_settings.get('max_vis', 5)))
+        self.spin_max_vis.setFixedWidth(50)
+        self.spin_max_vis.valueChanged.connect(lambda: self.update_plot(preserve_zoom=True))
+        
+        l_plot.addWidget(self.chk_limit_vis)
+        l_plot.addWidget(self.spin_max_vis)
+        l_plot.addStretch()
+        
+        v_plot.addLayout(l_plot)
+        grp_plot.setLayout(v_plot)
+        grp_plot.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        
+        self.settings_dlg.main_layout.insertWidget(2, grp_plot)
+
         # 1.6 Connect signals for immediate update
         # (Signals will be connected centrally in initUI to avoid duplication)
         # Add stretch to bottom to force the group boxes to collapse vertically
         self.settings_dlg.main_layout.insertStretch(2)
+
 
         # Input Parameters
         grp_input = QGroupBox("")
@@ -2541,7 +3028,7 @@ class ioliteOptimiser(QWidget):
         self.grid_qual.setSpacing(5)
 
         # Row 0
-        lbl_pulses = QLabel("Pulses per Dwell Time:"); lbl_pulses.setFixedWidth(lbl_w_in)
+        lbl_pulses = QLabel("Pulses per Acq. Time:"); lbl_pulses.setFixedWidth(lbl_w_in)
         self.grid_qual.addWidget(lbl_pulses, 0, 0)
         self.spin_pulses = QDoubleSpinBox()
         self.spin_pulses.setRange(1, 100); self.spin_pulses.setValue(self.persistent_settings.get('pulses', 5)); self.spin_pulses.setDecimals(1)
@@ -2731,7 +3218,7 @@ class ioliteOptimiser(QWidget):
         
         h_ctrl = QHBoxLayout()
         self.chk_norm = QCheckBox("Normalise")
-        self.chk_norm.setChecked(True) # Default On
+        self.chk_norm.setChecked(self.persistent_settings.get('normalise', True))
         
         self.chk_y_zoom = QCheckBox("Pan / Zoom Y")
         self.chk_y_zoom.setChecked(self.persistent_settings.get('opt_y_zoom', False))
@@ -2864,7 +3351,7 @@ class ioliteOptimiser(QWidget):
         self.spin_sigma.valueChanged.connect(self._on_ui_change)
         self.spin_snr.valueChanged.connect(self._on_ui_change)
         self.spin_duty.valueChanged.connect(self._on_ui_change)
-        self.chk_norm.toggled.connect(lambda: self.update_plot())
+        self.chk_norm.toggled.connect(lambda: self.update_plot(preserve_x_only=True))
         self.chk_norm.toggled.connect(self._on_ui_change)
         # self.chk_y_zoom.toggled.connect(self._on_ui_change) # Removed to prevent rescale on toggle
         self.chk_rescale.toggled.connect(self._on_ui_change)
@@ -3114,6 +3601,9 @@ class ioliteOptimiser(QWidget):
 
     def show_settings_dialog(self):
         self.settings_dlg.exec_()
+        # Apply any plot-related settings that changed (fresh, don't preserve visibility)
+        if hasattr(self, 'opt_df') and self.opt_df is not None:
+            self.update_plot()
         
     def _update_custom_visibility(self):
         # 1. Gather current state
@@ -3531,6 +4021,20 @@ class ioliteOptimiser(QWidget):
                 'cust_speed': self._get(self.spin_cust_speed, 'value'),
                 'cust_rr_type': self._get(self.cmb_cust_rr_type, 'currentText'),
                 'cust_rr_list': self._get(self.edit_cust_rr_list, 'text'),
+                
+                # Plot Options
+                'limit_vis': self._get(self.chk_limit_vis, 'isChecked'),
+                'max_vis': self._get(self.spin_max_vis, 'value'),
+                
+                'img_height': self._get(self.spin_height, 'value'),
+                'img_width': self._get(self.spin_width, 'value'),
+                'avoid_gaps': self._get(self.chk_avoid_gaps, 'isChecked'),
+                
+                # New Persistence Keys
+                'theme': self._get(self.combo_theme, 'currentText'),
+                'opt_y_zoom': self._get(self.chk_y_zoom, 'isChecked'),
+                'normalise': self._get(self.chk_norm, 'isChecked'),
+                'cust_rr_list': self._get(self.edit_cust_rr_list, 'text'),
                 'img_height': self._get(self.spin_height, 'value') if hasattr(self, 'spin_height') else 1000.0,
                 'img_width': self._get(self.spin_width, 'value') if hasattr(self, 'spin_width') else 1000.0,
                 'avoid_gaps': self._get(self.chk_avoid_gaps, 'isChecked') if hasattr(self, 'chk_avoid_gaps') else False,
@@ -3626,6 +4130,13 @@ class ioliteOptimiser(QWidget):
             # --- GLOBAL PRE-PROCESSING ---
             local_resolved_dwells = {}
             if new_df is not None:
+                # Calculate Acquisition Time EARLY so DwellDialog can show it
+                if 'Time' in new_df.columns and len(new_df['Time']) > 1:
+                    self.detected_at_ms = new_df['Time'].diff().median() * 1000.0
+                    IoLog.information(f"iolite Optimiser: Detected Acquisition Time: {self.detected_at_ms:.3f} ms")
+                else:
+                    self.detected_at_ms = None
+                
                 # Resolve Dwell Times & Units Globally (Need a snapshot for later assignment)
                 cols_all = [c for c in new_df.columns if c != 'Time']
                 if cols_all:
@@ -3729,7 +4240,7 @@ class ioliteOptimiser(QWidget):
                 if not found:
                     missing.append(name)
             
-            # 2. If missing, show dialog (Startup check removed to ensure visibility)
+            # 2. If missing, check for preconfigured dwells (from TOF dialog) or show dialog
             
             # Log Unit Detection Summary
             n_cps = sum(1 for v in self.channel_is_cps.values() if v)
@@ -3740,26 +4251,33 @@ class ioliteOptimiser(QWidget):
             self.cached_unit_label = "CPS" if n_cps > 0 else "Counts"
             
             if missing:
-                # removed self.isVisible() check to allow startup configuration
-                at_val = getattr(self, 'detected_at_ms', None)
-                dlg = DwellDialog(missing, at_val, self)
-                if dlg.exec_():
-                    # Merge dialog results
-                    local_dwells.update(dlg.result_dwells)
-                    
-                    # SAVE BACK TO IOLITE PROPERTIES via setter logic
-                    # We need to find the original C++ TimeSeriesData objects
-                    try:
-                        for name, val in dlg.result_dwells.items():
-                            if name in ts_map:
-                                ts_map[name].setProperty("Dwell Time (ms)", float(val))
-                                IoLog.information(f"iolite Optimiser: Saved dwell {val}ms to channel '{name}'")
-                    except Exception as e:
-                        IoLog.warning(f"iolite Optimiser: Could not save property: {e}")
-                else:
-                    # Cancelled? Do NOT default. Let optimization fail.
-                    IoLog.warning("iolite Optimiser: Dwell configuration cancelled.")
-                    # for m in missing: local_dwells[m] = 10.0
+                # Check for pre-configured dwells (from TOF/Vitesse dialog)
+                preconfigured = getattr(self, '_preconfigured_dwells', {})
+                
+                still_missing = []
+                for m in missing:
+                    if m in preconfigured:
+                        local_dwells[m] = preconfigured[m]
+                    else:
+                        still_missing.append(m)
+                
+                if still_missing:
+                    # Show unified config dialog for remaining channels
+                    at_val = getattr(self, 'detected_at_ms', None)
+                    dlg = DataConfigDialog(still_missing, detected_at=at_val, is_tof=False, parent=self)
+                    if dlg.exec_():
+                        local_dwells.update(dlg.result_dwells)
+                        
+                        # SAVE BACK TO IOLITE PROPERTIES
+                        try:
+                            for name, val in dlg.result_dwells.items():
+                                if name in ts_map:
+                                    ts_map[name].setProperty("Dwell Time (ms)", float(val))
+                                    IoLog.information(f"iolite Optimiser: Saved dwell {val}ms to channel '{name}'")
+                        except Exception as e:
+                            IoLog.warning(f"iolite Optimiser: Could not save property: {e}")
+                    else:
+                        IoLog.warning("iolite Optimiser: Dwell configuration cancelled.")
             
             IoLog.information(f"iolite Optimiser: Resolved dwells for {len(local_dwells)} channels")
             return local_dwells
@@ -4241,6 +4759,9 @@ class ioliteOptimiser(QWidget):
                             art.set_visible(True)
                         for item in l_map.keys():
                             item.set_alpha(1.0)
+                            # Force visual refresh by toggling visibility
+                            item.set_visible(False)
+                            item.set_visible(True)
                         if l_chk_rescale and self._get(l_chk_rescale, 'isChecked'):
                             self.rescale_to_visible(ax=ax, canvas=canvas)
                         canvas.draw()
@@ -4282,47 +4803,55 @@ class ioliteOptimiser(QWidget):
             
             target_list = target_obj if isinstance(target_obj, list) else [target_obj]
 
-            if mouse.dblclick:
-                # ISOLATE: Show current target + any non-hidable channel. Hide others.
-                # Collect lines in l_map to manage only legend-controlled lines
-                manageable_hidable = []
-                manageable_static = []
-                for m_artist, m_spec in l_map.items():
-                    m_obj, m_hidable = m_spec
-                    m_targets = m_obj if isinstance(m_obj, list) else [m_obj]
-                    for t in m_targets:
-                        if m_hidable:
-                            if t not in manageable_hidable: manageable_hidable.append(t)
-                        else:
-                            if t not in manageable_static: manageable_static.append(t)
-                
-                # Apply Visibility
-                for line in manageable_hidable:
-                    line.set_visible(line in target_list)
-                for line in manageable_static:
-                    line.set_visible(True)
-                
-                # Sync Legend Alphas
-                for m_artist, m_spec in l_map.items():
-                    m_obj, m_hidable = m_spec
-                    m_targets = m_obj if isinstance(m_obj, list) else [m_obj]
-                    # Alpha 1.0 if ANY line in this mapping is visible
-                    is_active = any(t.get_visible() for t in m_targets)
-                    m_artist.set_alpha(1.0 if is_active else 0.2)
-                    
-            else:
-                # TOGGLE:
-                if not is_hidable: return # Static items like the main SPR channel cannot be hidden
-                
-                new_vis = not target_list[0].get_visible()
-                for t in target_list:
-                    t.set_visible(new_vis)
-                
-                # Sync alpha for all legend artists mapping to THIS object/list
-                alpha = 1.0 if new_vis else 0.2
-                for m_artist, m_spec in l_map.items():
-                    if m_spec[0] == target_obj: # Compare object identity/list content
-                        m_artist.set_alpha(alpha)
+            # Check if this is a potential double-click (second click on same target within timer window)
+            pending = getattr(self, '_pending_legend_click', None)
+            if pending is not None:
+                pending_target = pending[1]
+                # If same target, this is a double-click - execute ISOLATE
+                if set(pending_target) == set(target_list):
+                    self._legend_click_timer.stop()
+                    self._pending_legend_click = None
+                    self._execute_legend_isolate(target_list, l_map, canvas, ax, l_chk_rescale)
+                    return
+            
+            # Not a double-click (yet) - start timer for single-click
+            if not is_hidable:
+                return  # Static items cannot be toggled
+            
+            self._pending_legend_click = (target_obj, target_list, canvas, ax, l_map, l_chk_rescale, is_hidable)
+            self._legend_click_timer.start()
+            return  # Don't process immediately, wait for timer
+
+        except Exception as e:
+            IoLog.error(f"Pick Error: {e}")
+
+    def _execute_legend_single_click(self):
+        """Execute toggle visibility for a single legend click (timer fired, no double-click)."""
+        try:
+            if self._pending_legend_click is None:
+                return
+            
+            target_obj, target_list, canvas, ax, l_map, l_chk_rescale, is_hidable = self._pending_legend_click
+            self._pending_legend_click = None
+            
+            if not is_hidable:
+                return
+            
+            # TOGGLE visibility
+            new_vis = not target_list[0].get_visible()
+            for t in target_list:
+                t.set_visible(new_vis)
+            
+            # Sync alpha for all legend artists mapping to THIS underlying line
+            alpha = 1.0 if new_vis else 0.2
+            for m_artist, m_spec in l_map.items():
+                m_obj = m_spec[0]
+                m_targets = m_obj if isinstance(m_obj, list) else [m_obj]
+                if set(m_targets) == set(target_list):
+                    m_artist.set_alpha(alpha)
+                    # Force visual refresh by toggling visibility
+                    m_artist.set_visible(False)
+                    m_artist.set_visible(True)
             
             # Repaint and rescale
             if l_chk_rescale and self._get(l_chk_rescale, 'isChecked'):
@@ -4331,15 +4860,62 @@ class ioliteOptimiser(QWidget):
             canvas.draw()
             canvas.flush_events()
             if hasattr(canvas, 'repaint'):
-                canvas.repaint() # Force Qt repaint if possible
-
+                canvas.repaint()
+                
         except Exception as e:
-            IoLog.error(f"Pick Error: {e}")
+            IoLog.error(f"Legend Single Click Error: {e}")
 
-    def update_plot(self, df=None, preserve_zoom=False):
+    def _execute_legend_isolate(self, target_list, l_map, canvas, ax, l_chk_rescale):
+        """Execute isolate (show only this channel) for a double-click."""
+        try:
+            # Collect lines in l_map to manage only legend-controlled lines
+            manageable_hidable = []
+            manageable_static = []
+            for m_artist, m_spec in l_map.items():
+                m_obj, m_hidable = m_spec
+                m_targets = m_obj if isinstance(m_obj, list) else [m_obj]
+                for t in m_targets:
+                    if m_hidable:
+                        if t not in manageable_hidable: manageable_hidable.append(t)
+                    else:
+                        if t not in manageable_static: manageable_static.append(t)
+            
+            # Apply Visibility
+            for line in manageable_hidable:
+                line.set_visible(line in target_list)
+            for line in manageable_static:
+                line.set_visible(True)
+            
+            # Sync Legend Alphas
+            for m_artist, m_spec in l_map.items():
+                m_obj, m_hidable = m_spec
+                m_targets = m_obj if isinstance(m_obj, list) else [m_obj]
+                is_active = any(t.get_visible() for t in m_targets)
+                m_artist.set_alpha(1.0 if is_active else 0.2)
+                # Force visual refresh by toggling visibility
+                m_artist.set_visible(False)
+                m_artist.set_visible(True)
+            
+            # Repaint and rescale
+            if l_chk_rescale and self._get(l_chk_rescale, 'isChecked'):
+                self.rescale_to_visible(ax=ax, canvas=canvas)
+            
+            canvas.draw()
+            canvas.flush_events()
+            if hasattr(canvas, 'repaint'):
+                canvas.repaint()
+                
+        except Exception as e:
+            IoLog.error(f"Legend Isolate Error: {e}")
+
+    def update_plot(self, df=None, preserve_zoom=False, preserve_x_only=False):
         try:
             target_df = df if df is not None else self.opt_df
             if target_df is None: return
+
+            # Performance: Enable path simplification for large datasets
+            plt.rcParams['path.simplify'] = True
+            plt.rcParams['path.simplify_threshold'] = 1.0  # Aggressive simplification
 
             # Reuse existing axes if possible to prevent layout shrinking
             # ADAPTING TO MATCH SPR LOGIC FOR STABILITY:
@@ -4347,10 +4923,23 @@ class ioliteOptimiser(QWidget):
             # This prevents callback accumulation and ensures 'connected on creation' logic holds true.
 
             # Auto-Capture Limits if preserving zoom but not externally set (Robustness Fix)
-            if preserve_zoom and self._opt_axis_limits is None:
+            if (preserve_zoom or preserve_x_only) and self._opt_axis_limits is None:
                 if hasattr(self, 'figure') and self.figure.axes:
                     ax = self.figure.axes[0]
-                    self._opt_axis_limits = (ax.get_xlim(), ax.get_ylim())
+                    if preserve_x_only:
+                        # Only save X limits, let Y autoscale
+                        self._opt_axis_limits = (ax.get_xlim(), None)
+                    else:
+                        self._opt_axis_limits = (ax.get_xlim(), ax.get_ylim())
+
+            # Capture current visibility states to preserve user selections
+            saved_visibility = {}
+            if (preserve_zoom or preserve_x_only) and hasattr(self, 'figure') and self.figure.axes:
+                ax = self.figure.axes[0]
+                for line in ax.lines:
+                    label = line.get_label()
+                    if label and not label.startswith('_'):
+                        saved_visibility[label] = line.get_visible()
 
             self.figure.clear()
             
@@ -4361,7 +4950,7 @@ class ioliteOptimiser(QWidget):
             # Connect dynamic margin update on zoom/pan (ONCE on creation)
             ax.callbacks.connect('ylim_changed', lambda event: self._update_smart_margins(self.canvas))
             
-            if preserve_zoom and self._opt_axis_limits:
+            if (preserve_zoom or preserve_x_only) and self._opt_axis_limits:
                  # We will restore these later
                  pass
             else:
@@ -4405,8 +4994,20 @@ class ioliteOptimiser(QWidget):
                         else: plot_df[c] = 0
                 
                 # Plot individual channels
-                for col in numeric_cols:
+                max_vis = self._get(self.spin_max_vis, 'value')
+                limit_enabled = self._get(self.chk_limit_vis, 'isChecked')
+                
+                for i, col in enumerate(numeric_cols):
+                    # Create line as visible first (affects legend handle creation)
                     l, = ax.plot(t_zeroed, plot_df[col], alpha=0.8, label=col)
+                    
+                    # Restore visibility from saved state if available
+                    if col in saved_visibility:
+                        l.set_visible(saved_visibility[col])
+                    # Otherwise apply limit if enabled
+                    elif limit_enabled and i >= max_vis:
+                        l.set_visible(False)
+                        
                     lines.append(l)
                 
                 # Interactive Legend
@@ -4560,9 +5161,13 @@ class ioliteOptimiser(QWidget):
                 chk_rescale = getattr(self, 'chk_rescale', None)
                 
                 # --- APPLY THEME-STABLE SCALING ---
-                if preserve_zoom and self._opt_axis_limits:
+                if (preserve_zoom or preserve_x_only) and self._opt_axis_limits:
                     ax.set_xlim(self._opt_axis_limits[0])
-                    ax.set_ylim(self._opt_axis_limits[1])
+                    if self._opt_axis_limits[1] is not None:
+                        ax.set_ylim(self._opt_axis_limits[1])
+                    else:
+                        # Y limits were not saved (preserve_x_only) - autoscale Y
+                        self.rescale_to_visible(rescale_x=False, rescale_y=True, ax=ax, canvas=None)
                     self._opt_axis_limits = None # Done
                 else:
                     # FRESH LOAD, RECALC, or USER INTERACTION -> Rescale EVERYTHING (X and Y)
@@ -4594,7 +5199,49 @@ class ioliteOptimiser(QWidget):
         try:
             channels = data.timeSeriesList(data.Input)
             # IoLog.information(f"iolite Optimiser: Found {len(channels) if channels else 0} channels") # Silent/Moved
-            if not channels: return None
+            if not channels: return None, {}
+            
+            # --- Channel Filtering for Vitesse/icpTOF ---
+            ref_ch_0 = channels[0]
+            m_name = ref_ch_0.property("Machine Name")
+            
+            is_tof = False
+            target_machines = ["Vitesse", "icpTOF"]
+            
+            if m_name:
+                m_str = str(m_name)
+                if any(tm.lower() in m_str.lower() for tm in target_machines):
+                    is_tof = True
+            
+            if is_tof:
+                ch_names = [ch.name for ch in channels]
+                
+                # Calculate AT early for the dialog
+                ref_time = channels[0].time()
+                if len(ref_time) > 1:
+                    detected_at = (ref_time[1] - ref_time[0]) * 1000.0
+                else:
+                    detected_at = None
+                
+                # Unified Dialog: Channel selection + Global dwell
+                dlg = DataConfigDialog(ch_names, detected_at=detected_at, is_tof=True, parent=self)
+                if dlg.exec_():
+                    selected_names = set(dlg.result_channels)
+                    channels = [ch for ch in channels if ch.name in selected_names]
+                    
+                    # Store pre-configured dwells (resolve_dwell_times will use these)
+                    self._preconfigured_dwells = dlg.result_dwells.copy()
+                    
+                    if not channels:
+                        IoLog.warning("iolite Optimiser: No channels selected. Aborting load.")
+                        return None, {}
+                else:
+                    IoLog.information("iolite Optimiser: Configuration cancelled. Aborting load.")
+                    return None, {}
+            else:
+                self._preconfigured_dwells = {}  # Reset for non-TOF data
+            
+            # --- End Filter Logic ---
             
             ref_ch = channels[0]
             time_data = ref_ch.time()
@@ -4614,12 +5261,14 @@ class ioliteOptimiser(QWidget):
                 if el: has_el = True
                 if ma: has_mass = True
                 
+                # Only load data if lengths match (crucial check)
                 if len(ch.data()) == len(time_data):
                     data_dict[ch.name] = ch.data()
             
             self.show_meta = {'Element': has_el, 'Mass': has_mass}
             return pd.DataFrame(data_dict), local_metadata
-        except:
+        except Exception as e:
+            IoLog.error(f"iolite Optimiser: Input Error: {e}")
             return None, {}
 
 
@@ -4705,9 +5354,6 @@ class ioliteOptimiser(QWidget):
             rel_sig_s = float(sig_start - self.t_start)
             rel_sig_e = float(sig_end - self.t_start)
             
-            # Status update EARLIER
-            status = f"Detected: BG {rel_bg_s:.2f}-{rel_bg_e:.2f}, SIG {rel_sig_s:.2f}-{rel_sig_e:.2f}"
-            self.lbl_result.setText(status)
             
             # Update SpinBoxes (Block signals to prevent loops)
             s_list = [self.spin_bg_start, self.spin_bg_end, self.spin_sig_start, self.spin_sig_end]
@@ -5440,7 +6086,7 @@ def create_widget():
     try:
         widget = ioliteOptimiser()
         # widget.setAttribute(Qt.WA_DeleteOnClose) # Keep widget alive to prevent PythonQt crashes
-        widget.setWindowTitle("iolite Optimiser")
+        widget.setWindowTitle(f"iolite Optimiser - v{VERSION}")
         
         # Connect destroyed signal to cleanup global reference
         # widget.destroyed.connect(cleanup_widget)
