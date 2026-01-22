@@ -2,7 +2,7 @@
 #/ Description: Characterises your system's single-pulse washout to calculate the optimal balance of spot size, scan speed, and repetition rate that achieves your target data quality.
 #/ Type: UI
 #/ Authors: Adam Douglas
-#/ Version: 0.9.4
+#/ Version: 0.9.5
 #/ Contact: Adam.Douglas@icpms.com
 
 import math
@@ -60,7 +60,7 @@ except ImportError:
         pass
 
 # --- EMBEDDED CONSTANTS ---
-VERSION = "0.9.4"
+VERSION = "0.9.5"
 
 ICP_SPECS = {
     "Agilent": {
@@ -100,7 +100,7 @@ ICP_SPECS = {
 
 MFR_DEFAULT_UNITS = {
     "Agilent": "s",
-    "Thermo": "ms",
+    "Thermo": "s",
     "Perkin Elmer": "ms",
     "TOFWERK": "ms",
     "Nu Instruments": "ms",
@@ -173,7 +173,6 @@ class Logic:
         """
         Analyses washout peaks (Single Pulse Response) for a given isotope.
         Calculates FW0.1M (10% Height) and FW0.01M (1% Height).
-        Derived from logic.py
         """
         if find_peaks is None:
             return pd.DataFrame(), {"Error": "Scipy (scipy.signal) is not installed."}
@@ -291,13 +290,13 @@ class Logic:
         # Alignment is at l001. We want to cover from the start of the buffer to the end of the pulse + buffer.
         max_fw001 = (peaks_df['r001'] - peaks_df['l001']).max()
         
-        # 2. Asymmetric baseline buffers (User Request: Show more peak, peak to the left)
+        # 2. Asymmetric baseline buffers
         if len(peaks_df) > 1:
             pdf = peaks_df.sort_values('Peak Time (s)')
             gaps = pdf['l001'].values[1:] - pdf['r001'].values[:-1]
             median_gap = max(0, np.median(gaps))
             
-            # User Request: Exactly 10% margin on both sides
+            # !0 % Margin Left, 20 % Margin 
             b_left = 0.1 * max_fw001
             b_right = 0.20 * max_fw001
             
@@ -549,8 +548,7 @@ class Logic:
         fw_s = inputs['washout_ms'] / 1000.0
         bs = inputs['spot_size_um']
         n_val = inputs['pulses_per_pixel']
-        n_target = n_val # Preserve original user request for error checking (Capture BEFORE valid_times/constrained_at)
-        
+        n_target = n_val        
         rr_max = inputs['max_rr_hz']
         ss_max = inputs['max_speed_um_s']
         allowed_rr = inputs.get('allowed_rr', None)
@@ -558,7 +556,7 @@ class Logic:
         
         valid_times_s = [d/1000.0 for d in (inputs.get('allowed_dwells') or [])]
         
-        # 1. Get definitive AT from helper (Single Source of Truth)
+        # 1. Get definitive AT from helper
         # Refined: at_final_s = Actual (post-rounding), at_target_s = Theoretical Needs
         at_final_s, at_target_s, _, _, notes, opt_n = Logic.calculate_constrained_at(inputs)
         
@@ -603,7 +601,7 @@ class Logic:
         
         
         # Check for Asynchronous Mapping (Integrated pixels v Laser shots mismatch)
-        # Always report this to the user as per request
+        # Always report this to the user
         # Compare against ORIGINAL target (n_target), not the optimised one (which moves with logic)
         sync_error = actual_pulses - n_target
         err_pct = (sync_error / n_target) * 100 if n_target != 0 else 0.0
@@ -1635,7 +1633,6 @@ class ioliteOptimiser(QWidget):
         # Create Hardware Settings Dialog early
         self.settings_dlg = SettingsDialog(self)
         
-        # Pre-hydration removed as it is handled by _handle_mfr_changed in initUI
         
         self.initUI()
 
@@ -2197,17 +2194,27 @@ class ioliteOptimiser(QWidget):
 
         # 1. Detect All Peaks (Cache or find new)
         # For simplicity we re-detect if prominence/distance changed, but we keep results_df for toggling
-        self.spr_raw_results_df = Logic.analyse_washout_peaks(self.spr_df, iso, prominence, min_distance=distance, is_cps=is_cps)
+        raw_result = Logic.analyse_washout_peaks(self.spr_df, iso, prominence, min_distance=distance, is_cps=is_cps)
         
-        # 2. Filter Excluded Peaks for Statistics
-        if iso not in self.spr_excluded_peaks:
-            self.spr_excluded_peaks[iso] = set()
-            
-        excluded = self.spr_excluded_peaks[iso]
-        filtered_df = self.spr_raw_results_df[~self.spr_raw_results_df['Peak Index'].isin(excluded)]
+        if isinstance(raw_result, tuple):
+             # Handle Error or Empty Count return (df, dict)
+             self.spr_raw_results_df, stats = raw_result
+             # If it's a tuple, we have no peaks to filter, so we skip step 2
+             filtered_df = self.spr_raw_results_df 
+             excluded = set()
+        else:
+             # Standard DataFrame return
+             self.spr_raw_results_df = raw_result
         
-        # 3. Summarize
-        stats = Logic.summarize_peaks(filtered_df)
+             # 2. Filter Excluded Peaks for Statistics
+             if iso not in self.spr_excluded_peaks:
+                 self.spr_excluded_peaks[iso] = set()
+                 
+             excluded = self.spr_excluded_peaks[iso]
+             filtered_df = self.spr_raw_results_df[~self.spr_raw_results_df['Peak Index'].isin(excluded)]
+                 
+             # 3. Summarize
+             stats = Logic.summarize_peaks(filtered_df)
         
         # Update Table Title
         num_detected = len(self.spr_raw_results_df)
@@ -2220,20 +2227,6 @@ class ioliteOptimiser(QWidget):
         t_zeroed = t_orig - t0 if len(t_orig) > 0 else t_orig
         
         # Update Metrics
-        if "Error" in stats:
-            self.lbl_spr_fw10.setText("Error")
-            self.lbl_spr_fw1.setText(stats["Error"])
-            return
-            
-        if stats.get("Count", 0) == 0:
-            self.lbl_spr_fw10.setText("-")
-            self.lbl_spr_rsd10.setText("-")
-            self.lbl_spr_fw_max10.setText("-")
-            self.lbl_spr_fw1.setText("No peaks detected")
-            self.lbl_spr_rsd1.setText("-")
-            self.lbl_spr_fw_max1.setText("-")
-            return
-
         # Helper for SI Formatting
         def _si(val):
             if val >= 1e9: return f"{val/1e9:.2f}", " G"
@@ -2247,37 +2240,69 @@ class ioliteOptimiser(QWidget):
             if v >= 10:  return f"{v:.1f}"
             if v >= 1:   return f"{v:.2f}"
             return f"{v:.3f}"
-
-        # Forced "Counts" unit for Area
-        area_unit_label = " Counts"
-
-        self.lbl_spr_fw10.setText(f"<b>{_adap(stats['FW0.1M Mean']*mult)}</b> {unit_label}")
-        self.lbl_spr_rsd10.setText(f"{stats['FW0.1M RSD']:.1f} %")
-        self.lbl_spr_fw_max10.setText(f"<b>{_adap(stats['FW0.1M Max']*mult)}</b> {unit_label}")
-        # Use SI formatting for Area
-        s_mean10, p_mean10 = _si(stats['Area 10% Mean'])
-        self.lbl_spr_area10.setText(f"<b>{s_mean10}</b>{p_mean10}{area_unit_label}")
-        self.lbl_spr_area_rsd10.setText(f"{stats['Area 10% RSD']:.1f} %")
-
-        self.lbl_spr_fw1.setText(f"<b>{_adap(stats['FW0.01M Mean']*mult)}</b> {unit_label}")
-        self.lbl_spr_rsd1.setText(f"{stats['FW0.01M RSD']:.1f} %")
-        self.lbl_spr_fw_max1.setText(f"<b>{_adap(stats['FW0.01M Max']*mult)}</b> {unit_label}")
-        # Use SI formatting for Area
-        s_mean1, p_mean1 = _si(stats['Area 1% Mean'])
-        self.lbl_spr_area1.setText(f"<b>{s_mean1}</b>{p_mean1}{area_unit_label}")
-        self.lbl_spr_area_rsd1.setText(f"{stats['Area 1% RSD']:.1f} %")
-        
+            
         # Helper for adaptive rounding (float)
         def _adap_round(v_ms):
             if v_ms >= 100: return round(v_ms, 0)
             if v_ms >= 10:  return round(v_ms, 1)
             return round(v_ms, 2)
+
+        has_peaks = True
+        error_msg = None
         
-        # Store for "Apply" logic (rounded to matching UI precision)
-        self._last_spr_fw10_avg_ms = _adap_round(stats['FW0.1M Mean'] * 1000.0)
-        self._last_spr_fw10_max_ms = _adap_round(stats['FW0.1M Max'] * 1000.0)
-        self._last_spr_fw1_avg_ms = _adap_round(stats['FW0.01M Mean'] * 1000.0)
-        self._last_spr_fw1_max_ms = _adap_round(stats['FW0.01M Max'] * 1000.0)
+        # Update Metrics
+        if "Error" in stats:
+            has_peaks = False
+            error_msg = stats["Error"]
+            self.lbl_spr_fw10.setText("Error")
+            self.lbl_spr_fw1.setText(error_msg)
+            
+        elif stats.get("Count", 0) == 0:
+            has_peaks = False
+            self.lbl_spr_fw10.setText("-")
+            self.lbl_spr_rsd10.setText("-")
+            self.lbl_spr_fw_max10.setText("-")
+            self.lbl_spr_fw1.setText("No peaks detected")
+            self.lbl_spr_rsd1.setText("-")
+            self.lbl_spr_fw_max1.setText("-")
+            
+            # Clear stored values
+            self._last_spr_fw10_avg_ms = 0
+            self._last_spr_fw10_max_ms = 0
+            self._last_spr_fw1_avg_ms = 0
+            self._last_spr_fw1_max_ms = 0
+
+        if has_peaks:
+            # Forced "Counts" unit for Area
+            area_unit_label = " Counts"
+
+            self.lbl_spr_fw10.setText(f"<b>{_adap(stats['FW0.1M Mean']*mult)}</b> {unit_label}")
+            self.lbl_spr_rsd10.setText(f"{stats['FW0.1M RSD']:.1f} %")
+            self.lbl_spr_fw_max10.setText(f"<b>{_adap(stats['FW0.1M Max']*mult)}</b> {unit_label}")
+            # Use SI formatting for Area
+            s_mean10, p_mean10 = _si(stats['Area 10% Mean'])
+            self.lbl_spr_area10.setText(f"<b>{s_mean10}</b>{p_mean10}{area_unit_label}")
+            self.lbl_spr_area_rsd10.setText(f"{stats['Area 10% RSD']:.1f} %")
+
+            self.lbl_spr_fw1.setText(f"<b>{_adap(stats['FW0.01M Mean']*mult)}</b> {unit_label}")
+            self.lbl_spr_rsd1.setText(f"{stats['FW0.01M RSD']:.1f} %")
+            self.lbl_spr_fw_max1.setText(f"<b>{_adap(stats['FW0.01M Max']*mult)}</b> {unit_label}")
+            # Use SI formatting for Area
+            s_mean1, p_mean1 = _si(stats['Area 1% Mean'])
+            self.lbl_spr_area1.setText(f"<b>{s_mean1}</b>{p_mean1}{area_unit_label}")
+            self.lbl_spr_area_rsd1.setText(f"{stats['Area 1% RSD']:.1f} %")
+            
+            # Store for "Apply" logic (rounded to matching UI precision)
+            self._last_spr_fw10_avg_ms = _adap_round(stats['FW0.1M Mean'] * 1000.0)
+            self._last_spr_fw10_max_ms = _adap_round(stats['FW0.1M Max'] * 1000.0)
+            self._last_spr_fw1_avg_ms = _adap_round(stats['FW0.01M Mean'] * 1000.0)
+            self._last_spr_fw1_max_ms = _adap_round(stats['FW0.01M Max'] * 1000.0)
+        else:
+             # Ensure labels that weren't set in the error block are cleared
+             if self.lbl_spr_area10.text != "-": self.lbl_spr_area10.setText("-")
+             if self.lbl_spr_area_rsd10.text != "-": self.lbl_spr_area_rsd10.setText("-")
+             if self.lbl_spr_area1.text != "-": self.lbl_spr_area1.setText("-")
+             if self.lbl_spr_area_rsd1.text != "-": self.lbl_spr_area_rsd1.setText("-")
 
         # Update Table (Dynamic Units)
         headers = [
