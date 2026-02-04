@@ -2,7 +2,7 @@
 #/ Description: Characterises your system's single-pulse washout to calculate the optimal balance of spot size, scan speed, and repetition rate that achieves your target data quality.
 #/ Type: UI
 #/ Authors: Adam Douglas
-#/ Version: 0.9.5
+#/ Version: 0.9.6
 #/ Contact: Adam.Douglas@icpms.com
 
 import math
@@ -60,7 +60,7 @@ except ImportError:
         pass
 
 # --- EMBEDDED CONSTANTS ---
-VERSION = "0.9.5"
+VERSION = "0.9.6"
 
 ICP_SPECS = {
     "Agilent": {
@@ -76,8 +76,8 @@ ICP_SPECS = {
         "iCAP TQ":  {"type": "Quadrupole", "min_dwell": 1.0, "prec": 0.001},
         "iCAP MRX": {"type": "Quadrupole", "min_dwell": 0.5, "prec": 0.001},
         "iCAP MTX": {"type": "Quadrupole", "min_dwell": 0.5, "prec": 0.001},
-        "Element 2":    {"type": "Sector-Field", "min_dwell": 2.0, "prec": 0.001},
-        "Element 2 XR": {"type": "Sector-Field", "min_dwell": 0.1, "prec": 0.001},
+        "Element 2":    {"type": "Sector-Field", "min_dwell": 2.0, "prec": 1.0},
+        "Element 2 XR": {"type": "Sector-Field", "min_dwell": 0.1, "prec": 0.1},
         "Neoma":   {"type": "Multi-Collector", "min_dwell": 0.0, "prec": 0.001, "allowed_dwells": [50, 100, 250, 500, 1000]},
         "Neptune": {"type": "Multi-Collector", "min_dwell": 0.0, "prec": 0.001, "allowed_dwells": [66, 131, 262, 524, 1049]},
     },
@@ -2125,7 +2125,7 @@ class ioliteOptimiser(QWidget):
         
         right_layout.addLayout(h_ctrl_spr)
 
-        self.spr_figure = Figure(figsize=(5, 4), dpi=100, constrained_layout=False)
+        self.spr_figure = Figure(figsize=(5, 4), dpi=96, constrained_layout=False)
         self.spr_canvas = FigureCanvas(self.spr_figure)
         self.spr_canvas.mpl_connect('resize_event', self._on_plot_resize)
         self.spr_canvas.mpl_connect('scroll_event', self.on_zoom)
@@ -2531,12 +2531,13 @@ class ioliteOptimiser(QWidget):
         
         ax.set_xlabel("Time (s)", fontsize='medium', color=fg_col)
         
-        # Anchored Y-Axis Label (Fixed 20px from left edge)
+        # Anchored Y-Axis Label (Fixed 0.3 inches from left edge)
         import matplotlib.transforms as mtransforms
         unit = getattr(self, 'cached_unit_label', "Counts")
         ax.set_ylabel(f"Intensity ({unit})", fontsize='medium', color=fg_col)
-        # Use 20px to be safe from bezel
-        ax.yaxis.set_label_coords(20/self.spr_figure.dpi/self.spr_figure.get_size_inches()[0], 0.5, 
+        # Use 0.3 inches to be safe from bezel
+        w_in = self.spr_figure.get_size_inches()[0]
+        ax.yaxis.set_label_coords(0.3/w_in, 0.5, 
                                   transform=mtransforms.blended_transform_factory(self.spr_figure.transFigure, ax.transAxes))
         
         # Connect dynamic margin update on zoom/pan
@@ -3227,7 +3228,7 @@ class ioliteOptimiser(QWidget):
         right_layout = QVBoxLayout()
         right_layout.setContentsMargins(0, 0, 0, 0)
         
-        self.figure = Figure(figsize=(5, 3), dpi=100, constrained_layout=False); self.canvas = FigureCanvas(self.figure)
+        self.figure = Figure(figsize=(5, 3), dpi=96, constrained_layout=False); self.canvas = FigureCanvas(self.figure)
         # Initialize with baseline margins (match resize logic)
         self.figure.subplots_adjust(left=0.1, right=0.95, top=0.9, bottom=0.15)
         self.canvas.mpl_connect('resize_event', self._on_plot_resize)
@@ -4328,15 +4329,20 @@ class ioliteOptimiser(QWidget):
         w, h = fig.get_size_inches() * fig.dpi
         if w == 0 or h == 0: return
 
-        # Pixel Margins (Fixed offsets)
-        l_px = 85  # Y-axis label + SI numbers (Increased for large counts safe-zone)
-        r_px = 20  # Buffer
+        # Inch-Based Margins (DPI Aware)
+        # Prevents scaling issues on high-DPI screens
+        r_in = 0.2
+        b_in = 0.55
         
-        # Dynamic row-aware top padding
+        # Dynamic row-aware top padding (Inches)
         rows = getattr(self, 'last_opt_rows', 1) if canvas == getattr(self, 'canvas', None) else getattr(self, 'last_spr_rows', 1)
-        t_px = 22 + (rows * 20) # snug 42px for 1 row, 62px for 2
+        # Base 0.25 in + 0.20 in per row (~24px base + 19px per row at 96 DPI) - Tighter as requested
+        t_in = 0.25 + (rows * 0.20)
         
-        b_px = 50  # X-axis label + numbers
+        # Convert to Pixels for margin manager
+        r_px = r_in * fig.dpi
+        b_px = b_in * fig.dpi
+        t_px = t_in * fig.dpi
 
         # Smart Margins Calculation
         # Instead of fixed l_px, we calculate it!
@@ -4366,22 +4372,23 @@ class ioliteOptimiser(QWidget):
             # If renderer not ready yet (before first draw), use estimate
              renderer = None
 
-        l_px = 55 # Default fallback (Reduced to 55 to allow tighter fit for small numbers)
+        # l_px Logic Refactor (Inch-based)
+        anchor_in = 0.3
+        anchor_px = anchor_in * fig.dpi
+        
+        l_px = 55 # Default fallback
         
         if renderer:
             try:
-                # FORCE TICK UPDATE: We must force matplotlib to update the tick strings based on the current formatter
-                # get_tightbbox triggers this internal update if it hasn't happened yet.
+                # FORCE TICK UPDATE
                 ax.yaxis.get_tightbbox(renderer)
 
                 # 1. Measure Y-Axis Tick Labels (Max Visible Width)
                 tick_width = 0
                 ylim = ax.get_ylim()
-                # Sort triggers correct view interval if inverted (though not usual here)
                 y_min, y_max = sorted(ylim)
                 
                 for tick in ax.yaxis.get_major_ticks():
-                    # Only measure ticks that are actually visible within limits
                     loc = tick.get_loc()
                     if y_min <= loc <= y_max:
                         label = tick.label1 # Left label
@@ -4391,9 +4398,6 @@ class ioliteOptimiser(QWidget):
                                 tick_width = bbox.width
                 
                 # 2. Measure Y-Axis Label
-                # It is anchored to figure left, but let's assume we want (LabelWidth + Gap + TickWidth + Gap)
-                # But wait, we anchored label to 10px from left.
-                # So Left Margin should be: 10px + LabelWidth + Gap + TickWidth + Gap
                 ylabel = ax.yaxis.get_label()
                 label_width = ylabel.get_window_extent(renderer).width
                 
@@ -4401,19 +4405,18 @@ class ioliteOptimiser(QWidget):
                 gap = 2 
                 
                 # Total Required Left Margin
-                # 20px (Anchor) + LabelWidth + Gap + TickWidth + Gap
-                calc_l_px = 20 + label_width + gap + tick_width + 2
-                l_px = max(55, calc_l_px) # Floor at 55 to prevent collapse, but allow closeness
+                # AnchorPX + LabelWidth + Gap + TickWidth + Gap
+                calc_l_px = anchor_px + label_width + gap + tick_width + 2
+                l_px = max(anchor_px + 20, calc_l_px) 
                 
             except Exception as e:
-                # Fallback if calculation fails
                 pass
         
         # RE-ASSERT LABEL ANCHOR (Prevent drift during pan/zoom)
         if ax:
             import matplotlib.transforms as mtransforms
-            # 20px from left edge
-            ax.yaxis.set_label_coords(20/w, 0.5, 
+            # 0.3 inches from left edge
+            ax.yaxis.set_label_coords(anchor_px/w, 0.5, 
                                       transform=mtransforms.blended_transform_factory(fig.transFigure, ax.transAxes))
 
         # Apply Margins (w, h already calculated above)
@@ -4426,9 +4429,10 @@ class ioliteOptimiser(QWidget):
         # Recalculate defaults if not passed (similar to _on_plot_resize logic)
         if not override_margins:
             rows = getattr(self, 'last_opt_rows', 1) if canvas == getattr(self, 'canvas', None) else getattr(self, 'last_spr_rows', 1)
-            t_px = 22 + (rows * 20)
-            b_px = 50
-            r_px = 20
+            # Match tuned inch-based logic
+            t_px = (0.25 + (rows * 0.20)) * fig.dpi
+            b_px = 0.55 * fig.dpi
+            r_px = 0.2 * fig.dpi
         else:
             t_px = override_margins.get('top', 42)
             b_px = override_margins.get('bottom', 50)
@@ -5142,10 +5146,11 @@ class ioliteOptimiser(QWidget):
                 ax.xaxis.set_major_locator(MaxNLocator(nbins=10, prune='both'))
                 ax.ticklabel_format(useOffset=False, axis='x')
 
-                # Anchored Y-Axis Label (Fixed 20px from left edge)
+                # Anchored Y-Axis Label (Fixed 0.3 inches from left edge)
                 import matplotlib.transforms as mtransforms
                 ax.set_ylabel("Norm. Intensity" if normalise else f"Intensity ({unit})")
-                ax.yaxis.set_label_coords(20/self.figure.dpi/self.figure.get_size_inches()[0], 0.5, 
+                w_in = self.figure.get_size_inches()[0]
+                ax.yaxis.set_label_coords(0.3/w_in, 0.5, 
                                           transform=mtransforms.blended_transform_factory(self.figure.transFigure, ax.transAxes))
                 
                 

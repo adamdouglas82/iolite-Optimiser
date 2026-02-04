@@ -134,10 +134,7 @@ Ensure you have a selection in iolite that contains single laser pulses (e.g., a
 
 ## Methodology & References
 
-The **SPR Tab** characterizes system washout by analyzing the temporal profile of individual laser pulses, as described in:
-
-- **Washout Characteristics**:
-  - Ulianov, A., et al. (2015). "Single-pulse responses of laser ablation cells." *Journal of Analytical Atomic Spectrometry (JAAS)*, 30, 1297.
+The **SPR Tab** characterizes system washout by analyzing the temporal profile of individual laser pulses.
 
 ### Peak Analysis Process:
 1. **Detection**: Peaks are identified using a prominence-based algorithm.

@@ -234,14 +234,16 @@ These messages list specific isotopes that are affecting the optimization logic.
 The algorithms and logic used in the iolite Optimiser are based on established statistical principles and laser ablation literature:
 
 - **SNR and Detection Limits**:
-  - Tanner, S. D. (2010). "The assessment of detection limits in quadrupole ICP-MS." *Journal of Analytical Atomic Spectrometry (JAAS)*, 25, 405-414.
-  - Donard, A., et al. (2015). "Optimization and performance of a high-sensitivity ICP-MS." *JAAS*, 30, 2420.
+  - Tanner, S. D. (2010). "Shorter signals for improved signal to noise ratio, the influence of Poisson distribution" *Journal of Analytical Atomic Spectrometry (JAAS)*, 25, 405–407.
+  - Donard, A., et al. "Determination of relative rare earth element distributions in very small quantities of uranium ore concentrates using femtosecond UV laser ablation– SF-ICP-MS coupling" J. Anal. At. Spectrom., (2015), 30, 2420–2428
 - **Optimization Workflow & Loop Logic**:
-  - Van Malderen, S. J., et al. (2018). "Laser ablation-inductively coupled plasma-mass spectrometry: on the importance of periodic sampling and the prevention of aliasing." *JAAS*, 33, 20.
-  - Van Elteren, J. T., et al. (2019). "A systematic methodology for selecting laser ablation-inductively coupled plasma-mass spectrometry imaging conditions." *Analytica Chimica Acta*, 1054, 1-11.
+  - Van Malderen, S. J., et al. "Considerations on data acquisition in laser ablation-inductively coupled plasma-mass spectrometry with low-dispersion interfaces" Spectrochimica Acta Part B, (2018), 140, 29–34
+  - Van Elteren, J. T., et al. "Insights into the selection of 2D LA-ICP-MS (multi) elemental mapping conditions" J. Anal. At. Spectrom., (2019), 34, 1919
 - **Single Pulse Response and Washout Analysis**:
-  - Ulianov, A., et al. (2015). "Single-pulse responses of laser ablation cells." *JAAS*, 30, 1297.
+  - Ulianov, A., et al. "The ICPMS signal as a Poisson process: a review of basic concepts" J. Anal. At. Spectrom., (2015), 30, 1297–1321
 - **Statistical Framework**:
-  - Currie, L. A. (1968). "Limits for qualitative detection and quantitative determination. Application to radiochemistry." *Analytical Chemistry*, 40, 586-593.
-  - Currie, L. A. (1972). "The Measurement of Environmental Levels of Rare Gas Nuclides and the Treatment of Very Low-Level Counting Data." *IEEE Transactions on Nuclear Science*, NS19 (1), 119-126.
-  - Based on the Square Root Transform rule for variance stabilization in counting statistics (Stapleton's Rule).
+  - Currie, L. A. "Limits for qualitative detection and quantitative determination: Application to Radiochemistry." Anal. Chem., (1968), 40, 586-593.
+  - Currie, L. A. "The Measurement of Environmental Levels of Rare Gas Nuclides and the Treatment of Very Low-Level Counting Data", IEEE Trans. Nucl. Sci., (1972), NS19, (1), 119-126.
+  - Based on the Square Root Transform rule for variance stabilization in counting statistics.
+
+
