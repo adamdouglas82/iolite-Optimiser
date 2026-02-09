@@ -464,6 +464,241 @@ class Logic:
         
         # Standard snap to hardware precision
         return round(target_at / precision_s) * precision_s
+    @staticmethod
+    def generate_pulse_train_v3(composite_df, rep_rate_hz, pulses_per_cycle, cycle_time_s, channel_specs, background_s=5.0, signal_s=10.0, dt_s=1e-5):
+        """
+        Generates simulated pulse train with sequential sampling support.
+        
+        Args:
+            channel_specs: List of dicts [{'name': 'U238', 'dwell': 0.1, 'offset': 0.0}, ...]
+        """
+        try:
+            if composite_df is None or composite_df.empty:
+                return None, None
+                
+            IoLog.information("Logic.generate_pulse_train_v3: Starting...")
+                
+            # 1. Prepare Composite Pulse (Interpolant)
+            comp_t = composite_df['Relative Time (s)'].values
+            comp_y = composite_df['Normalised Intensity'].values
+            
+            # 2. Setup Time Axis
+            total_duration = background_s + signal_s + background_s
+            t_axis = np.arange(0, total_duration, dt_s)
+            y_theoretical = np.zeros_like(t_axis)
+            
+            # 3. Add Pulses
+            # Pulses centered in the signal region
+            pulse_period_s = 1.0 / rep_rate_hz if rep_rate_hz > 0 else 1.0
+            
+            # Number of pulses to simulate
+            # Usually Total pulses = RepRate * Signal Duration
+            # But the 'pulses' arg in v2 was 'pulses per pixel/cycle'.
+            # Here let's just fill the signal_s window with pulses at rep_rate
+            n_pulses = int(signal_s * rep_rate_hz)
+            
+            start_time = background_s
+            
+            # Vectorized Pulse Addition (Optimization)
+            # Find indices for one pulse placed at t=0 relative to grid
+            # Then shift indices for each pulse
+            
+            # Interpolant centered at l001? composite_df is centered at l001=0 usually?
+            # composite_df['Relative Time (s)'] is relative to l001? Yes.
+            
+            # To avoid huge loop, we can convolve? 
+            # Convolution is slow if kernel is small and signal huge. 
+            # Direct addition is better for sparse pulses.
+            
+            for i in range(n_pulses):
+                t_pulse = start_time + i * pulse_period_s
+                
+                # Align composite to this time
+                # comp_t + t_pulse maps to t_axis
+                # t_axis_shifted = t_axis - t_pulse
+                # y = interp(comp_t, comp_y, t_axis - t_pulse)
+                
+                # Windowing to speed up
+                t_min = t_pulse + comp_t.min()
+                t_max = t_pulse + comp_t.max()
+                
+                idx_start = int(t_min / dt_s)
+                idx_end = int(t_max / dt_s) + 2
+                
+                if idx_start < 0: idx_start = 0
+                if idx_end > len(t_axis): idx_end = len(t_axis)
+                
+                if idx_end > idx_start:
+                    t_segment = t_axis[idx_start:idx_end]
+                    y_segment = np.interp(t_segment - t_pulse, comp_t, comp_y, left=0, right=0)
+                    y_theoretical[idx_start:idx_end] += y_segment
+
+            # 4. Integrate (Measured Signal) for EACH Channel
+            channel_results = {}
+            
+            # Pre-compute cumulative sum for fast integration
+            y_cumsum = np.cumsum(y_theoretical) * dt_s # Integral
+            
+            # Ensure cycle time is valid
+            if cycle_time_s <= 0: cycle_time_s = 0.1
+            
+            for spec in channel_specs:
+                name = spec['name']
+                dwell = spec['dwell']
+                offset = spec['offset']
+                
+                # Generate sample windows
+                # Start from t=0 (or -offset?)
+                # We want samples to cover total_duration
+                
+                # N cycles
+                n_cycles = int(total_duration / cycle_time_s) + 1
+                
+                # Measurements
+                m_times = []
+                m_y = []
+                
+                for n in range(n_cycles):
+                    cycle_start = n * cycle_time_s
+                    t_start = cycle_start + offset
+                    t_end = t_start + dwell
+                    
+                    if t_start >= total_duration: break
+                    
+                    # Integration limits indices
+                    idx_s = int(t_start / dt_s)
+                    idx_e = int(t_end / dt_s)
+                    
+                    # Bounds check
+                    if idx_s < 0: idx_s = 0
+                    if idx_e > len(y_cumsum) - 1: idx_e = len(y_cumsum) - 1
+                    
+                    if idx_e > idx_s:
+                        integral = y_cumsum[idx_e] - y_cumsum[idx_s]
+                        # Normalized intensity = Integral / Dwell
+                        # Apply Scaling (SNR)
+                        scale = spec.get('scale', 1.0)
+                        val = (integral / (dwell if dwell > 0 else 1.0)) * scale
+                        
+                        # Store point at END of Dwell Time (as requested)
+                        # User Request: "place channels x data point at the end of it's measured dwell time"
+                        m_times.append(t_end) 
+                        m_y.append(val)
+                
+                # Store Dwell in DF for plotting
+                dwells = [dwell] * len(m_times)
+                channel_results[name] = pd.DataFrame({'Time': m_times, 'Intensity': m_y, 'Dwell': dwells})
+
+            IoLog.information("Logic.generate_pulse_train_v3: Complete")
+            
+            theo_df = pd.DataFrame({'Time': t_axis, 'Intensity': y_theoretical})
+            return theo_df, channel_results
+            
+        except Exception as e:
+            IoLog.error(f"Logic.generate_pulse_train_v3 CRASH: {e}")
+            IoLog.error(traceback.format_exc())
+            return None, None
+
+    @staticmethod
+    def generate_pulse_train_v2(composite_df, rep_rate_hz, pulses, acq_time_s, background_s=5.0, signal_s=10.0, dt_s=1e-5):
+        """
+        Generates a simulated pulse train based on the composite peak shape.
+        Returns:
+            theoretical_df: High-res instantaneous signal
+            measured_df: Signal integrated over Acquisition Time buckets
+        """
+        try:
+            if composite_df is None or composite_df.empty:
+                return None, None
+                
+            IoLog.information("Logic.generate_pulse_train: Starting...")
+                
+            # 1. Prepare Composite Pulse (Interpolant)
+            comp_t = composite_df['Relative Time (s)'].values
+            comp_i = composite_df['Normalised Intensity'].values
+            
+            # Shift comp_t so it starts at 0 for easier handling
+            t_min = comp_t.min()
+            comp_t_shifted = comp_t - t_min 
+            pulse_duration = comp_t_shifted.max()
+            
+            # 2. Setup Time Axis
+            IoLog.information("Logic.generate_pulse_train: Step 2 - Setup Time Axis")
+            # User requested equivalent background at rear
+            total_duration = background_s + signal_s + background_s
+            t_axis = np.arange(0, total_duration, dt_s)
+            y_theoretical = np.zeros_like(t_axis)
+            
+            # 3. Generate Pulse Train
+            IoLog.information("Logic.generate_pulse_train: Step 3 - Generate Pulses")
+            # Start firing after background_s
+            start_time = background_s
+            
+            # Calculate number of pulses to fire based on signal duration and rep rate
+            if rep_rate_hz > 0:
+                period = 1.0 / rep_rate_hz
+                num_pulses = int(signal_s * rep_rate_hz)
+                
+                # Vectorized Pulse Addition
+                # We add the pulse shape to the y_theoretical array at calculated start indices
+                
+                # Interpolate composite to the simulation grid resolution (dt_s) once
+                # This works if dt_s is finer than composite resolution, which it should be (10us)
+                pulse_grid_t = np.arange(0, pulse_duration + dt_s, dt_s)
+                pulse_grid_y = np.interp(pulse_grid_t, comp_t_shifted, comp_i, left=0, right=0)
+                
+                n_pulse_samples = len(pulse_grid_y)
+                n_total_samples = len(y_theoretical)
+                
+                for i in range(num_pulses):
+                    t_fire = start_time + i * period
+                    idx_start = int(t_fire / dt_s)
+                    idx_end = idx_start + n_pulse_samples
+                    
+                    if idx_start >= n_total_samples: break
+                    
+                    # Clip if end extends beyond buffer
+                    if idx_end > n_total_samples:
+                        valid_len = n_total_samples - idx_start
+                        y_theoretical[idx_start:n_total_samples] += pulse_grid_y[:valid_len]
+                    else:
+                        y_theoretical[idx_start:idx_end] += pulse_grid_y
+                        
+            # 4. Generate Measured (Integrated) Signal
+            IoLog.information("Logic.generate_pulse_train: Step 4 - Generate Measured")
+            # Integration buckets of size acq_time_s
+            n_buckets = int(total_duration / acq_time_s)
+            if n_buckets == 0: n_buckets = 1
+            measured_t = np.arange(n_buckets) * acq_time_s
+            measured_y = np.zeros(n_buckets)
+            
+            # Reshape theoretical into chunks of acq_time (approx)
+            # Note: This is an approximation. For exact sync logic, we'd need to be careful with sample boundaries.
+            # But for visualization, this is sufficient.
+            samples_per_bucket = int(acq_time_s / dt_s)
+            
+            if samples_per_bucket > 0:
+                # fast sum using reshape if length matches perfectly, else loop
+                # Loop is safer for edge cases
+                for i in range(n_buckets):
+                    s_idx = i * samples_per_bucket
+                    e_idx = s_idx + samples_per_bucket
+                    if s_idx >= len(y_theoretical): break
+                    # Sum * dt gives Area (Integrated Intensity)
+                    # But mass spec usually reports Counts or CPS.
+                    # If we assume y_theoretical is "Intensity/sec (CPS equivalent of pulse)", then
+                    # this integration gives Counts. 
+                    # Let's normalize it so max is somewhat relatable or just return raw integration.
+                    chunk = y_theoretical[s_idx:min(e_idx, len(y_theoretical))]
+                    measured_y[i] = np.sum(chunk)
+            
+            IoLog.information("Logic.generate_pulse_train: Step 5 - Return DataFrame")
+            return pd.DataFrame({'Time': t_axis, 'Intensity': y_theoretical}), pd.DataFrame({'Time': measured_t, 'Intensity': measured_y})
+
+        except Exception as e:
+            IoLog.error(f"Logic.generate_pulse_train CRASH: {e}")
+            IoLog.error(traceback.format_exc())
+            return None, None
 
     @staticmethod
     def calculate_constrained_at(inputs):
@@ -773,7 +1008,8 @@ class Logic:
             val_ms = round(iso['snapped_dt'] * 1000.0, decimals)
             output_rows.append({"Isotope": iso['name'], "Final Dwell (ms)": val_ms if decimals > 0 else int(val_ms),
                                 "Initial SNR": round(iso['initial_snr_display'], 2), "Sigma Sep": round(sep, 2),
-                                "Status": iso['status'], "Constraint": iso.get('constraint', ""), "IsZeroBG": iso.get('is_zero_bg', False)})
+                                "Status": iso['status'], "Constraint": iso.get('constraint', ""), "IsZeroBG": iso.get('is_zero_bg', False),
+                                "Signal CPS": iso.get('sig_cps', 0.0)})
 
         return (min(separations) if separations else 999.0), output_rows, res
 
@@ -1686,6 +1922,12 @@ class ioliteOptimiser(QWidget):
         self.tab_opt = QWidget()
         self.init_optimiser_tab()
         self.tabs.addTab(self.tab_opt, "Method Optimiser")
+        
+        # Tab 3: Pulse Train Simulator
+        IoLog.information("iolite Optimiser: Adding Pulse Train Tab...")
+        self.tab_pulse = QWidget()
+        self.init_pulse_train_tab()
+        self.tabs.addTab(self.tab_pulse, "Pulse Train Simulator")
         
         # Select Optimiser by default for now (or SPR if desired)
         self.tabs.setCurrentIndex(1)
@@ -6340,12 +6582,14 @@ class ioliteOptimiser(QWidget):
                      if max_opt_dwell > 0:
                          c['min_dwell_needed_ms'] = max_opt_dwell
             
-            # Reset 'pulses_per_pixel' to user input to ensure Error Calculation compares against Target, not Optimized result from previous run.
+            # Reset 'pulses_per_pixel' to user input to ensure Error Calculation compares against Target
             c['pulses_per_pixel'] = self._get(self.spin_pulses, 'value')
             c['dosage'] = self._get(self.spin_dosage, 'value')
             c['log_prefix'] = "Optimised Sync"
             sync = Logic.calculate_constrained_at(c)
             
+            # STORE SYNC FOR PULSE TRAIN SIMULATOR
+            self.last_sync = sync
             # Inject Warning into the main Spot Size note (Separate Line, White Bullet)
             warn = sync.get('warning', "")
             if warn and final_notes:
@@ -6536,6 +6780,8 @@ class ioliteOptimiser(QWidget):
             self.lbl_result.setText(self.final_status_base)
             
             # 6. Display Table
+            self.optimised_results = df_res # Store queryable results for Pulse Train Simulator
+            
             # Map initial dwells for easy lookup
             init_dwell_map = {d['name']: d['dwell'] for d in isotope_data}
 
@@ -6764,38 +7010,518 @@ class ioliteOptimiser(QWidget):
         self.save_persistent_settings()
         event.accept()
 
+    # --- Pulse Train Simulator Methods ---
+    def init_pulse_train_tab(self):
+        IoLog.information("iolite Optimiser: init_pulse_train_tab starting...")
+        main_layout = QHBoxLayout()
+        left_layout = QVBoxLayout()
+        right_layout = QVBoxLayout()
+        
+        # --- LEFT COLUMN (CONTROLS) ---
+        
+        # Settings Group
+        grp_settings = QGroupBox("Simulation Settings")
+        form_settings = QFormLayout()
+        
+        self.spin_pulse_bg = QDoubleSpinBox()
+        self.spin_pulse_bg.setRange(0, 100)
+        self.spin_pulse_bg.setValue(5.0)
+        self.spin_pulse_bg.setSuffix(" s")
+        form_settings.addRow("Background Time:", self.spin_pulse_bg)
+        
+        self.spin_pulse_sig = QDoubleSpinBox()
+        self.spin_pulse_sig.setRange(0, 100)
+        self.spin_pulse_sig.setValue(10.0)
+        self.spin_pulse_sig.setSuffix(" s")
+        form_settings.addRow("Signal Duration:", self.spin_pulse_sig)
+        
+        grp_settings.setLayout(form_settings)
+        left_layout.addWidget(grp_settings)
+        
+        # Overrides Group
+        self.grp_pulse_override = QGroupBox("Overrides")
+        self.grp_pulse_override.setCheckable(True)
+        self.grp_pulse_override.setChecked(False)
+        form_overrides = QFormLayout()
+        
+        self.spin_pulse_rr = QDoubleSpinBox()
+        self.spin_pulse_rr.setRange(0.1, 100000)
+        self.spin_pulse_rr.setDecimals(1)
+        self.spin_pulse_rr.setSuffix(" Hz")
+        form_overrides.addRow("Rep Rate:", self.spin_pulse_rr)
+        
+        self.spin_pulse_at = QDoubleSpinBox()
+        self.spin_pulse_at.setRange(0.001, 10000)
+        self.spin_pulse_at.setDecimals(3)
+        self.spin_pulse_at.setSuffix(" ms")
+        form_overrides.addRow("Acq Time:", self.spin_pulse_at)
+        
+        self.spin_pulse_count = QDoubleSpinBox()
+        self.spin_pulse_count.setRange(0.001, 100000)
+        self.spin_pulse_count.setDecimals(3)
+        form_overrides.addRow("Pulses / Acq:", self.spin_pulse_count)
+        
+        # Connect signals for auto-calc
+        self.spin_pulse_rr.valueChanged.connect(self._calc_pulse_params_from_rr)
+        self.spin_pulse_at.valueChanged.connect(self._calc_pulse_params_from_at)
+        self.spin_pulse_count.valueChanged.connect(self._calc_pulse_params_from_count)
+        
+        self.grp_pulse_override.setLayout(form_overrides)
+        left_layout.addWidget(self.grp_pulse_override)
+        
+        # Simulation Button
+        self.btn_simulate = QPushButton("Simulate Pulse Train")
+        self.btn_simulate.clicked.connect(self.run_pulse_simulation)
+        self.btn_simulate.setFixedHeight(40)
+        left_layout.addWidget(self.btn_simulate)
+        
+        left_layout.addStretch()
+        
+        # --- RIGHT COLUMN (PLOT) ---
+        
+        # Plot Controls
+        h_ctrl = QHBoxLayout()
+        
+        self.combo_theme_pulse = QComboBox()
+        self.combo_theme_pulse.addItems(["Auto", "Dark", "Light"])
+        self.combo_theme_pulse.setCurrentText(self.persistent_settings.get('theme', 'Auto'))
+        self.combo_theme_pulse.currentTextChanged.connect(self.apply_theme)
+        
+        self.chk_norm_pulse = QCheckBox("Normalize")
+        self.chk_norm_pulse.setChecked(False)
+        self.chk_norm_pulse.toggled.connect(lambda: self.update_pulse_plot(preserve_zoom=True))
+        
+        self.chk_y_zoom_pulse = QCheckBox("Pan / Zoom Y")
+        self.chk_y_zoom_pulse.toggled.connect(self._on_pulse_y_zoom_toggled)
+        
+        self.chk_rescale_pulse = QCheckBox("Auto-Rescale Y")
+        self.chk_rescale_pulse.setChecked(True)
+        self.chk_rescale_pulse.toggled.connect(self._on_pulse_rescale_toggled)
+        
+        h_ctrl.addWidget(QLabel("Theme:"))
+        h_ctrl.addWidget(self.combo_theme_pulse)
+        h_ctrl.addWidget(self.chk_norm_pulse)
+        h_ctrl.addWidget(self.chk_y_zoom_pulse)
+        h_ctrl.addWidget(self.chk_rescale_pulse)
+        h_ctrl.addStretch()
+        
+        right_layout.addLayout(h_ctrl)
+        
+        # Canvas
+        self.pulse_figure = Figure(figsize=(5, 4), dpi=100)
+        self.pulse_canvas = FigureCanvas(self.pulse_figure)
+        self.pulse_canvas.mpl_connect('resize_event', self._on_plot_resize)
+        self.pulse_canvas.mpl_connect('scroll_event', self.on_zoom)
+        self.pulse_canvas.mpl_connect('button_press_event', self.on_press)
+        self.pulse_canvas.mpl_connect('button_release_event', self.on_release)
+        self.pulse_canvas.mpl_connect('motion_notify_event', self.on_drag)
+        self.pulse_canvas.mpl_connect('pick_event', self.on_pulse_pick)
+        
+        self.pulse_legend_map = {} # Mapping for interactive legend
+        
+        right_layout.addWidget(self.pulse_canvas)
+        
+        main_layout.addLayout(left_layout, 1)
+        main_layout.addLayout(right_layout, 4)
+        
+        self.tab_pulse.setLayout(main_layout)
+
+    def _calc_pulse_params_from_rr(self):
+        if not self.grp_pulse_override.isChecked(): return
+        self.spin_pulse_count.blockSignals(True)
+        try:
+            rr = self.spin_pulse_rr.value
+            at_s = self.spin_pulse_at.value / 1000.0
+            self.spin_pulse_count.setValue(rr * at_s)
+        except: pass
+        self.spin_pulse_count.blockSignals(False)
+
+    def _calc_pulse_params_from_at(self):
+        if not self.grp_pulse_override.isChecked(): return
+        self.spin_pulse_count.blockSignals(True)
+        try:
+            rr = self.spin_pulse_rr.value
+            at_s = self.spin_pulse_at.value / 1000.0
+            self.spin_pulse_count.setValue(rr * at_s)
+        except: pass
+        self.spin_pulse_count.blockSignals(False)
+
+    def _calc_pulse_params_from_count(self):
+        if not self.grp_pulse_override.isChecked(): return
+        self.spin_pulse_at.blockSignals(True)
+        try:
+            # If user changes pulse count, we adjust AT (keeping RR constant usually safest)
+            # OR we adjust RR (keeping AT constant).
+            # Usually Integration time is the flexible parameter in simulation?
+            # Or Rep Rate?
+            # Let's adjust Acquisition Time as it's often the dependent variable in syncing.
+            p = self.spin_pulse_count.value
+            rr = self.spin_pulse_rr.value
+            if rr > 0:
+                at_s = p / rr
+                self.spin_pulse_at.setValue(at_s * 1000.0)
+        except: pass
+        self.spin_pulse_at.blockSignals(False)
+
+    def run_pulse_simulation(self):
+        try:
+            IoLog.information("iolite Optimiser: run_pulse_simulation called")
+            # 1. Gather Inputs
+            if not hasattr(self, 'last_sync') or self.last_sync is None:
+                IoLog.warning("iolite Optimiser: No last_sync found")
+                # Try to grab from table if missing
+                if hasattr(self, 'lbl_result'):
+                    self.lbl_result.setText("No synchronization data available. Please run Optimization first.")
+                IoLog.warning("Pulse Train: No sync data")
+                # If overrides are enabled, we might proceed, but let's enforce flow for now
+                if not self.grp_pulse_override.isChecked():
+                    return
+                # If override checked, we can proceed with just defaults if logic handles None sync
+
+            # Get Analyzed Isotopes
+            if self.spr_raw_results_df is None or self.spr_raw_results_df.empty:
+                 IoLog.warning("iolite Optimiser: No SPR results available")
+                 if hasattr(self, 'lbl_result'): self.lbl_result.setText("No SPR analysis available. Please run SPR Analysis first.")
+                 return
+            
+            # Get Selected Isotope (for composite peak)
+            try:
+                iso = self._get(self.cmb_spr_iso, 'currentText')
+                IoLog.information(f"iolite Optimiser: Selected ISO: {iso}")
+            except: iso = None
+            
+            if not iso:
+                 IoLog.warning("iolite Optimiser: No isotope selected")
+                 return
+            
+
+            
+            # Get Timing
+            if self.grp_pulse_override.isChecked():
+                rr = self.spin_pulse_rr.value
+                at_ms = self.spin_pulse_at.value
+                at_s = at_ms / 1000.0
+                pulses = rr * at_s # Approx
+                
+                # Update pulse count box if not already set (initial load)
+                self.spin_pulse_count.blockSignals(True)
+                self.spin_pulse_count.setValue(pulses)
+                self.spin_pulse_count.blockSignals(False)
+            else:
+                if hasattr(self, 'last_sync') and self.last_sync:
+                    rr = self.last_sync.get('Laser Rep Rate (Hz)', 1.0)
+                    at_ms = self.last_sync.get('Acquisition Time (ms)', 0.1)
+                    pulses = self.last_sync.get('Actual Pulses', 1.0)
+                else:
+                    rr = 10.0
+                    at_ms = 100.0
+                    pulses = 1.0
+                    
+                at_s = at_ms / 1000.0
+                
+                # Update override boxes for visibility
+                self.spin_pulse_rr.blockSignals(True)
+                self.spin_pulse_at.blockSignals(True)
+                self.spin_pulse_count.blockSignals(True)
+                
+                self.spin_pulse_rr.setValue(rr)
+                self.spin_pulse_at.setValue(at_ms)
+                self.spin_pulse_count.setValue(pulses)
+                
+                self.spin_pulse_rr.blockSignals(False)
+                self.spin_pulse_at.blockSignals(False)
+                self.spin_pulse_count.blockSignals(False)
+            
+            IoLog.information(f"iolite Optimiser: Simulation Params - RR: {rr}, AT: {at_ms}ms, Pulses: {pulses}")
+
+            try:
+                bg_s = self.spin_pulse_bg.value
+                sig_s = self.spin_pulse_sig.value
+            except Exception as e:
+                 IoLog.error(f"iolite Optimiser: Failed to get spinbox values: {e}")
+                 return
+
+            IoLog.information(f"iolite Optimiser: Simulation Params - RR: {rr}, AT: {at_ms}ms, Pulses: {pulses}")
+
+            try:
+                bg_s = self.spin_pulse_bg.value
+                sig_s = self.spin_pulse_sig.value
+            except Exception as e:
+                 IoLog.error(f"iolite Optimiser: Failed to get spinbox values: {e}")
+                 return
+
+            # 2. Generate Data with Sequential Sampling (V3)
+            self.pulse_results = {} # Dict of {iso: (theo_df, meas_df)}
+            
+            # --- Build Channel Specs ---
+            channel_specs = []
+            
+            # Use 'optimised_results' if available to get exact dwells and order
+            # optimised_results is a list of dicts [{'Channel': 'U238', 'Final Dwell (ms)': 10.0, ...}]
+            # We must match these to available columns in spr_df
+            
+            if hasattr(self, 'optimised_results') and self.optimised_results:
+                # Use optimized order
+                # Overhead is at the end of the cycle, so offsets are just cumulative dwells
+                current_offset_s = 0.0
+                
+                for res in self.optimised_results:
+                    ch_name = str(res.get('Isotope', 'Unknown')) # Or Channel Name
+                    dwell_ms = res.get('Final Dwell (ms)', 10.0)
+                    
+                    # Get Scaling Factor (Signal CPS preferred, else SNR)
+                    try:
+                        if 'Signal CPS' in res:
+                             scale_val = float(res['Signal CPS'])
+                        elif 'Resultant SNR' in res:
+                             scale_val = float(res['Resultant SNR'])
+                        else:
+                             scale_val = 1.0
+                    except:
+                        scale_val = 1.0
+                    
+                    # Scale dwell if AT has been overridden
+                    ratio = 1.0
+                    if hasattr(self, 'last_sync') and self.last_sync:
+                         orig_at = self.last_sync.get('Acquisition Time (ms)', 1.0)
+                         if orig_at > 0: ratio = at_ms / orig_at
+                    
+                    dwell_s = (dwell_ms * ratio) / 1000.0
+                    
+                    channel_specs.append({
+                        'name': ch_name,
+                        'dwell': dwell_s,
+                        'offset': current_offset_s,
+                        'scale': scale_val
+                    })
+                    
+                    current_offset_s += dwell_s
+                    
+            else:
+                # Fallback: Simultaneous or Equal Sequential
+                # If no optimization run, assume simultaneous/equal
+                # Let's assume simultaneous to be safe (offset=0, dwell=AT)
+                if self.spr_df is not None:
+                    cols = [c for c in self.spr_df.columns if c != 'Time']
+                    for c in cols:
+                        channel_specs.append({
+                            'name': c,
+                            'dwell': at_s,
+                            'offset': 0.0
+                        })
+            
+            IoLog.information(f"iolite Optimiser: Channel Specs (First 3): {channel_specs[:3]}")
+
+            # Generate ONCE using the selected isotope's parameters
+            # Filter excluded peaks for composite generation
+            excluded = self.spr_excluded_peaks.get(iso, set())
+            filtered_df = self.spr_raw_results_df[~self.spr_raw_results_df['Peak Index'].isin(excluded)]
+            
+            composite_df = Logic.generate_composite_peak(self.spr_df, iso, filtered_df)
+            
+            if composite_df is not None:
+                try:
+                    IoLog.information(f"Calling Logic.generate_pulse_train_v3 for {iso}...")
+                    
+                    # Use v3
+                    theo_df, channel_results = Logic.generate_pulse_train_v3(
+                        composite_df, rr, pulses, at_s, channel_specs, background_s=bg_s, signal_s=sig_s
+                    )
+                    
+                    if theo_df is not None and channel_results:
+                        # Store in compatible format for plotting
+                        # pulse_results expects {iso: (theo_df, meas_df)}
+                        # v3 returns ONE theo_df and a dict of meas_dfs
+                        
+                        for ch_name, meas_df in channel_results.items():
+                             self.pulse_results[ch_name] = (theo_df, meas_df)
+                            
+                        IoLog.information(f"Simulation valid. Channels: {len(channel_results)}")
+                        
+                except Exception as e:
+                    IoLog.error(f"Logic.generate_pulse_train FAILED for {iso}: {e}")
+            
+            if not self.pulse_results:
+                 IoLog.warning("iolite Optimiser: Simulation returned NO results")
+            
+            # 3. Plot
+            self.update_pulse_plot()
+            
+        except Exception as e:
+            IoLog.error(f"iolite Optimiser: run_pulse_simulation CRASHED: {e}")
+            IoLog.error(traceback.format_exc())
+
+
+    def update_pulse_plot(self, preserve_zoom=False):
+        IoLog.information("iolite Optimiser: update_pulse_plot called")
+        if not hasattr(self, 'pulse_results') or not self.pulse_results: 
+             IoLog.warning("iolite Optimiser: No pulse_results to plot")
+             return
+        
+        try:
+            # Theme Handling
+            is_dark = self.system_is_dark
+            try:
+                theme_sel = self._get(self.combo_theme_pulse, 'currentText')
+                if theme_sel == "Dark": is_dark = True
+                elif theme_sel == "Light": is_dark = False
+            except: pass
+            
+            bg_color = '#2b2b2b' if is_dark else 'white'
+            fg_color = 'white' if is_dark else 'black'
+            
+            self.pulse_figure.clear()
+            self.pulse_figure.patch.set_facecolor(bg_color)
+            
+            ax = self.pulse_figure.add_subplot(111)
+            ax.set_facecolor(bg_color)
+            
+            norm = self.chk_norm_pulse.isChecked()
+            
+            # Setup Color Cycler
+            # Use a qualitative map like tab10
+            prop_cycle = plt.rcParams['axes.prop_cycle']
+            colors = prop_cycle.by_key()['color']
+            
+            # Plot loop
+            # 1. Plot Theoretical (Using first available, as they are identical)
+            # Just extract one theo_df
+            first_iso = next(iter(self.pulse_results))
+            theo_df, _ = self.pulse_results[first_iso]
+            
+            t_theo = theo_df['Time'].values
+            y_theo = theo_df['Intensity'].values
+            
+            # 2. Calc Global Max first (needed for scaling Theo)
+            all_intensities = []
+            for _, (_, df) in self.pulse_results.items():
+                all_intensities.extend(df['Intensity'].values)
+            
+            global_max_meas = 1.0
+            if all_intensities:
+                global_max_meas = np.max(all_intensities)
+            if global_max_meas <= 0: global_max_meas = 1.0
+            
+            if norm:
+                mx_t = np.max(y_theo) if len(y_theo) > 0 else 1
+                if mx_t > 0: y_theo = y_theo / mx_t
+            else:
+                # If raw, scale Theo to match data max so it is visible
+                y_theo = y_theo * global_max_meas
+
+            # Plot Theoretical once (Faint background)
+            ax.plot(t_theo, y_theo, label="Theoretical (Pulse Stream)", color='gray', alpha=0.3, lw=1)
+            
+            # 3. Plot Measured for each channel
+
+            for idx, (iso, (_, meas_df)) in enumerate(self.pulse_results.items()):
+
+                t_meas = meas_df['Time'].values
+                y_meas = meas_df['Intensity'].values
+                
+                if norm:
+                    # Normalize against GLOBAL max to preserve relative scale
+                    y_meas = y_meas / global_max_meas
+                
+                color = colors[idx % len(colors)]
+                
+                # Plot Measured (Connected Lines with Markers)
+                # Now that m_times are aligned to cycle, we can just plot them directly.
+                
+                ax.plot(t_meas, y_meas, label=f"{iso}", color=color, marker='o', markersize=4, lw=2)
+            
+            ax.set_xlabel("Time (s)", color=fg_color)
+            ax.set_ylabel("Normalized Intensity" if norm else "Intensity", color=fg_color)
+            
+            # Legend with interactivity
+            self.pulse_legend_map = {}
+            handles, labels = ax.get_legend_handles_labels()
+            leg = ax.legend(handles, labels, loc='upper right', framealpha=0.5, fontsize='small')
+            
+            for legline, handle in zip(leg.get_lines(), handles):
+                legline.set_picker(5) # 5 pts tolerance
+                self.pulse_legend_map[legline] = handle
+            
+            for text in leg.get_texts():
+                text.set_color(fg_color)
+
+            
+            ax.tick_params(colors=fg_color)
+            for spine in ax.spines.values():
+                spine.set_edgecolor(fg_color)
+            
+            # Use EngFormatter for non-normalized
+            if not norm:
+                 ax.yaxis.set_major_formatter(EngFormatter(places=0, sep=" "))
+            
+            if self.chk_rescale_pulse.isChecked() and not preserve_zoom:
+                 self.rescale_to_visible(ax=ax, canvas=None)
+            elif preserve_zoom:
+                 pass 
+                 
+            self._update_smart_margins(self.pulse_canvas)
+            self.pulse_canvas.draw()
+            IoLog.information("iolite Optimiser: pulse_canvas.draw() called successfully")
+            
+        except Exception as e:
+            IoLog.error(f"iolite Optimiser: update_pulse_plot failed: {e}")
+            IoLog.error(traceback.format_exc())
+
+
+
+    def on_pulse_pick(self, event):
+        """
+        Handles click events on the pulse plot legend to toggle trace visibility.
+        """
+        legline = event.artist
+        origline = self.pulse_legend_map.get(legline)
+        
+        if origline:
+            vis = not origline.get_visible()
+            origline.set_visible(vis)
+            
+            # Dim the legend line to indicate hidden state
+            legline.set_alpha(1.0 if vis else 0.2)
+            self.pulse_canvas.draw()
+
+    def _on_pulse_rescale_toggled(self, checked):
+        if checked:
+            self.chk_y_zoom_pulse.setChecked(False)
+            if hasattr(self, 'pulse_figure') and self.pulse_figure.axes:
+                 self.rescale_to_visible(ax=self.pulse_figure.axes[0], canvas=self.pulse_canvas)
+
+    def _on_pulse_y_zoom_toggled(self, checked):
+        if checked:
+            self.chk_rescale_pulse.setChecked(False)
+
 # --- UI SETUP ---
 widget = None
 
 
 def create_widget():
     global widget
-    IoLog.information("iolite Optimiser: create_widget called")
+    IoLog.information("iolite Optimiser: create_widget called (Debug Version)")
     
     try:
         if widget is not None:
-            # Check if C++ object is deleted
+            # Force close and recreation to ensure new code is loaded
             try:
-                if not widget.isVisible():
-                    widget.show()
-                widget.raise_()
-                widget.activateWindow()
-                
-                # Manual Theme Trigger on Re-Open
-                # Uses current dropdown value (restored from settings)
-                try:
-                    # widget.apply_theme() call removed to prevent loop
-                    # We rely on changeEvent/showEvent, or call it safely if we are sure.
-                    pass
-                except Exception as e:
-                    IoLog.warning(f"Failed to refresh theme on show: {e}")
-                    
-                IoLog.information("iolite Optimiser: Existing widget shown")
-                return
-            except RuntimeError:
-                # Object has been deleted (C++ side), but Python wrapper remains
-                IoLog.information("iolite Optimiser: Dead C++ object detected")
-                widget = None
+                widget.close()
+                widget.deleteLater()
+            except: 
+                pass
+            widget = None
+            
+            # Original singleton logic commented out for dev/update:
+            # try:
+            #     if not widget.isVisible():
+            #         widget.show()
+            #     widget.raise_()
+            #     widget.activateWindow()
+            #     return
+            # except RuntimeError:
+            #     widget = None
+
     except Exception as e:
         IoLog.error(f"iolite Optimiser: Error checking widget state: {e}")
         widget = None
