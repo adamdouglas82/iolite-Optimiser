@@ -2,7 +2,7 @@
 #/ Description: Characterises your system's single-pulse washout to calculate the optimal balance of spot size, scan speed, and repetition rate that achieves your target data quality.
 #/ Type: UI
 #/ Authors: Adam Douglas
-#/ Version: 0.9.6
+#/ Version: 0.9.7
 #/ Contact: Adam.Douglas@icpms.com
 
 import math
@@ -60,7 +60,7 @@ except ImportError:
         pass
 
 # --- EMBEDDED CONSTANTS ---
-VERSION = "0.9.6"
+VERSION = "0.9.7"
 
 ICP_SPECS = {
     "Agilent": {
@@ -352,8 +352,72 @@ class Logic:
         return pd.DataFrame({'Relative Time (s)': grid_t, 'Normalised Intensity': avg_y})
 
     @staticmethod
+    def get_isotope_stats(name, df_sig, df_blk, dwell_s, is_raw_counts):
+        """Standardized conversion between counts and CPS for isotope statistics."""
+        m_sig, m_blk = df_sig[name].mean(), df_blk[name].mean()
+        s_blk = df_blk[name].std()
+        
+        sig_cps = m_sig if not is_raw_counts else m_sig / dwell_s
+        blk_cps = m_blk if not is_raw_counts else m_blk / dwell_s
+        std_counts = s_blk if is_raw_counts else s_blk * dwell_s
+        
+        return {
+            "m_sig": m_sig, "m_blk": m_blk, "s_blk": s_blk,
+            "sig_cps": sig_cps, "blk_cps": blk_cps, "std_counts": std_counts
+        }
+
+    @staticmethod
+    def calculate_robust_snr(sig_cps, blk_cps, bl_dt, std_counts, snr_threshold=0.0):
+        """
+        Standardized calculation for 'Robust SNR' (Sigma Separation).
+        Centralizes Poisson vs. Observed variance and Critical Level (Lc).
+        """
+        # 1. Determine the Noise Floor (Count Domain)
+        total_bg_counts = blk_cps * bl_dt
+        # Theoretical Poisson Variance vs Observed Variance
+        effective_noise_var = max(total_bg_counts, std_counts**2)
+        
+        # 2. Calculate Critical Level (Lc) for Detection (95% Confidence)
+        z = 1.645
+        if total_bg_counts == 0:
+            L_c_counts = (z**2)/2 + z * math.sqrt(2 * 0.4) 
+        else:
+            L_c_counts = z * math.sqrt(2 * effective_noise_var)
+
+        # 3. Calculate "Robust SNR" (Detection Metric)
+        # Factor = z * sqrt(2) ~ 2.326 to restore familiar Sigma scaling
+        sigma_factor = z * math.sqrt(2)
+        net_counts = (sig_cps - blk_cps) * bl_dt
+        
+        base_snr = 0
+        if L_c_counts > 0:
+            detection_ratio = net_counts / L_c_counts
+            base_snr = detection_ratio * sigma_factor 
+
+        return {
+            'base_snr': base_snr,
+            'effective_noise_var': effective_noise_var,
+            'is_zero_bg': (total_bg_counts == 0),
+            'L_c_counts': L_c_counts
+        }
+
+    @staticmethod
+    def get_best_integration_time(target_at, overhead_s, allowed_dwells_s, precision_s, tech):
+        """
+        Centralizes integration time selection for MC/TOF and hardware snapping.
+        """
+        if tech == "Multi-Collector" and allowed_dwells_s:
+            for t in sorted(allowed_dwells_s):
+                if (t + overhead_s) >= (target_at - 1e-7): 
+                    return t + overhead_s
+            return max(allowed_dwells_s) + overhead_s
+        
+        # Standard snap to hardware precision
+        return round(target_at / precision_s) * precision_s
+
+    @staticmethod
     def calculate_constrained_at(inputs):
-        """Helper to determine constrained Acquisition Time."""
+        """Helper to determine constrained Acquisition Time and synchronized rep rate."""
         fw_s = inputs['washout_ms'] / 1000.0
         bs = inputs['spot_size_um']
         n_val = inputs['pulses_per_pixel']
@@ -361,6 +425,7 @@ class Logic:
         ss_max = inputs['max_speed_um_s']
         is_mc = inputs['icp_technology'] == "Multi-Collector"
         valid_times_s = [d/1000.0 for d in (inputs.get('allowed_dwells') or [])]
+        p_s = inputs['precision_ms'] / 1000.0
 
         at_from_washout = fw_s
         rr_ideal = n_val / fw_s
@@ -375,424 +440,173 @@ class Logic:
         at_from_duty = fw_s
         harmonic = 1
         
-        # State tracking for reasons why Acq Time was increased beyond washout
-        rr_limited = False
-        ss_limited = False
-        duty_info = None  # Store detail like "10%" or "2x"
-        dwell_info = None # Store detail like "50ms" or "2x"
+        # State tracking for reasons why Acq Time was increased
+        at_reasons = []
+        if at_from_rr > (fw_s + 1e-7): at_reasons.append("Rep Rate Limit")
+        if ss_max > 0 and at_from_ss > (fw_s + 1e-7): at_reasons.append("Stage Speed Limit")
 
-        if at_from_rr > (fw_s + 1e-7):
-            rr_limited = True
-        
-        if at_from_ss > (fw_s + 1e-7):
-            ss_limited = True
-
-        # --- HARMONIC SCALING (Hardware-Aware) ---
-        # 1. Base Quantum Calculation
-        # We start with the washout-compatible base, then account for hardware limits.
+        # --- HARMONIC SCALING ---
         rr_h1 = max(1, math.floor(n_val / fw_s))
         at_h1 = n_val / rr_h1
-        p_s = inputs['precision_ms'] / 1000.0
         base_washout = round(at_h1 / p_s) * p_s 
-        
-        # The 'base' for harmonics must be at least the physical hardware limit
         base = max(base_washout, at_from_rr, at_from_ss)
         
-        # 2. Use hardware-limit base for Duty Cycle scaling
+        at_from_duty_direct = 0
         if min_duty > 0 and min_duty < 1.0:
-            overhead_s = inputs.get('overhead_ms', 0) / 1000.0
             min_dwell_for_duty = (min_duty * overhead_s) / (1.0 - min_duty)
             required_cycle_for_duty = min_dwell_for_duty + overhead_s
-            
-            # For MC, we don't force Harmonic multiples (N * Washout). 
-            # We just need AT >= Required Duty Cycle Time.
             if is_mc:
                 at_from_duty_direct = required_cycle_for_duty
-                if required_cycle_for_duty > (base + 1e-7):
-                     duty_info = f"{min_duty*100:.0f}%"
+                if required_cycle_for_duty > (base + 1e-7): at_reasons.append(f"Duty Cycle ({min_duty*100:.0f}%)")
             else:
                 calc_harmonic = math.ceil((required_cycle_for_duty / base) - 1e-7)
-                if calc_harmonic > 1:
-                    duty_info = f"{calc_harmonic}x"
+                if calc_harmonic > 1: at_reasons.append(f"Duty Cycle ({calc_harmonic}x)")
                 harmonic = max(harmonic, calc_harmonic)
-                at_from_duty_direct = 0
-        else:
-             at_from_duty_direct = 0
 
-        # 3. Use hardware-limit base for Dwell Budget scaling
+        at_from_dwell_direct = 0
         if min_dwell_req_s > 0:
             required_cycle = min_dwell_req_s + overhead_s
             if is_mc:
                  at_from_dwell_direct = required_cycle
-                 if required_cycle > (base + 1e-7):
-                     dwell_info = f"{min_dwell_req_s*1000:.0f} ms"
+                 if required_cycle > (base + 1e-7): at_reasons.append(f"Dwell Budget ({min_dwell_req_s*1000:.0f} ms)")
             else:
                  harmonic_dwell = math.ceil((required_cycle / base) - 1e-7)
-                 if harmonic_dwell > 1:
-                     dwell_info = f"{harmonic_dwell}x"
+                 if harmonic_dwell > 1: at_reasons.append(f"Dwell Budget ({harmonic_dwell}x)")
                  harmonic = max(harmonic, harmonic_dwell)
-                 at_from_dwell_direct = 0
-        else:
-             at_from_dwell_direct = 0
 
-        # Build combined note for Acq Time increases
         notes = []
-        at_reasons = []
-        
-        if rr_limited:
-            at_reasons.append("Rep Rate Limit")
-            if n_val > 1.0:
-                at_reasons.append(f"Pulses per Dwell Time ({n_val:.1f})")
-        if ss_limited:
-            at_reasons.append("Stage Speed Limit")
-        if duty_info:
-            at_reasons.append(f"Duty Cycle ({duty_info})")
-        if dwell_info:
-            at_reasons.append(f"Dwell Budget ({dwell_info})")
-
         if at_reasons:
             res_str = at_reasons[0]
-            if len(at_reasons) > 1:
-                res_str = ", ".join(at_reasons[:-1]) + " and " + at_reasons[-1]
+            if len(at_reasons) > 1: res_str = ", ".join(at_reasons[:-1]) + " and " + at_reasons[-1]
             notes.append(f"Constraint: Acq Time increased for {res_str}")
             
-        # Re-verify against allowed list for MC (if applicable)
-        if is_mc and valid_times_s:
-            # For MC, 'base' refers to chosen Integration Time + Overhead
-            for t in sorted(valid_times_s):
-                if (t + overhead_s) >= fw_s: 
-                    base = t + overhead_s
-                    break
-        
         at_from_duty = base * harmonic
-        
-        # Incorporate Direct Requirements (for MC)
         at_needed = max(at_from_washout, at_from_rr, at_from_ss, at_from_duty, at_from_duty_direct, at_from_dwell_direct)
-        at_final = at_needed
-        if is_mc and valid_times_s:
-            at_final = max(valid_times_s) + overhead_s
-            for t in sorted(valid_times_s):
-                if (t + overhead_s) >= at_needed: 
-                    at_final = t + overhead_s
-                    break
         
-        # --- REFINEMENT: Acq Time must match discrete Rep Rate Steps ---
-        optimised_n = n_val
-        rr_actual = 0
+        # Use Shared Integration Logic
+        at_actual_s = Logic.get_best_integration_time(at_needed, overhead_s, valid_times_s, p_s, inputs['icp_technology'])
         
-        if is_mc:
-            # MC STRATEGY: Time-Driven (Integration Priority)
-            # The Acquisition Time is dictated strictly by the Dwell Time + Overhead.
-            # We do NOT force it to be N / RR. 
-            # The Laser Rep Rate will be matched "as close as possible" in the sync function,
-            # and the resulting pulses-per-pixel will float.
-            
-            at_actual_s = at_needed
-            optimised_n = n_val 
-            
-            # Since we are Time-Driven, we don't calculate an integer RR here for constraints.
-            # We rely on calculate_laser_sync to pick the nearest RR.
-            
-        else:
-            # Standard Systems: Fixed Pulses, Floor RR (Pulse-Driven)
-            # Refined: Use avoid_gaps logic here so scaling is accurate
-            avoid_gaps = inputs.get('avoid_gaps', False)
-            rr_theoretical = n_val / at_final
-            prec = inputs.get('rr_prec_hz', 1.0)
-            if prec <= 0: prec = 1.0
-            
-            allowed_rr = inputs.get('allowed_rr', None)
-            if allowed_rr:
-                strategy = "ceil" if avoid_gaps else "floor"
-                if strategy == "ceil":
-                    valid = [r for r in allowed_rr if r >= rr_theoretical - 1e-9]
-                    rr_actual = min(valid) if valid else max(allowed_rr)
-                else:
-                    valid = [r for r in allowed_rr if r <= rr_theoretical + 1e-9]
-                    rr_actual = max(valid) if valid else min(allowed_rr)
-            else:
-                if avoid_gaps:
-                    rr_actual = math.ceil(rr_theoretical / prec) * prec
-                else:
-                    rr_actual = math.floor(rr_theoretical / prec) * prec
-            
-            # GUARD: Prevent Zero Division if Rep Rate floors to 0 (e.g. theoretical < precision)
-            if rr_actual <= 1e-9:
-                 rr_actual = prec if prec > 0 else 1.0
-            
-            # Acquisition Time must match this RR
-            if avoid_gaps:
-                # If Avoid Gaps (Overlapping), we prioritize maintaining the Dwell Time (and thus Overlap)
-                # over the exact Pulse Count. So we keep AT fixed (or slightly higher) and let N increase.
-                at_actual_s = at_final 
-                optimised_n = rr_actual * at_actual_s
-            else:
-                # If Standard (Flooring), we prioritize the exact Pulse Count, 
-                # so we adjust AT to match N / RR.
-                at_actual_s = n_val / rr_actual
-                optimised_n = n_val
-        
-        # Snap to hardware precision step (e.g. 0.1 ms for Agilent)
-        p_s = inputs['precision_ms'] / 1000.0
-        # Standard + MC systems: Snap to nearest hardware step
-        at_actual_s = round(at_actual_s / p_s) * p_s
-        
-        return at_actual_s, at_needed, harmonic, valid_times_s, notes, optimised_n
-
-    @staticmethod
-    def calculate_laser_sync(inputs):
-        """
-        Calculates the optimal Acquisition Time (AT), Laser Repetition Rate (RR),
-        and Stage Speed based on hardware limits.
-        """
-        fw_s = inputs['washout_ms'] / 1000.0
-        bs = inputs['spot_size_um']
-        n_val = inputs['pulses_per_pixel']
-        n_target = n_val        
-        rr_max = inputs['max_rr_hz']
-        ss_max = inputs['max_speed_um_s']
-        allowed_rr = inputs.get('allowed_rr', None)
-        is_mc = inputs['icp_technology'] == "Multi-Collector"
-        
-        valid_times_s = [d/1000.0 for d in (inputs.get('allowed_dwells') or [])]
-        
-        # 1. Get definitive AT from helper
-        # Refined: at_final_s = Actual (post-rounding), at_target_s = Theoretical Needs
-        at_final_s, at_target_s, _, _, notes, opt_n = Logic.calculate_constrained_at(inputs)
-        
-        inputs['pulses_per_pixel'] = opt_n
-        
-        # 2. Calculate Derived Laser Params based on AT
-        # Use OPTIMISED pulses (if modified by MC logic or Avoid Gaps scaling)
-        n_val = opt_n 
-        rr_final_raw = n_val / at_final_s
-        
-        # SNAP Rep Rate to Hardware Precision (to reveal actual dosage deviation)
+        # --- REFINEMENT: Calculate Synchronized Rep Rate ---
+        avoid_gaps = inputs.get('avoid_gaps', False)
+        rr_theoretical = n_val / at_actual_s
         rr_prec = inputs.get('rr_prec_hz', 1.0)
         if rr_prec <= 0: rr_prec = 1.0
-        
-        # Determine Rounding Strategy
-        avoid_gaps = inputs.get('avoid_gaps', False)
-        
+        allowed_rr = inputs.get('allowed_rr', None)
+
         if is_mc:
-            # MC Mode: Dwell is fixed. RR = n / AT.
-            # Avoid Gaps -> CEIL (Snap UP to ensure overlap)
-            # Standard   -> FLOOR (Snap DOWN to ensure budget/pulse constraint)
-            if avoid_gaps:
-                 rr_final = math.ceil(rr_final_raw / rr_prec - 1e-9) * rr_prec
-            else:
-                 rr_final = math.floor(rr_final_raw / rr_prec + 1e-9) * rr_prec
+            # MC: Time-Driven
+            if avoid_gaps: rr_actual = math.ceil(rr_theoretical / rr_prec - 1e-9) * rr_prec
+            else: rr_actual = math.floor(rr_theoretical / rr_prec + 1e-9) * rr_prec
+            optimised_n = n_val
         else:
-            # Standard Mode: AT is tuned to match RR.
-            # calculate_constrained_at already aligned AT to be compatible with a valid RR.
-            # We round to nearest to recover that integer.
-            rr_final = round(rr_final_raw / rr_prec) * rr_prec
+            # Standard: Pulse-Driven. Re-calculate AT to match an integer RR if not avoid_gaps.
+            if allowed_rr:
+                valid = [r for r in allowed_rr if (r >= rr_theoretical - 1e-9 if avoid_gaps else r <= rr_theoretical + 1e-9)]
+                rr_actual = (min(valid) if avoid_gaps else max(valid)) if valid else (max(allowed_rr) if avoid_gaps else min(allowed_rr))
+            else:
+                rr_actual = (math.ceil(rr_theoretical / rr_prec) if avoid_gaps else math.floor(rr_theoretical / rr_prec)) * rr_prec
+            
+            if rr_actual <= 1e-9: rr_actual = rr_prec
+            
+            if avoid_gaps:
+                optimised_n = rr_actual * at_actual_s
+            else:
+                at_actual_s = round((n_val / rr_actual) / p_s) * p_s
+                optimised_n = n_val
+
+        # Derived parameters
+        actual_pulses = rr_actual * at_actual_s
+        speed = (bs * rr_actual) / optimised_n if optimised_n > 0 else 0
+        overlap_um = bs - (speed / rr_actual) if rr_actual > 0 else 0
+        overlap_pct = (overlap_um / bs) * 100 if bs > 0 else 0
         
-        # Update inputs with optimised N so downstream usage (e.g. results table) is correct
-        inputs['pulses_per_pixel'] = opt_n
-        
-        warning = "" 
-        
-        # 3. Recalculate Actual Pulses based on REALIZABLE Rep Rate and AT
-        actual_pulses = rr_final * at_final_s
-        
-        
-        
-        
-        
-        # Check for Asynchronous Mapping (Integrated pixels v Laser shots mismatch)
-        # Always report this to the user
-        # Compare against ORIGINAL target (n_target), not the optimised one (which moves with logic)
+        # Consistent dwell budget calculation (Net measurement time)
+        # For MC/TOF: This is the individual integration time.
+        # For Quad/Sector: This is the total time for all dwells.
+        dwell_budget_s = at_actual_s - overhead_s
+
+        # Sync error and warning (moved from calculate_laser_sync)
+        n_target = inputs['pulses_per_pixel']
         sync_error = actual_pulses - n_target
         err_pct = (sync_error / n_target) * 100 if n_target != 0 else 0.0
         
-        if is_mc:
-             # MC Time-Driven Adjustment Message
-             warning = f"Optimised to match Integration Time: {actual_pulses:.4f} pulses (Error: {err_pct:+.4f}%)."
-        else:
-             # Standard system warning
-             warning = f"Calculated Pulses per Dwell Time: {actual_pulses:.4f} (Error: {err_pct:+.4f}%)."
+        warning = f"Optimised to match {'Integration Time' if inputs['icp_technology'] == 'Multi-Collector' else 'Dwell Time'}: {actual_pulses:.4f} pulses (Error: {err_pct:+.4f}%)."
 
-        # Diagnostic Metrics
-        budget_ms = (at_final_s * 1000) - inputs.get('overhead_ms', 0)
-        
-        # Mapping-Priority Speed (Sync strictly to laser shots)
-        # We derive speed from Spot Size and Rep Rate to guarantee 0.0 overlap for 1-pulse pixels.
-        speed = (bs * rr_final) / n_val
-        overlap_um = bs - (speed / rr_final)
-        overlap_pct = (overlap_um / bs) * 100 if bs > 0 else 0
-        
-        
-        # Diagnostic
-        
-        prec_ms = inputs['precision_ms']
-        
-        # Diagnostic
-        # IoLog.debug(f"Logic: bs={bs}, rr={rr_final}, n={n_val}, calc_speed={speed}")
-        
-        result = {
-            "Target Acquisition Time (ms)": round(at_target_s * 1000.0, 3), # Target is theoretical
-            "Acquisition Time (ms)": round(at_final_s * 1000.0 / prec_ms) * prec_ms,
-            "Laser Rep Rate (Hz)": rr_final,
-            "Stage Speed (µm s⁻¹)": float(speed),
-            "Actual Pulses": actual_pulses,
-            "Dwell Budget (ms)": round(budget_ms / prec_ms) * prec_ms,
-            "Overhead (ms)": round(inputs.get('overhead_ms', 0) / prec_ms) * prec_ms,
-            "Overlap (%)": overlap_pct,
-            "Overlap (µm)": overlap_um,
-            "Warning": warning,
-            "Notes": notes
+        return {
+            "at_actual_s": at_actual_s,
+            "at_needed_s": at_needed,
+            "rr_actual": rr_actual,
+            "speed": speed,
+            "actual_pulses": actual_pulses,
+            "overlap_pct": overlap_pct,
+            "overlap_um": overlap_um,
+            "harmonic": harmonic,
+            "valid_times_s": valid_times_s,
+            "notes": notes,
+            "optimised_n": optimised_n,
+            "warning": warning,
+            "err_pct": err_pct,
+            "dwell_budget_s": dwell_budget_s
         }
-        return result
+
 
     @staticmethod
     def calculate_sigma_for_spot(spot_size, config, isotope_data):
         target_sigma = config['lower_sigma_limit']
-        precision_s = config['precision_ms'] / 1000.0
-        tech = config['icp_technology']
-        system = config['system_type']
         precision_ms = config['precision_ms']
         precision_s = precision_ms / 1000.0
         snr_threshold = config.get('snr_threshold', 0.0)
         
-        # Calculate Logic-Derived Budget from Constraints
+        # 1. Sync machine parameters for this spot size
         c_inputs = config.copy()
         c_inputs['spot_size_um'] = spot_size
-        at_constrained, _, _, _, _, _ = Logic.calculate_constrained_at(c_inputs)
+        res = Logic.calculate_constrained_at(c_inputs)
         
+        at_constrained = res['at_actual_s']
+        rr_actual = res['rr_actual']
         dwell_budget_s = at_constrained - (config['overhead_ms'] / 1000.0)
         min_dwell_s = config['min_dwell_ms'] / 1000.0
         
         decimals = 0 if precision_ms >= 1.0 else int(math.ceil(-math.log10(precision_ms)))
         scaling_factor = (spot_size / config['ref_spot_size_um'])**2
         
+        # 2. Determine RR scaling using centralized sync logic
         rr_scaling = 1.0
         if config.get('scale_signal', False):
             initial_rr = config.get('initial_rr', 0)
             if initial_rr > 0:
-                pulses = config.get('pulses_per_pixel', 1) 
-                
-                # Use the ACTUAL constrained acquisition time to determine the target RR
-                # This ensures consistent scaling even if washout logic differs slightly from hardware constraints
-                at_s = at_constrained
-                if at_s > 0:
-                     target_rr = pulses / at_s
-                else: 
-                     washout_s = config['washout_ms'] / 1000.0
-                     ideal_rr = pulses / washout_s
-                     max_rr = config.get('max_rr_hz', 1000)
-                     target_rr = min(ideal_rr, max_rr)
-                     
-                rr_scaling = target_rr / initial_rr
+                rr_scaling = rr_actual / initial_rr
 
         processed_iso = []
         for iso in isotope_data:
-            bl_dt = iso['baseline_dt_s']
-            sig_cps = iso['sig_cps']
-            blk_cps = iso['blk_cps']
-            std_counts = iso['stdev_blank_counts']
+            # Use centralized SNR logic
+            snr_res = Logic.calculate_robust_snr(iso['sig_cps'], iso['blk_cps'], iso['baseline_dt_s'], iso['stdev_blank_counts'])
             
-            # 1. Determine the Noise Floor (Count Domain)
-            total_bg_counts = blk_cps * bl_dt
+            # Apply spot/rep-rate scaling to the SNR
+            # Scaling: Net counts scale with scaling_factor * rr_scaling
+            # SNR scales linearly with net counts for a fixed background
+            scaled_base_snr = snr_res['base_snr'] * (scaling_factor * rr_scaling)
             
-            # Theoretical Poisson Variance
-            theoretical_var = total_bg_counts
-            
-            # Observed Variance
-            observed_var = std_counts**2
-            
-            # FIX 1: Use MAX, not SUM. Avoid double-counting noise.
-            effective_noise_var = max(theoretical_var, observed_var)
-            
-            # 2. Calculate Critical Level (Lc) for Detection
-            d = 0.4
-            z = 1.645  # 95% Confidence
-            
-            if total_bg_counts == 0:
-                is_zero_bg = True
-                L_c_counts = (z**2)/2 + z * math.sqrt(2 * d) 
-            else:
-                is_zero_bg = False
-                L_c_counts = z * math.sqrt(2 * effective_noise_var)
-
-            # 3. Calculate "Robust SNR" (Detection Metric)
-            net_cps = sig_cps - blk_cps
-            
-            # SCALING: Apply spot size and rep rate scaling to the net counts
-            scaled_net_counts_expected = (net_cps * scaling_factor * rr_scaling) * bl_dt
-            
-            # We calculate internal Detection Ratio (DR = net / Lc)
-            # then scale it back to "Sigma-equivalent" units so the UI remains familiar.
-            # Factor = z * sqrt(2) ~ 2.326
-            sigma_factor = z * math.sqrt(2)
-            
-            base_snr = 0
-            if L_c_counts > 0:
-                detection_ratio = scaled_net_counts_expected / L_c_counts
-                base_snr = detection_ratio * sigma_factor # Now back in "Sigma SNR" language
-
-            # Scaling logic
-            scaled_net_cps = net_cps * scaling_factor * rr_scaling
-            sig_cps_new_bs = scaled_net_cps + blk_cps
-
             initial_snr_display = iso.get('initial_snr', 0.0)
-            is_optimisable = (base_snr > 0 and iso['status'] not in ["Exclude", "Set to Min", "Custom"])
+            is_optimisable = (scaled_base_snr > 0 and iso['status'] not in ["Exclude", "Set to Min", "Custom"])
 
             processed_iso.append({
                 **iso, 
-                'sig_cps_new_bs': sig_cps_new_bs, 
-                'std_cps_per_sqrt_sec': math.sqrt(effective_noise_var) / bl_dt if bl_dt > 0 else 0,
-                'base_snr': base_snr,  # This is now "Detection Ratio" at bl_dt
+                'base_snr': scaled_base_snr,  # This is the scaled Detection Ratio at bl_dt
                 'initial_snr_display': initial_snr_display,
                 'is_optimisable': is_optimisable, 
                 'final_dt': 0.0, 
                 'snapped_dt': 0.0,
-                'is_zero_bg': is_zero_bg
+                'is_zero_bg': snr_res['is_zero_bg']
             })
 
-        if tech == "Multi-Collector":
-            # For MC, we use the allowed_dwells from config (Integration Times)
-            mc_times = [d/1000.0 for d in (config.get('allowed_dwells') or [])]
-            if not mc_times:
-                mc_times = [0.066, 0.131, 0.262, 0.524, 1.049] if system == "Neptune" else [0.050, 0.100, 0.250, 0.500, 1.000]
-            
-            custom_dwells = [iso.get('custom_time_s', min_dwell_s) for iso in processed_iso if iso['status'] == "Custom"]
-            
-            if custom_dwells:
-                selected_time = max(custom_dwells)
-            else:
-                potential_times = [t for t in mc_times if t >= (dwell_budget_s - 1e-5)]
-                if potential_times:
-                    selected_time = min(potential_times)
-                else:
-                    selected_time = max(mc_times)
-                
+        # Selection of integration time/dwell share
+        # Master dwell budget from synchronized logic ensures MC/TOF integration times match the UI
+        dwell_budget_s = res['dwell_budget_s']
+
+        if config['icp_technology'] == "Multi-Collector" or config['icp_technology'] == "TOF":
             for iso in processed_iso:
-                if iso['status'] == "Exclude":
-                    iso['snapped_dt'] = 0
-                else:
-                    # Resultant SNR Adjustment: 
-                    # base_snr is Detection Ratio at bl_dt. New DR scales with sqrt(dt / bl_dt).
-                    bl_dt = iso['baseline_dt_s']
-                    resultant_snr = iso['base_snr'] * math.sqrt(selected_time / bl_dt) if bl_dt > 0 else 0
-                    if resultant_snr < snr_threshold:
-                        iso['snapped_dt'] = selected_time
-                        iso['constraint'] = "Min SNR"
-                    else:
-                        iso['snapped_dt'] = selected_time
-        elif tech == "TOF":
-            simultaneous_time = math.floor(dwell_budget_s / precision_s) * precision_s
-            for iso in processed_iso:
-                if iso['status'] == "Exclude":
-                    iso['snapped_dt'] = 0
-                else:
-                    bl_dt = iso['baseline_dt_s']
-                    resultant_snr = iso['base_snr'] * math.sqrt(simultaneous_time / bl_dt) if bl_dt > 0 else 0
-                    if resultant_snr < snr_threshold:
-                        iso['snapped_dt'] = simultaneous_time
-                        iso['constraint'] = "Min SNR"
-                    else:
-                        iso['snapped_dt'] = simultaneous_time
+                iso['snapped_dt'] = 0 if iso['status'] == "Exclude" else dwell_budget_s
         else:
             # Quad/Optimization Mode
             for _ in range(len(processed_iso) + 5):
@@ -805,11 +619,7 @@ class Logic:
                     elif not iso['is_optimisable']: iso['final_dt'] = min_dwell_s; current_budget -= min_dwell_s
                     else: 
                         iso['final_dt'] = 0.0
-                        # We normalize the SNR to 1s for the share calculation.
-                        # base_snr is at bl_dt. SNR_at_1s = base_snr / sqrt(bl_dt).
-                        # inv_snr = 1 / (base_snr / sqrt(bl_dt)) = sqrt(bl_dt) / base_snr.
-                        bl_dt = iso['baseline_dt_s']
-                        inv_snr_sum += (math.sqrt(bl_dt) / iso['base_snr']) if iso['base_snr'] > 0 else 0
+                        inv_snr_sum += (math.sqrt(iso['baseline_dt_s']) / iso['base_snr']) if iso['base_snr'] > 0 else 0
                 
                 valid_indices = [i for i, x in enumerate(processed_iso) if x['is_optimisable'] and x['final_dt'] == 0]
                 num_valid = len(valid_indices)
@@ -820,17 +630,13 @@ class Logic:
                     for idx in valid_indices: processed_iso[idx]['final_dt'] = min_dwell_s
                 elif num_valid > 0 and inv_snr_sum > 0:
                     for idx in valid_indices:
-                        bl_dt = processed_iso[idx]['baseline_dt_s']
-                        share_ratio = (math.sqrt(bl_dt) / processed_iso[idx]['base_snr']) / inv_snr_sum
+                        share_ratio = (math.sqrt(processed_iso[idx]['baseline_dt_s']) / processed_iso[idx]['base_snr']) / inv_snr_sum
                         processed_iso[idx]['final_dt'] = min_dwell_s + (extra_budget * share_ratio)
 
                 failures = []
                 for idx in valid_indices:
-                    dt = processed_iso[idx]['final_dt']
-                    bl_dt = processed_iso[idx]['baseline_dt_s']
-                    res_snr = processed_iso[idx]['base_snr'] * math.sqrt(dt / bl_dt) if bl_dt > 0 else 0
-                    if res_snr < snr_threshold:
-                        failures.append((idx, res_snr))
+                    res_snr = processed_iso[idx]['base_snr'] * math.sqrt(processed_iso[idx]['final_dt'] / processed_iso[idx]['baseline_dt_s']) if processed_iso[idx]['baseline_dt_s'] > 0 else 0
+                    if res_snr < snr_threshold: failures.append((idx, res_snr))
                 
                 if not failures: break
                 else:
@@ -846,30 +652,32 @@ class Logic:
                     elif abs(snapped - min_dwell_s) < 1e-9 and iso['status'] == "Auto": iso['constraint'] = "Min ICP"
                     elif iso['status'] == "Set to Min": iso['constraint'] = "Min ICP"
                     else: iso['constraint'] = ""
-                iso['snapped_dt'] = snapped; total_snapped += snapped
-            
+                iso['snapped_dt'] = snapped
+                total_snapped += snapped
+
+            # Redistribute 'drift' (leftover budget after rounding down)
             drift = dwell_budget_s - total_snapped
             if drift >= (precision_s * 0.9):
+                # Only give drift to isotopes part of the 'Auto' optimization
                 candidates = [i for i, x in enumerate(processed_iso) if x['is_optimisable'] and x['status'] not in ["Exclude", "Custom", "Set to Min"]]
                 if candidates:
-                    candidates.sort(key=lambda i: processed_iso[i]['base_snr'] * math.sqrt(processed_iso[i]['snapped_dt'] / processed_iso[i]['baseline_dt_s']))
+                    # Sort by current Sigma Separation (give to the worst performers first)
+                    candidates.sort(key=lambda i: processed_iso[i]['base_snr'] * math.sqrt(processed_iso[i]['snapped_dt'] / processed_iso[i]['baseline_dt_s']) if processed_iso[i]['baseline_dt_s'] > 0 else 0)
                     num_steps = int(round(drift / precision_s))
                     for idx in range(num_steps):
                         processed_iso[candidates[idx % len(candidates)]]['snapped_dt'] += precision_s
 
         separations = []; output_rows = []
         for iso in processed_iso:
-            dt = iso['snapped_dt']
-            bl_dt = iso['baseline_dt_s']
-            sep = iso['base_snr'] * math.sqrt(dt / bl_dt) if bl_dt > 0 else 0
+            sep = iso['base_snr'] * math.sqrt(iso['snapped_dt'] / iso['baseline_dt_s']) if iso['baseline_dt_s'] > 0 else 0
             if iso['status'] not in ["Exclude", "Set to Min", "Custom"]: separations.append(sep)
-            
-            val_ms = round(dt * 1000.0, decimals)
+            val_ms = round(iso['snapped_dt'] * 1000.0, decimals)
             output_rows.append({"Isotope": iso['name'], "Final Dwell (ms)": val_ms if decimals > 0 else int(val_ms),
                                 "Initial SNR": round(iso['initial_snr_display'], 2), "Sigma Sep": round(sep, 2),
                                 "Status": iso['status'], "Constraint": iso.get('constraint', ""), "IsZeroBG": iso.get('is_zero_bg', False)})
 
         return (min(separations) if separations else 999.0), output_rows
+
 
     @staticmethod
     def calculate_minimum_required_spot_size(config, isotope_data):
@@ -892,29 +700,17 @@ class Logic:
         temp_data = []
         for col in isotope_cols:
             dwell_s = edited_dwells_df[col].iloc[0] / 1000.0 if col in edited_dwells_df.columns else estimated_dwell_ms / 1000.0
-            m_sig, m_blk, s_blk = df_sig[col].mean(), df_blk[col].mean(), df_blk[col].std()
             
-            # Robust SNR (Detection Ratio) Calculation for Display
-            # This must match the Logic.calculate_sigma_for_spot implementation
-            sig_cps = m_sig if not is_raw_counts else m_sig / dwell_s
-            blk_cps = m_blk if not is_raw_counts else m_blk / dwell_s
-            std_counts = s_blk if is_raw_counts else s_blk * dwell_s
+            stats = Logic.get_isotope_stats(col, df_sig, df_blk, dwell_s, is_raw_counts)
+            snr_res = Logic.calculate_robust_snr(stats['sig_cps'], stats['blk_cps'], dwell_s, stats['std_counts'])
             
-            bl_dt = dwell_s
-            total_bg_counts = blk_cps * bl_dt
-            theoretical_var = total_bg_counts
-            observed_var = std_counts**2
-            effective_noise_var = max(theoretical_var, observed_var)
-            
-            # Factor = z * sqrt(2) ~ 2.326 to restore familiar Sigma scaling
-            sigma_factor = z * math.sqrt(2)
-            
-            net_counts = (sig_cps - blk_cps) * bl_dt
-            detection_ratio = net_counts / L_c_counts if L_c_counts > 0 else 0
-            snr = detection_ratio * sigma_factor # Back to "Sigma SNR" for UI consistency
-
             factor = 1.0 if (is_raw_counts == show_counts_check) else (dwell_s if show_counts_check else 1/dwell_s)
-            temp_data.append({"name": col, "current_dwell_ms": dwell_s*1000, "disp_sig": m_sig*factor, "disp_std_sig": df_sig[col].std()*factor, "disp_blk": m_blk*factor, "disp_std_blk": s_blk*factor, "initial_snr": snr})
+            temp_data.append({
+                "name": col, "current_dwell_ms": dwell_s*1000, 
+                "disp_sig": stats['m_sig']*factor, "disp_std_sig": df_sig[col].std()*factor, 
+                "disp_blk": stats['m_blk']*factor, "disp_std_blk": stats['s_blk']*factor, 
+                "initial_snr": snr_res['base_snr']
+            })
         return temp_data
 
     @staticmethod
@@ -927,9 +723,11 @@ class Logic:
             row['status'] = iso_status_map.get(name, "Auto")
             row['custom_time_s'] = iso_custom_dt_map.get(name, 0.0) / 1000.0
             dwell_s = row['current_dwell_ms'] / 1000.0
-            row['sig_cps'] = df_sig[name].mean() if not is_raw_counts else df_sig[name].mean() / dwell_s
-            row['blk_cps'] = df_blk[name].mean() if not is_raw_counts else df_blk[name].mean() / dwell_s
-            row['stdev_blank_counts'] = df_blk[name].std() if is_raw_counts else df_blk[name].std() * dwell_s
+            
+            stats = Logic.get_isotope_stats(name, df_sig, df_blk, dwell_s, is_raw_counts)
+            row['sig_cps'] = stats['sig_cps']
+            row['blk_cps'] = stats['blk_cps']
+            row['stdev_blank_counts'] = stats['std_counts']
             row['baseline_dt_s'] = dwell_s
             rows.append(row)
         return rows, df_sig.copy(), df_blk.copy()
@@ -2738,7 +2536,7 @@ class ioliteOptimiser(QWidget):
         scroll_content = QWidget()
         l_settings = QVBoxLayout(scroll_content)
         l_settings.setContentsMargins(5, 2, 5, 2)
-        l_settings.setSpacing(2)
+        l_settings.setSpacing(1) # Tightened spacing
 
         # 1. Hardware Configuration Summary
         self.grp_hw_summary = QGroupBox("")
@@ -3208,12 +3006,26 @@ class ioliteOptimiser(QWidget):
         
         self.lbl_result = QLabel("Ready")
         self.lbl_result.setWordWrap(True)
-        l_settings.addWidget(self.lbl_result)
+        self.lbl_result.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.lbl_result.setStyleSheet("padding: 5px;")
         
-        l_settings.addStretch()
+        self.result_scroll = QScrollArea()
+        self.result_scroll.setWidget(self.lbl_result)
+        self.result_scroll.setWidgetResizable(True)
+        self.result_scroll.setMinimumHeight(60) # Reduced from 120
+        # Using 0 for NoFrame to avoid extra imports if not present, but usually QFrame is there.
+        # Let's check imports or just use QScrollArea.NoFrame if we know it exists.
+        # In this codebase QScrollArea is from iolite.QtGui or PyQt5.QtWidgets.
+        self.result_scroll.setFrameShape(0) # 0 is QFrame.NoFrame
+        self.result_scroll.setStyleSheet("background-color: transparent;")
+        
+        l_settings.addWidget(self.result_scroll, 1) # Assign stretch of 1 to allow shrinking/expansion
+        
+        # l_settings.addStretch() # Removed static stretch to allow result_scroll to manage space
         self.settings_scroll_area.setWidget(scroll_content)
         self.settings_scroll_area.setFixedWidth(500)
         self.settings_scroll_area.setWidgetResizable(True)
+        self.settings_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff) # Main panel scrolling disabled
         left_layout.addWidget(self.settings_scroll_area)
         
         # --- RIGHT COLUMN (PLOT & RESULTS) ---
@@ -5597,7 +5409,7 @@ class ioliteOptimiser(QWidget):
 
             # Default to first available channel if not specified
             c['log_prefix'] = "Initial Sync"
-            sync = Logic.calculate_laser_sync(c)
+            sync = Logic.calculate_constrained_at(c)
             
             cols = [c for c in self.opt_df.columns if c != 'Time']
             if not cols:
@@ -5661,17 +5473,17 @@ class ioliteOptimiser(QWidget):
             # Reset 'pulses_per_pixel' to user input to ensure Error Calculation compares against Target, not Optimized result from previous run.
             c['pulses_per_pixel'] = self._get(self.spin_pulses, 'value')
             c['log_prefix'] = "Optimised Sync"
-            sync = Logic.calculate_laser_sync(c)
+            sync = Logic.calculate_constrained_at(c)
             
             # Inject Warning into the main Spot Size note (Separate Line, White Bullet)
-            warn = sync.get('Warning', "")
+            warn = sync.get('warning', "")
             if warn and final_notes:
                 # Insert after the Spot Size message (index 0)
                 # Just insert as a plain string to match standard formatting (Peer bullet)
                 final_notes.insert(1, warn)
             
             # Aggregate notes from Logic
-            logic_notes = sync.get("Notes", [])
+            logic_notes = sync.get("notes", [])
             final_notes.extend(logic_notes)
             
             # Aggregate constraints from isotopes
@@ -5694,7 +5506,7 @@ class ioliteOptimiser(QWidget):
                     final_notes.append((f"The following channels cannot be set lower than the hardware minimum&nbsp;({min_dwell_ms}&nbsp;ms):", ", ".join(min_icp_isos), "blue"))
                 
                 if zero_bg_isos:
-                    final_notes.append(("The following channels had zero counts in the background. The detection limit ($L_c$) has been calculated using the Square Root Transform rule for variance stabilization:", ", ".join(zero_bg_isos), "gray"))
+                    final_notes.append(("The following channels had zero counts in the background. The detection limit (L<sub>c</sub>) has been calculated using the Square Root Transform rule for variance stabilization:", ", ".join(zero_bg_isos), "gray"))
             
 
             
@@ -5723,9 +5535,10 @@ class ioliteOptimiser(QWidget):
             
             # SNAP TO HARDWARE PRECISION at the very end
             prec_ms = self.precision
-            sync['Acquisition Time (ms)'] = round(sync['Acquisition Time (ms)'] / prec_ms) * prec_ms
-            sync['Dwell Budget (ms)'] = round(sync['Dwell Budget (ms)'] / prec_ms) * prec_ms
-            sync['Overhead (ms)'] = round(sync['Overhead (ms)'] / prec_ms) * prec_ms
+            # Local display variables derived from the 'sync' master result
+            val_at_ms = round(sync['at_actual_s'] * 1000.0 / prec_ms) * prec_ms
+            val_budget_ms = round((sync['at_actual_s'] * 1000 - getattr(self, 'detected_overhead_ms', 0.0)) / prec_ms) * prec_ms
+            val_overhead_ms = round(getattr(self, 'detected_overhead_ms', 0.0) / prec_ms) * prec_ms
             
             
             # 5. Display Summary
@@ -5754,16 +5567,16 @@ class ioliteOptimiser(QWidget):
                 self.table.horizontalHeader().setSectionResizeMode(self.col_map['Mass'], QHeaderView.ResizeToContents)
             self.table.horizontalHeader().setSectionResizeMode(self.col_map['Mode'], QHeaderView.ResizeToContents)
 
-            self.lbl_opt_rr.setText(f"<b>{sync['Laser Rep Rate (Hz)']:.{laser_dps}f}</b> Hz")
-            self.lbl_opt_speed.setText(f"<b>{sync['Stage Speed (µm s⁻¹)']:.1f}</b> µm s⁻¹")
+            self.lbl_opt_rr.setText(f"<b>{sync['rr_actual']:.{laser_dps}f}</b> Hz")
+            self.lbl_opt_speed.setText(f"<b>{sync['speed']:.1f}</b> µm s⁻¹")
             
-            val_at = sync['Acquisition Time (ms)'] / scaler
-            val_budget = sync['Dwell Budget (ms)'] / scaler
-            val_overhead = sync['Overhead (ms)'] / scaler
+            unit_val_at = val_at_ms / scaler
+            unit_val_budget = val_budget_ms / scaler
+            unit_val_overhead = val_overhead_ms / scaler
 
-            self.lbl_opt_at.setText(f"<b>{val_at:.{disp_dps}f}</b> {unit}")
-            self.lbl_opt_budget.setText(f"<b>{val_budget:.{disp_dps}f}</b> {unit}")
-            self.lbl_opt_overhead.setText(f"<b>{val_overhead:.{disp_dps}f}</b> {unit}")
+            self.lbl_opt_at.setText(f"<b>{unit_val_at:.{disp_dps}f}</b> {unit}")
+            self.lbl_opt_budget.setText(f"<b>{unit_val_budget:.{disp_dps}f}</b> {unit}")
+            self.lbl_opt_overhead.setText(f"<b>{unit_val_overhead:.{disp_dps}f}</b> {unit}")
 
             # Calculate Duty Cycle (Sum of Optimised Dwells / AT)
             # Use sum of actual optimized dwells (from df_res) for sequential, max for simultaneous
@@ -5779,7 +5592,7 @@ class ioliteOptimiser(QWidget):
                     # Sequential: Duty = Sum Dwells / AT
                     sum_opt_dwells = sum(dwells)
                 
-            raw_at = sync.get('Acquisition Time (ms)', 0)
+            raw_at = val_at_ms
             
             duty_cycle = 0.0
             if raw_at > 0:
@@ -5791,12 +5604,12 @@ class ioliteOptimiser(QWidget):
 
             if not self._get(self.chk_avoid_gaps, 'isChecked'):
                  # "Avoid Gaps" OFF -> Floor Strategy.
-                 self.lbl_opt_pulses.setText(f"{sync['Actual Pulses']:.4f} Pulses")
+                 self.lbl_opt_pulses.setText(f"{sync['actual_pulses']:.4f} Pulses")
             else:
                  # "Avoid Gaps" ON -> Ceil Strategy (Overlap).
-                 self.lbl_opt_pulses.setText(f"<b>{sync['Actual Pulses']:.4f}</b> Pulses")
+                 self.lbl_opt_pulses.setText(f"<b>{sync['actual_pulses']:.4f}</b> Pulses")
 
-            self.lbl_opt_overlap.setText(f"<b>{sync['Overlap (µm)']:.1f}</b> µm")
+            self.lbl_opt_overlap.setText(f"<b>{sync['overlap_um']:.1f}</b> µm")
 
             # Estimated Scan Time
             # Mode Logic
@@ -5815,7 +5628,7 @@ class ioliteOptimiser(QWidget):
                     # Line: Time = Length / Speed
                     # Overhead is already included/negligible per user request
                     img_w = float(self._get(self.spin_width, 'value')) # Acts as Length
-                    speed = float(sync.get("Stage Speed (µm s⁻¹)", 0.0))
+                    speed = float(sync.get("speed", 0.0))
                     
                     if speed > 1e-6:
                          est_sec = img_w / speed
@@ -5827,7 +5640,7 @@ class ioliteOptimiser(QWidget):
                     img_h = float(self._get(self.spin_height, 'value'))
                     img_w = float(self._get(self.spin_width, 'value'))
                     spot_um = float(c.get('spot_size_um', 0.0))
-                    speed_ums = float(sync.get("Stage Speed (µm s⁻¹)", 0.0))
+                    speed_ums = float(sync.get("speed", 0.0))
                     
                     if spot_um > 1e-6 and speed_ums > 1e-6:
                         lines = math.ceil(img_h / spot_um)
@@ -6122,7 +5935,8 @@ def create_widget():
         # widget.destroyed.connect(cleanup_widget)
         
         # Default size if not previously set
-        widget.resize(1100, 700) 
+        widget.setMinimumHeight(850) # Enforce minimum height for scroll-free layout
+        widget.resize(1100, 850) 
         widget.show()
         
         # Connect signals AFTER the widget is fully initialized and shown
@@ -6134,9 +5948,9 @@ def create_widget():
                 rect = screen.availableGeometry()
                 widget.resize(int(rect.width() * 0.9), int(rect.height() * 0.9))
             else:
-                widget.resize(1728, 972)
+                widget.resize(1536, 864)
         except:
-             widget.resize(1728, 972)
+             widget.resize(1536, 864)
         
         widget.show()
         widget.raise_()
