@@ -2,7 +2,7 @@
 #/ Description: Characterises your system's single-pulse washout to calculate the optimal balance of spot size, scan speed, and repetition rate that achieves your target data quality.
 #/ Type: UI
 #/ Authors: Adam Douglas
-#/ Version: 0.9.7
+#/ Version: 0.9.8
 #/ Contact: Adam.Douglas@icpms.com
 
 import math
@@ -60,7 +60,7 @@ except ImportError:
         pass
 
 # --- EMBEDDED CONSTANTS ---
-VERSION = "0.9.7"
+VERSION = "0.9.8"
 
 ICP_SPECS = {
     "Agilent": {
@@ -504,7 +504,7 @@ class Logic:
                 valid = [r for r in allowed_rr if (r >= rr_theoretical - 1e-9 if avoid_gaps else r <= rr_theoretical + 1e-9)]
                 rr_actual = (min(valid) if avoid_gaps else max(valid)) if valid else (max(allowed_rr) if avoid_gaps else min(allowed_rr))
             else:
-                rr_actual = (math.ceil(rr_theoretical / rr_prec) if avoid_gaps else math.floor(rr_theoretical / rr_prec)) * rr_prec
+                rr_actual = (math.ceil(rr_theoretical / rr_prec - 1e-9) if avoid_gaps else math.floor(rr_theoretical / rr_prec + 1e-9)) * rr_prec
             
             if rr_actual <= 1e-9: rr_actual = rr_prec
             
@@ -514,7 +514,31 @@ class Logic:
                 at_actual_s = round((n_val / rr_actual) / p_s) * p_s
                 optimised_n = n_val
 
-        # Derived parameters
+        # --- PERFECT EVEN SPLIT: Adjust AT to avoid drift in Even mode ---
+        # Final adjustment happens after all pulse-driven rounding to ensure it sticks.
+        num_even = inputs.get('num_even', 0)
+        fixed_costs_s = inputs.get('fixed_costs_s', 0.0)
+        
+        if num_even > 0 and not is_mc:
+            # The remaining POOL budget (after fixed costs) must be perfectly divisible by (num_even * p_s)
+            quantum = num_even * p_s
+            available_budget_s = at_actual_s - overhead_s
+            pool_budget_s = available_budget_s - fixed_costs_s
+            
+            if pool_budget_s < (num_even * p_s):
+                at_actual_s = fixed_costs_s + (num_even * p_s) + overhead_s
+            else:
+                steps = math.ceil(pool_budget_s / quantum - 1e-9)
+                at_actual_s = fixed_costs_s + (steps * quantum) + overhead_s
+            
+            # Recalculate RR to maintain synchronization with the nudged AT
+            rr_theoretical_even = optimised_n / at_actual_s if at_actual_s > 0 else 0
+            if avoid_gaps:
+                rr_actual = math.ceil(rr_theoretical_even / rr_prec - 1e-9) * rr_prec
+            else:
+                rr_actual = math.floor(rr_theoretical_even / rr_prec + 1e-9) * rr_prec
+
+        # Derived parameters (CALCULATED LAST)
         actual_pulses = rr_actual * at_actual_s
         speed = (bs * rr_actual) / optimised_n if optimised_n > 0 else 0
         overlap_um = bs - (speed / rr_actual) if rr_actual > 0 else 0
@@ -628,9 +652,17 @@ class Logic:
                 
                 if extra_budget < 0:
                     for idx in valid_indices: processed_iso[idx]['final_dt'] = min_dwell_s
-                elif num_valid > 0 and inv_snr_sum > 0:
+                elif num_valid > 0:
+                    # Check if we are using "Even" distribution
+                    is_even = any(processed_iso[idx]['status'] == "Even" for idx in valid_indices)
+                    
                     for idx in valid_indices:
-                        share_ratio = (math.sqrt(processed_iso[idx]['baseline_dt_s']) / processed_iso[idx]['base_snr']) / inv_snr_sum
+                        if is_even:
+                            share_ratio = 1.0 / num_valid
+                        else:
+                            # Auto (SNR-weighted)
+                            share_ratio = (math.sqrt(processed_iso[idx]['baseline_dt_s']) / processed_iso[idx]['base_snr']) / inv_snr_sum if inv_snr_sum > 0 else (1.0 / num_valid)
+                            
                         processed_iso[idx]['final_dt'] = min_dwell_s + (extra_budget * share_ratio)
 
                 failures = []
@@ -648,8 +680,8 @@ class Logic:
                 if iso['status'] == "Exclude": snapped = 0.0
                 else:
                     snapped = max(min_dwell_s, math.floor(iso['final_dt'] / precision_s + 1e-9) * precision_s)
-                    if not iso['is_optimisable'] and iso['status'] == "Auto": iso['constraint'] = "Min SNR"
-                    elif abs(snapped - min_dwell_s) < 1e-9 and iso['status'] == "Auto": iso['constraint'] = "Min ICP"
+                    if not iso['is_optimisable'] and iso['status'] in ["Auto", "Even"]: iso['constraint'] = "Min SNR"
+                    elif abs(snapped - min_dwell_s) < 1e-9 and iso['status'] in ["Auto", "Even"]: iso['constraint'] = "Min ICP"
                     elif iso['status'] == "Set to Min": iso['constraint'] = "Min ICP"
                     else: iso['constraint'] = ""
                 iso['snapped_dt'] = snapped
@@ -658,7 +690,7 @@ class Logic:
             # Redistribute 'drift' (leftover budget after rounding down)
             drift = dwell_budget_s - total_snapped
             if drift >= (precision_s * 0.9):
-                # Only give drift to isotopes part of the 'Auto' optimization
+                # Only give drift to isotopes part of the 'Auto' or 'Even' optimization
                 candidates = [i for i, x in enumerate(processed_iso) if x['is_optimisable'] and x['status'] not in ["Exclude", "Custom", "Set to Min"]]
                 if candidates:
                     # Sort by current Sigma Separation (give to the worst performers first)
@@ -676,7 +708,7 @@ class Logic:
                                 "Initial SNR": round(iso['initial_snr_display'], 2), "Sigma Sep": round(sep, 2),
                                 "Status": iso['status'], "Constraint": iso.get('constraint', ""), "IsZeroBG": iso.get('is_zero_bg', False)})
 
-        return (min(separations) if separations else 999.0), output_rows
+        return (min(separations) if separations else 999.0), output_rows, res
 
 
     @staticmethod
@@ -686,11 +718,11 @@ class Logic:
         best_spot, best_res = high, None
         while low <= high:
             mid = (low + high) // 2 
-            sigma, rows = Logic.calculate_sigma_for_spot(mid, config, isotope_data)
+            sigma, rows, _ = Logic.calculate_sigma_for_spot(mid, config, isotope_data)
             if sigma >= target_sigma: best_spot = mid; best_res = rows; high = mid - 1
             else: low = mid + 1
         if best_res is None:
-            _, best_res = Logic.calculate_sigma_for_spot(300, config, isotope_data)
+            _, best_res, _ = Logic.calculate_sigma_for_spot(300, config, isotope_data)
         return best_spot, best_res
 
     @staticmethod
@@ -5407,7 +5439,28 @@ class ioliteOptimiser(QWidget):
                             min_dwell_total += self.min_dwell
             c['min_dwell_needed_ms'] = min_dwell_total
 
-            # Default to first available channel if not specified
+            # Count Even channels and calculate fixed costs for perfect split synchronization
+            num_even = 0
+            fixed_costs_s = 0.0
+            min_dwell_s = self.min_dwell / 1000.0
+            
+            for iso in isotope_data:
+                stat = iso.get('status', 'Auto')
+                if stat == "Exclude": continue
+                if stat == "Even":
+                    num_even += 1
+                elif stat == "Custom":
+                    fixed_costs_s += iso.get('custom_time_s', min_dwell_s)
+                elif stat == "Set to Min":
+                    fixed_costs_s += min_dwell_s
+                else: # Auto or non-optimisable
+                    # For synchronization purposes, Auto pool items are treated as 
+                    # minimums until the budget is optimized.
+                    fixed_costs_s += min_dwell_s
+
+            c['num_even'] = num_even
+            c['fixed_costs_s'] = fixed_costs_s
+            
             c['log_prefix'] = "Initial Sync"
             sync = Logic.calculate_constrained_at(c)
             
@@ -5425,7 +5478,10 @@ class ioliteOptimiser(QWidget):
             # Labels will be updated after spot size optimization below.
 
             # 3. Step 1: Always Calculate Minimum Required Spot Size (for reference)
+            # Need to capture the sync info from the last step of the optimization if we want it perfect
             optimum_spot_raw, df_res_opt = Logic.calculate_minimum_required_spot_size(c, isotope_data)
+            # To be safe, we re-run once for the final spot to get the matching sync result
+            _, _, sync = Logic.calculate_sigma_for_spot(int(round(optimum_spot_raw)), c, isotope_data)
             optimum_spot = int(round(optimum_spot_raw))
             self.optimum_spotsize = optimum_spot
             self.override_spotsize = fixed_spot_um
@@ -5436,8 +5492,8 @@ class ioliteOptimiser(QWidget):
             # Identify limiting channel for the optimum spot
             limiting_iso = "None"
             if df_res_opt:
-                # Filter for candidates that were part of the optimization (Auto)
-                opt_rows = [r for r in df_res_opt if r.get('Status') == "Auto"]
+                # Filter for candidates that were part of the optimization (Auto or Even)
+                opt_rows = [r for r in df_res_opt if r.get('Status') in ["Auto", "Even"]]
                 if not opt_rows: opt_rows = df_res_opt # Fallback
                 if opt_rows:
                     min_row = min(opt_rows, key=lambda x: x['Sigma Sep'])
@@ -5448,7 +5504,7 @@ class ioliteOptimiser(QWidget):
                 # Manual Override
                 best_spot = fixed_spot_um
                 # Re-calculate table for this specific spot
-                _, df_res = Logic.calculate_sigma_for_spot(best_spot, c, isotope_data)
+                _, df_res, sync = Logic.calculate_sigma_for_spot(best_spot, c, isotope_data)
                 final_notes.append(f"Optimum Spot Size <b>{optimum_spot}</b> µm - Overridden to <b>{best_spot}</b> µm")
             else:
                 # Update Spinbox (Block signals to prevent recursion)
@@ -5729,7 +5785,7 @@ class ioliteOptimiser(QWidget):
                     combo = QComboBox()
                     # Centre text in combo if possible
                     # Note: Some versions of Qt require different approaches, but standard items are always centered now
-                    combo.addItems(["Auto", "Set to Min", "Exclude", "Custom"])
+                    combo.addItems(["Auto", "Even", "Set to Min", "Exclude", "Custom"])
                     combo.setCurrentText(current_status)
                     combo.setProperty("iso_name", str(iso_name))
                     combo.activated.connect(lambda idx, n=iso_name, c=combo: self._on_mode_changed(n, c.itemText(idx)))
@@ -5837,6 +5893,14 @@ class ioliteOptimiser(QWidget):
                     IoLog.warning(f"Failed to seed custom value for {iso_name}: {e}")
 
             self.isotope_configs[iso_name]["status"] = text
+            
+            # Synchronize Auto/Even pool
+            if text in ["Auto", "Even"]:
+                target_mode = text
+                for name, conf in self.isotope_configs.items():
+                    if conf.get('status') in ["Auto", "Even"]:
+                        conf['status'] = target_mode
+
             # Trigger real-time optimization
             self.run_optimisation(refresh=False, preserve_zoom=True)
 
