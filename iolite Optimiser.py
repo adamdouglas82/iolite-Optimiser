@@ -74,7 +74,7 @@ ICP_SPECS = {
         "iCAP Q":   {"type": "Quadrupole", "min_dwell": 1.0, "prec": 0.001},
         "iCAP RQ":  {"type": "Quadrupole", "min_dwell": 1.0, "prec": 0.001},
         "iCAP TQ":  {"type": "Quadrupole", "min_dwell": 1.0, "prec": 0.001},
-        "iCAP MRX": {"type": "Quadrupole", "min_dwell": 0.5, "prec": 0.001},
+        "iCAP MSX": {"type": "Quadrupole", "min_dwell": 0.5, "prec": 0.001},
         "iCAP MTX": {"type": "Quadrupole", "min_dwell": 0.5, "prec": 0.001},
         "Element 2":    {"type": "Sector-Field", "min_dwell": 2.0, "prec": 1.0},
         "Element 2 XR": {"type": "Sector-Field", "min_dwell": 0.1, "prec": 0.1},
@@ -1920,6 +1920,79 @@ class ioliteOptimiser(QWidget):
         self.grp_spr_res.setLayout(l_res)
         l_settings.addWidget(self.grp_spr_res)
         
+        # 3. Maximum Observed SPR Panel
+        self.grp_spr_max = QGroupBox("")
+        l_max = QVBoxLayout()
+        l_max.setSpacing(4)
+        l_max.setContentsMargins(5, 5, 5, 5)
+        
+        lbl_max_main_title = QLabel("Maximum Observed SPR")
+        lbl_max_main_title.setStyleSheet("font-weight: bold; font-size: 10pt; padding: 0px; margin: 0px;")
+        lbl_max_main_title.setAlignment(Qt.AlignCenter)
+        l_max.addWidget(lbl_max_main_title)
+        
+        self.lbl_spr_max_iso = QLabel("Channel: -")
+        self.lbl_spr_max_iso.setStyleSheet("font-weight: bold; font-size: 9pt;")
+        self.lbl_spr_max_iso.setAlignment(Qt.AlignCenter)
+        l_max.addWidget(self.lbl_spr_max_iso)
+        
+        # Grid for Max Stats (10% and 1%)
+        grid_max_stats = QGridLayout()
+        grid_max_stats.setSpacing(2)
+        grid_max_stats.setContentsMargins(0, 0, 0, 0)
+        
+        # Helper for headers
+        def _head(txt):
+            lbl = QLabel(txt)
+            lbl.setStyleSheet("font-weight: bold; font-size: 8pt;")
+            lbl.setAlignment(Qt.AlignCenter)
+            return lbl
+            
+        grid_max_stats.addWidget(_head("Metric"), 0, 0)
+        grid_max_stats.addWidget(_head("FW 0.1M (10%)"), 0, 1)
+        grid_max_stats.addWidget(_head("FW 0.01M (1%)"), 0, 2)
+        
+        self.lbl_spr_max_avg10 = QLabel("-"); self.lbl_spr_max_avg10.setAlignment(Qt.AlignCenter)
+        self.lbl_spr_max_avg1 = QLabel("-"); self.lbl_spr_max_avg1.setAlignment(Qt.AlignCenter)
+        grid_max_stats.addWidget(QLabel("Average:"), 1, 0)
+        grid_max_stats.addWidget(self.lbl_spr_max_avg10, 1, 1)
+        grid_max_stats.addWidget(self.lbl_spr_max_avg1, 1, 2)
+        
+        self.lbl_spr_max_max10 = QLabel("-"); self.lbl_spr_max_max10.setAlignment(Qt.AlignCenter)
+        self.lbl_spr_max_max1 = QLabel("-"); self.lbl_spr_max_max1.setAlignment(Qt.AlignCenter)
+        grid_max_stats.addWidget(QLabel("Max:"), 2, 0)
+        grid_max_stats.addWidget(self.lbl_spr_max_max10, 2, 1)
+        grid_max_stats.addWidget(self.lbl_spr_max_max1, 2, 2)
+        
+        self.lbl_spr_max_comp10 = QLabel("-"); self.lbl_spr_max_comp10.setAlignment(Qt.AlignCenter)
+        self.lbl_spr_max_comp1 = QLabel("-"); self.lbl_spr_max_comp1.setAlignment(Qt.AlignCenter)
+        grid_max_stats.addWidget(QLabel("Composite:"), 3, 0)
+        grid_max_stats.addWidget(self.lbl_spr_max_comp10, 3, 1)
+        grid_max_stats.addWidget(self.lbl_spr_max_comp1, 3, 2)
+        
+        l_max.addLayout(grid_max_stats)
+        
+        # Buttons
+        h_btns_max = QHBoxLayout()
+        self.btn_apply_max_avg = QPushButton("Apply Average")
+        self.btn_apply_max_avg.clicked.connect(lambda: self._on_spr_apply_max_clicked("avg"))
+        self.btn_apply_max_comp = QPushButton("Apply Composite")
+        self.btn_apply_max_comp.clicked.connect(lambda: self._on_spr_apply_max_clicked("comp"))
+        self.btn_apply_max_val = QPushButton("Apply Max")
+        self.btn_apply_max_val.clicked.connect(lambda: self._on_spr_apply_max_clicked("max"))
+        h_btns_max.addWidget(self.btn_apply_max_avg)
+        h_btns_max.addWidget(self.btn_apply_max_comp)
+        h_btns_max.addWidget(self.btn_apply_max_val)
+        l_max.addLayout(h_btns_max)
+        
+        self.btn_all_channel_stats = QPushButton("All Channel Stats")
+        self.btn_all_channel_stats.setFixedHeight(30)
+        self.btn_all_channel_stats.clicked.connect(self._on_all_channel_stats_clicked)
+        l_max.addWidget(self.btn_all_channel_stats)
+        
+        self.grp_spr_max.setLayout(l_max)
+        l_settings.addWidget(self.grp_spr_max)
+        
         l_settings.addStretch()
         self.spr_scroll.setWidget(scroll_content)
         left_layout.addWidget(self.spr_scroll)
@@ -2539,6 +2612,139 @@ class ioliteOptimiser(QWidget):
         self.spin_wash.setValue(val_ms)
         self.tabs.setCurrentIndex(1) # Switch back to Optimiser
         IoLog.information(f"iolite Optimiser: Applied {mode} washout value: {val_ms:.2f} ms")
+
+    def _on_all_channel_stats_clicked(self):
+        if self.spr_df is None or find_peaks is None:
+            QMessageBox.warning(self, "No Data", "Please reload data from iolite first.")
+            return
+
+        # Disable button during scan
+        self.btn_all_channel_stats.setEnabled(False)
+        self.btn_all_channel_stats.setText("Scanning All Channels...")
+        QApplication.processEvents() # Ensure UI updates
+
+        try:
+            # 1. Get current detection settings
+            prominence = self._get(self.spin_spr_prom, 'value')
+            distance = self._get(self.spin_spr_dist, 'value')
+            unit_text = self._get(self.cmb_spr_unit, 'currentText')
+            is_ms = "ms" in unit_text
+            mult = 1000.0 if is_ms else 1.0
+            unit_label = "ms" if is_ms else "s"
+
+            winning_iso = None
+            max_fw1 = -1.0
+            winning_stats = None
+
+            # 2. Iterate through all channels in the combo boxes
+            all_isos = [self.cmb_spr_iso.itemText(i) for i in range(self.cmb_spr_iso.count)]
+            
+            for iso in all_isos:
+                if not iso or iso not in self.spr_df.columns:
+                    continue
+
+                # Detect CPS status for this channel
+                is_cps = True
+                if hasattr(self, 'channel_is_cps') and self.channel_is_cps.get(iso, False):
+                    is_cps = True
+                elif getattr(self, 'cached_unit_label', "Counts") == "Counts":
+                    is_cps = False
+
+                # Run analysis (Ignore runtime exclusions for global scan)
+                raw_result = Logic.analyse_washout_peaks(self.spr_df, iso, prominence, min_distance=distance, is_cps=is_cps)
+                
+                if isinstance(raw_result, tuple):
+                    # Error or no peaks
+                    continue
+                
+                # Summarize ALL detected peaks (no exclusions for this automated scan)
+                stats = Logic.summarize_peaks(raw_result)
+                
+                if "Error" in stats or stats.get("Count", 0) == 0:
+                    continue
+
+                # Generate composite to get composite width
+                comp_df = Logic.generate_composite_peak(self.spr_df, iso, raw_result)
+                comp_width_1 = 0.0
+                comp_width_10 = 0.0
+                if comp_df is not None:
+                    comp_t = comp_df['Relative Time (s)'].values
+                    comp_y = comp_df['Normalised Intensity'].values
+                    for lvl in [0.1, 0.01]:
+                        above = np.where(comp_y >= lvl)[0]
+                        if len(above) >= 2:
+                            idx_l, idx_r = above[0], above[-1]
+                            t_l = np.interp(lvl, [comp_y[idx_l-1], comp_y[idx_l]], [comp_t[idx_l-1], comp_t[idx_l]]) if idx_l > 0 else comp_t[idx_l]
+                            t_r = np.interp(lvl, [comp_y[idx_r+1], comp_y[idx_r]], [comp_t[idx_r+1], comp_t[idx_r]]) if idx_r < len(comp_y)-1 else comp_t[idx_r]
+                            if lvl == 0.01: comp_width_1 = t_r - t_l
+                            else: comp_width_10 = t_r - t_l
+
+                # Compare: Winning criteria is FW0.01M Mean (worst washout)
+                # (User request: Max SPR seen across all channels)
+                current_fw1 = stats['FW0.01M Mean']
+                if current_fw1 > max_fw1:
+                    max_fw1 = current_fw1
+                    winning_iso = iso
+                    stats['FW0.01M Comp'] = comp_width_1
+                    stats['FW0.1M Comp'] = comp_width_10
+                    winning_stats = stats
+
+            # 3. Update UI with results
+            if winning_iso:
+                self.lbl_spr_max_iso.setText(f"Channel: <b>{winning_iso}</b>")
+                
+                # Shared formatting helper
+                def _fmt(val_s):
+                    return f"<b>{_adap(val_s * mult)}</b> {unit_label}"
+                
+                def _adap(v): # Inner copy of adaptive rounding
+                    if v >= 100: return f"{v:.0f}"
+                    if v >= 10:  return f"{v:.1f}"
+                    if v >= 1:   return f"{v:.2f}"
+                    return f"{v:.3f}"
+
+                self.lbl_spr_max_avg10.setText(_fmt(winning_stats['FW0.1M Mean']))
+                self.lbl_spr_max_avg1.setText(_fmt(winning_stats['FW0.01M Mean']))
+                self.lbl_spr_max_max10.setText(_fmt(winning_stats['FW0.1M Max']))
+                self.lbl_spr_max_max1.setText(_fmt(winning_stats['FW0.01M Max']))
+                self.lbl_spr_max_comp10.setText(_fmt(winning_stats['FW0.1M Comp']))
+                self.lbl_spr_max_comp1.setText(_fmt(winning_stats['FW0.01M Comp']))
+                
+                # Store for Apply logic (Always MS, rounded)
+                def _rnd(v_s):
+                    v_ms = v_s * 1000.0
+                    if v_ms >= 100: return round(v_ms, 0)
+                    if v_ms >= 10:  return round(v_ms, 1)
+                    return round(v_ms, 2)
+
+                self._max_spr_winners = {
+                    'avg': _rnd(winning_stats['FW0.01M Mean']),
+                    'max': _rnd(winning_stats['FW0.01M Max']),
+                    'comp': _rnd(winning_stats['FW0.01M Comp'])
+                }
+                IoLog.information(f"iolite Optimiser: All-Channel Scan complete. Max SPR: {winning_iso} ({max_fw1*1000:.1f} ms)")
+            else:
+                self.lbl_spr_max_iso.setText("Channel: None Detected")
+                QMessageBox.information(self, "No Peaks", "No valid peaks were found in any channel with current settings.")
+
+        except Exception as e:
+            IoLog.error(f"iolite Optimiser: Error in All Channel Scan: {e}")
+            IoLog.error(traceback.format_exc())
+            QMessageBox.critical(self, "Scan Error", f"An error occurred during scanning:\n{e}")
+        finally:
+            self.btn_all_channel_stats.setEnabled(True)
+            self.btn_all_channel_stats.setText("All Channel Stats")
+
+    def _on_spr_apply_max_clicked(self, mode):
+        # mode can be 'avg', 'max', 'comp' (applying the 1% values of the winning channel)
+        if not hasattr(self, '_max_spr_winners'):
+            QMessageBox.warning(self, "No Results", "Please run 'All Channel Stats' first.")
+            return
+            
+        val_ms = self._max_spr_winners.get(mode, 0)
+        self.spin_wash.setValue(val_ms)
+        self.tabs.setCurrentIndex(1) # Switch back to Optimiser
+        IoLog.information(f"iolite Optimiser: Applied Max Channel ({mode}) washout value: {val_ms:.2f} ms")
 
     def init_optimiser_tab(self):
         main_layout = QHBoxLayout()
@@ -5660,7 +5866,7 @@ class ioliteOptimiser(QWidget):
 
             if not self._get(self.chk_avoid_gaps, 'isChecked'):
                  # "Avoid Gaps" OFF -> Floor Strategy.
-                 self.lbl_opt_pulses.setText(f"{sync['actual_pulses']:.4f} Pulses")
+                 self.lbl_opt_pulses.setText(f"<b>{sync['actual_pulses']:.4f}</b> Pulses")
             else:
                  # "Avoid Gaps" ON -> Ceil Strategy (Overlap).
                  self.lbl_opt_pulses.setText(f"<b>{sync['actual_pulses']:.4f}</b> Pulses")
