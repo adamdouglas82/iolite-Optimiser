@@ -26,6 +26,7 @@ Accessible via the "Settings" button. This establishes the physical limits of yo
       - **Type**: Quadrupole, Sector-Field, Multi-Collector (MC), or TOF.
       - **Allowed Dwell Times**: (MC only) Comma-separated list of valid integration times.
       - **Min Dwell / Precision**: (Quad/TOF) The hardware speed limits.
+      - **Washout Margin (%)**: (TOF only) A percentage "Signal Capture Buffer". Extends the target washout time proportionally to ensure the entire Single Pulse Response is captured natively within the stage's speed budget.
     - **Laser Custom Fields**:
       - **Mode**: Choose "Maximum Rep-Rate" (continuous) or "Discrete" (specific allowed frequencies).
       - **Max Speed**: Physical limit of the sample stage.
@@ -38,11 +39,11 @@ Accessible via the "Settings" button. This establishes the physical limits of yo
 Basic setup for your experiment.
 
 - **Initial Spot Size**: The starting point for optimization (often adjusted automatically).
-- **Washout**: The time (ms) required for the signal to decay (usually determined via the **SPR Tab**).
+- **Washout**: The time (ms) required for the signal to decay (usually determined via the **SPR Tab**). Supports extremely fast sub-1ms definitions (e.g., `0.25 ms`).
 - **Initial Rep-Rate**: A baseline frequency guess (Hz).
 - **Mode**:
   - **Spot**: Analysis of a single location.
-    - **Number of Shots**: Total laser pulses per spot.
+    - **Total Pulses**: Total laser pulses per spot.
   - **Line**: Continuous scanning along a path.
     - **Line Length**: Total distance (µm).
   - **Imaging**: 2D mapping (raster scan).
@@ -52,7 +53,8 @@ Basic setup for your experiment.
 
 The "Goals" you want the algorithm to achieve.
 
-- **Pulses per Dwell Time**: The number of laser shots that must occur during a single mass spectrometer integration (dwell) to ensure signal stability.
+- **Pulses per Dwell Time**: The strict number of laser shots that must occur during a single mass spectrometer integration (`Acq Time`) to ensure signal stability.
+- **Dosage (Shots/Area)**: The density of shots on the sample surface. For square pixels, this perfectly matches the number of pulses per integration. However, you can uncheck **Sync Dosage** to manually decouple these values—allowing you to move the stage slower (higher dosage) than the laser's acquisition integration frequency (lower pulses per integration).
 - **Target SNR (Sigma)**: The desired Signal-to-Noise ratio for the limiting isotope.
   - **Robust Methodology**: The optimiser calculates a **Detection Ratio** based on the scientific Critical Level ($L_c$), then scales it back to a familiar "Sigma SNR" for the UI. This provides a more rigorous assessment than simple background standard deviation:
     1. **Noise Floor**: Determined by the maximum of the theoretical **Poisson Variance** (counting statistics) and the **Observed Variance** (experimental jitter) of the background.
@@ -115,6 +117,7 @@ Detailed breakdown per channel.
 
 - **Mode**:
   - **Auto**: Software calculates the optimal dwell.
+  - **Even**: Software splits the entire available dwell budget perfectly among all `Even` channels. Calculates exact hardware intervals so no time is lost to drift or rounding errors.
   - **Exclude**: Channel is ignored.
   - **Set to Min**: Forces the channel to the hardware minimum dwell.
   - **Custom**: Allows manual entry of a specific dwell time.
@@ -212,7 +215,7 @@ The Optimiser provides feedback through the status bar and log to explain why ce
 - **"Constraint: Acq Time increased for Duty Cycle ([X]%)"**
   - The total integration time was increased to ensure that the measurement time vs. overhead (settling) time met your "Min Duty Cycle" target.
 - **"Constraint: Acq Time increased for Dwell Budget ([X] ms)"**
-  - The total time was increased because the sum of the minimum required dwell times for all elected isotopes exceeded the initial budget derived from the Washout Time.
+  - The total time was increased because the minimum required dwell times for all elected isotopes exceeded the initial budget derived from the Washout Time. Note: For Simultaneous systems (TOF / Multi-Collector), this budget represents the *maximum single* active dwell assignment required. For Sequential systems (Quadrupole), this budget is the *cumulative sum* of all dwell assignments.
 
 ### Channel-Specific Warnings
 
@@ -224,8 +227,8 @@ These messages list specific isotopes that are affecting the optimization logic.
   - For **Quadrupole** systems, these channels have been forced to the minimum dwell time to save budget.
 - **"The following channels cannot be set lower than the hardware minimum ([X] ms)..."**
   - **Blue Warning**: The algorithm wants to reduce the dwell time for these channels (usually high-signal ones) to optimize speed, but is blocked by the hard limit of the instrument (e.g., 1ms or 10ms minimum dwell).
-- **"The following channels had zero counts in the background. The detection limit (Lc) has been calculated using the Square Root Transform rule..."**
-  - **Gray Warning**: Indicates that the background signal was perfectly zero (common in simulated data or extremely short baselines). To prevent division-by-zero errors in the SNR calculation, a theoretical detection limit ($L_c$) was calculated using the Square Root Transform rule for variance stabilization.
+- **"The following channels had zero counts in the background. The detection limit ($L_c$) has been calculated using the Square Root Transform rule..."**
+  - **Gray Warning**: Indicates that the background signal was perfectly zero (common in simulated data or extremely short baselines). To prevent division-by-zero errors in the SNR calculation, a theoretical detection limit ($L_c$) was calculated using the Square Root Transform rule for variance stabilization. The results matrix displays these estimated targets with a grey `(Lc)` subscript.
 
 ---
 
@@ -245,5 +248,3 @@ The algorithms and logic used in the iolite Optimiser are based on established s
   - Currie, L. A. "Limits for qualitative detection and quantitative determination: Application to Radiochemistry." Anal. Chem., (1968), 40, 586-593.
   - Currie, L. A. "The Measurement of Environmental Levels of Rare Gas Nuclides and the Treatment of Very Low-Level Counting Data", IEEE Trans. Nucl. Sci., (1972), NS19, (1), 119-126.
   - Based on the Square Root Transform rule for variance stabilization in counting statistics.
-
-

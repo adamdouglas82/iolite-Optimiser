@@ -66,7 +66,10 @@ Before optimizing spot size or speed, you must know your system's washout time t
 1. **Mode**: Select your analysis type (usually **Imaging** or **Line**).
 2. **Washout**: Verify this matches the value you applied from the SPR tab (Phase 1).
 3. **Parameters**:
-    - **Pulses per Dwell**: Set the stability requirement (e.g., 10 shots/dwell).
+    - **Pulses per Dwell**: Set the strict integration synchronisation requirement (e.g., 10 shots/dwell).
+    - **Dosage**: Set the spatial density requirement (e.g., 10 shots/pixel).
+        - Keep **Sync Dosage** checked for square pixels where Dosage = Pulses/Dwell.
+        - Uncheck **Sync Dosage** to manually decouple the scan speed from the mass spectrometer's integration rate (e.g., for rectangular pixels or TOF instruments).
     - **Target SNR**: Set the desired quality (e.g., 10 Sigma).
     - **Avoid Gaps**: Check this for Imaging to ensure full surface coverage.
 

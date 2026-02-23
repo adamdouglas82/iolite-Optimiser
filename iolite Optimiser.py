@@ -2,7 +2,7 @@
 #/ Description: Characterises your system's single-pulse washout to calculate the optimal balance of spot size, scan speed, and repetition rate that achieves your target data quality.
 #/ Type: UI
 #/ Authors: Adam Douglas
-#/ Version: 0.9.9
+#/ Version: 0.9.10
 #/ Contact: Adam.Douglas@icpms.com
 
 import math
@@ -60,7 +60,7 @@ except ImportError:
         pass
 
 # --- EMBEDDED CONSTANTS ---
-VERSION = "0.9.9"
+VERSION = "0.9.10"
 
 ICP_SPECS = {
     "Agilent": {
@@ -421,32 +421,33 @@ class Logic:
         fw_s = inputs['washout_ms'] / 1000.0
         bs = inputs['spot_size_um']
         n_val = inputs['pulses_per_pixel']
+        n_dose = inputs.get('dosage', n_val)
         rr_max = inputs['max_rr_hz']
         ss_max = inputs['max_speed_um_s']
         is_mc = inputs['icp_technology'] == "Multi-Collector"
         valid_times_s = [d/1000.0 for d in (inputs.get('allowed_dwells') or [])]
         p_s = inputs['precision_ms'] / 1000.0
 
-        at_from_washout = fw_s
-        rr_ideal = n_val / fw_s
-        at_from_rr = n_val / rr_max if rr_ideal > rr_max else fw_s
-        ss_ideal = bs / fw_s
-        at_from_ss = bs / ss_max if ss_ideal > ss_max else fw_s
+        at_from_washout = n_val * fw_s
+        rr_ideal = 1.0 / fw_s if fw_s > 0 else rr_max
+        at_from_rr = n_val / rr_max if rr_ideal > rr_max else at_from_washout
+        ss_ideal = (bs * rr_ideal) / n_dose if n_dose > 0 else 0
+        at_from_ss = (bs * n_val) / (ss_max * n_dose) if (n_dose > 0 and ss_ideal > ss_max) else at_from_washout
 
         min_duty = inputs.get('min_duty_cycle', 0)
         overhead_s = inputs.get('overhead_ms', 0) / 1000.0
         min_dwell_req_s = inputs.get('min_dwell_needed_ms', 0) / 1000.0
         
-        at_from_duty = fw_s
+        at_from_duty = at_from_washout
         harmonic = 1
         
         # State tracking for reasons why Acq Time was increased
         at_reasons = []
-        if at_from_rr > (fw_s + 1e-7): at_reasons.append("Rep Rate Limit")
-        if ss_max > 0 and at_from_ss > (fw_s + 1e-7): at_reasons.append("Stage Speed Limit")
+        if at_from_rr > (at_from_washout + 1e-7): at_reasons.append("Rep Rate Limit")
+        if ss_max > 0 and at_from_ss > (at_from_washout + 1e-7): at_reasons.append("Stage Speed Limit")
 
         # --- HARMONIC SCALING ---
-        rr_h1 = max(1, math.floor(n_val / fw_s))
+        rr_h1 = max(1, math.floor(1.0 / fw_s if fw_s > 0 else rr_max))
         at_h1 = n_val / rr_h1
         base_washout = round(at_h1 / p_s) * p_s 
         base = max(base_washout, at_from_rr, at_from_ss)
@@ -540,7 +541,7 @@ class Logic:
 
         # Derived parameters (CALCULATED LAST)
         actual_pulses = rr_actual * at_actual_s
-        speed = (bs * rr_actual) / optimised_n if optimised_n > 0 else 0
+        speed = (bs * rr_actual) / n_dose if n_dose > 0 else 0
         overlap_um = bs - (speed / rr_actual) if rr_actual > 0 else 0
         overlap_pct = (overlap_um / bs) * 100 if bs > 0 else 0
         
@@ -568,6 +569,7 @@ class Logic:
             "valid_times_s": valid_times_s,
             "notes": notes,
             "optimised_n": optimised_n,
+            "n_dose": n_dose,
             "warning": warning,
             "err_pct": err_pct,
             "dwell_budget_s": dwell_budget_s
@@ -2877,6 +2879,15 @@ class ioliteOptimiser(QWidget):
         self.edit_cust_dwells.setToolTip("Comma separated list of valid dwells (ms)")
         self.edit_cust_dwells.setText(self.persistent_settings.get('cust_dwell_list', ""))
         self.form_icp.addRow(self.lbl_cust_dwells, self.edit_cust_dwells)
+        
+        # --- TOF Specific Rows ---
+        self.lbl_tof_margin = QLabel("Washout Margin (%):"); self.lbl_tof_margin.setFixedWidth(lbl_w)
+        self.spin_tof_margin = QDoubleSpinBox()
+        self.spin_tof_margin.setRange(0, 1000); self.spin_tof_margin.setFixedWidth(100); self.spin_tof_margin.setDecimals(1)
+        self.spin_tof_margin.setValue(self.persistent_settings.get('tof_margin', 10.0))
+        self.spin_tof_margin.setToolTip("<b>Signal Capture Buffer</b><br/>A percentage buffer added to the system's baseline washout time. For TOF systems, this ensures sufficient time to measure the complete Single Pulse Response (SPR) peak, avoiding truncation due to signal jitter and extraction timings.")
+        self.spin_tof_margin.valueChanged.connect(self._on_ui_change)
+        self.form_icp.addRow(self.lbl_tof_margin, self.spin_tof_margin)
 
         l_hw.setContentsMargins(10, 2, 10, 2)
         l_hw.setSpacing(2)
@@ -3050,7 +3061,8 @@ class ioliteOptimiser(QWidget):
         lbl_wash = QLabel("Washout (ms):"); lbl_wash.setFixedWidth(lbl_w_in)
         grid_input.addWidget(lbl_wash, 0, 2)
         self.spin_wash = QDoubleSpinBox()
-        self.spin_wash.setRange(1, 50000); self.spin_wash.setValue(self.persistent_settings.get('washout', 500))
+        self.spin_wash.setRange(0.01, 50000); self.spin_wash.setDecimals(2)
+        self.spin_wash.setValue(self.persistent_settings.get('washout', 500))
         self.spin_wash.setFixedWidth(spin_w_in)
         grid_input.addWidget(self.spin_wash, 0, 3)
 
@@ -3089,7 +3101,7 @@ class ioliteOptimiser(QWidget):
         self.grid_qual.setContentsMargins(5, 5, 5, 5)
         self.grid_qual.setSpacing(5)
 
-        # Row 0
+        # Row 0: Pulses per Acq. Time and Dosage
         lbl_pulses = QLabel("Pulses per Acq. Time:"); lbl_pulses.setFixedWidth(lbl_w_in)
         self.grid_qual.addWidget(lbl_pulses, 0, 0)
         self.spin_pulses = QDoubleSpinBox()
@@ -3097,20 +3109,20 @@ class ioliteOptimiser(QWidget):
         self.spin_pulses.setFixedWidth(spin_w_in)
         self.grid_qual.addWidget(self.spin_pulses, 0, 1)
 
+        lbl_dosage = QLabel("Dosage (Shots/Area):"); lbl_dosage.setFixedWidth(lbl_w_in)
+        self.grid_qual.addWidget(lbl_dosage, 0, 2)
+        self.spin_dosage = QDoubleSpinBox()
+        self.spin_dosage.setRange(1, 100); self.spin_dosage.setValue(self.persistent_settings.get('dosage', self.persistent_settings.get('pulses', 5))); self.spin_dosage.setDecimals(1)
+        self.spin_dosage.setFixedWidth(spin_w_in)
+        self.grid_qual.addWidget(self.spin_dosage, 0, 3)
+
+        # Row 1: Target SNR and Minimum SNR
         lbl_sigma = QLabel("Target SNR (Sigma):"); lbl_sigma.setFixedWidth(lbl_w_in)
-        self.grid_qual.addWidget(lbl_sigma, 0, 2)
+        self.grid_qual.addWidget(lbl_sigma, 1, 0)
         self.spin_sigma = QDoubleSpinBox()
         self.spin_sigma.setRange(0.1, 100000); self.spin_sigma.setValue(self.persistent_settings.get('target_sigma', 10)); self.spin_sigma.setDecimals(1)
         self.spin_sigma.setFixedWidth(spin_w_in)
-        self.grid_qual.addWidget(self.spin_sigma, 0, 3)
-
-        # Row 1 (Swapped: Duty Cycle first, then Min SNR)
-        lbl_duty = QLabel("Min Duty Cycle (%):"); lbl_duty.setFixedWidth(lbl_w_in)
-        self.grid_qual.addWidget(lbl_duty, 1, 0)
-        self.spin_duty = QDoubleSpinBox()
-        self.spin_duty.setRange(0, 100); self.spin_duty.setValue(self.persistent_settings.get('min_duty', 0)); self.spin_duty.setDecimals(1)
-        self.spin_duty.setFixedWidth(spin_w_in)
-        self.grid_qual.addWidget(self.spin_duty, 1, 1)
+        self.grid_qual.addWidget(self.spin_sigma, 1, 1)
 
         lbl_snr = QLabel("Minimum SNR (Sigma):"); lbl_snr.setFixedWidth(lbl_w_in)
         self.grid_qual.addWidget(lbl_snr, 1, 2)
@@ -3119,8 +3131,7 @@ class ioliteOptimiser(QWidget):
         self.spin_snr.setFixedWidth(spin_w_in)
         self.grid_qual.addWidget(self.spin_snr, 1, 3)
 
-
-        # Row 2: Image Dimensions OR Shots
+        # Row 2: Image Height and Width / Shots
         self.lbl_height = QLabel("Image Height (µm):"); self.lbl_height.setFixedWidth(lbl_w_in)
         self.grid_qual.addWidget(self.lbl_height, 2, 0)
         self.spin_height = QDoubleSpinBox()
@@ -3143,11 +3154,24 @@ class ioliteOptimiser(QWidget):
         self.spin_shots.setFixedWidth(spin_w_in)
         # self.grid_qual.addWidget(self.spin_shots, 2, 1) # Managed by mode update
 
-        # Row 3: Bottom check inside the grid
+        # Row 3: Duty Cycle and Sync Dosage Checkbox
+        lbl_duty = QLabel("Min Duty Cycle (%):"); lbl_duty.setFixedWidth(lbl_w_in)
+        self.grid_qual.addWidget(lbl_duty, 3, 0)
+        self.spin_duty = QDoubleSpinBox()
+        self.spin_duty.setRange(0, 100); self.spin_duty.setValue(self.persistent_settings.get('min_duty', 0)); self.spin_duty.setDecimals(1)
+        self.spin_duty.setFixedWidth(spin_w_in)
+        self.grid_qual.addWidget(self.spin_duty, 3, 1)
+
+        self.chk_sync_dosage = QCheckBox("Sync Dosage")
+        self.chk_sync_dosage.setToolTip("Synchronize Dosage with Pulses per Acq. Time")
+        self.chk_sync_dosage.setChecked(self.persistent_settings.get('sync_dosage', True))
+        self.grid_qual.addWidget(self.chk_sync_dosage, 3, 2, 1, 2)
+
+        # Row 4: Scale Signal with Rep-Rate
         self.chk_scale = QCheckBox("Scale Signal with Rep-Rate")
         self.chk_scale.setToolTip("Scale sensitivity based on Rep Rate ratio")
         self.chk_scale.setChecked(self.persistent_settings.get('scale_signal', False))
-        self.grid_qual.addWidget(self.chk_scale, 3, 0, 1, 2)
+        self.grid_qual.addWidget(self.chk_scale, 4, 0, 1, 2)
         
         v_qual.addLayout(self.grid_qual)
         grp_qual.setLayout(v_qual)
@@ -3156,7 +3180,7 @@ class ioliteOptimiser(QWidget):
         self.chk_avoid_gaps.setToolTip("Checked: Always Overlap (Increase Rep-Rate). Unchecked: Allow Gaps.")
         self.chk_avoid_gaps.setChecked(self.persistent_settings.get('avoid_gaps', False)) # Default Unchecked
         self.chk_avoid_gaps.stateChanged.connect(self._on_ui_change)
-        self.grid_qual.addWidget(self.chk_avoid_gaps, 3, 2, 1, 2)
+        self.grid_qual.addWidget(self.chk_avoid_gaps, 4, 2, 1, 2)
         l_settings.addWidget(grp_qual)
 
         # Optimised Settings (Moved from Results)
@@ -3423,7 +3447,9 @@ class ioliteOptimiser(QWidget):
         self.cmb_mode.currentTextChanged.connect(self._on_ui_change)
         self.spin_shots.valueChanged.connect(self._on_ui_change)
         self.chk_scale.toggled.connect(self._on_ui_change)
-        self.spin_pulses.valueChanged.connect(self._on_ui_change)
+        self.spin_pulses.valueChanged.connect(self._on_pulses_changed)
+        self.spin_dosage.valueChanged.connect(self._on_dosage_changed)
+        self.chk_sync_dosage.toggled.connect(self._on_sync_dosage_toggled)
         self.spin_sigma.valueChanged.connect(self._on_ui_change)
         self.spin_snr.valueChanged.connect(self._on_ui_change)
         self.spin_duty.valueChanged.connect(self._on_ui_change)
@@ -3438,6 +3464,7 @@ class ioliteOptimiser(QWidget):
             sb.valueChanged.connect(self.on_region_edited)
 
         # Custom Field Signals
+        self.cmb_cust_type.currentTextChanged.connect(self._handle_cust_type_changed)
         self.cmb_cust_type.currentIndexChanged.connect(self._on_ui_change)
         self.spin_cust_min.valueChanged.connect(self._on_ui_change)
         self.spin_cust_prec.valueChanged.connect(self._on_ui_change)
@@ -3580,11 +3607,19 @@ class ioliteOptimiser(QWidget):
         # Trigger Overhead Recalculation
         self._recalculate_overhead()
 
+    def _handle_cust_type_changed(self, text):
+        self._handle_model_changed(self._get(self.cmb_model, 'currentText'))
+
     def _update_icp_status(self):
         if self.allowed_dwells:
             status = f"Allowed Dwells: {', '.join(map(str, self.allowed_dwells))} ms"
         else:
             status = f"Minimum Dwell Time: {self.min_dwell} ms | Precision: {self.precision} ms"
+            
+        if getattr(self, 'icp_tech', '') == "TOF":
+            margin = self._get(self.spin_tof_margin, 'value') if hasattr(self, 'spin_tof_margin') else getattr(self, 'persistent_settings', {}).get('tof_margin', 10.0)
+            status += f" | Margin: {margin:g} %"
+            
         self.lbl_icp_status.setText(status)
 
     def _handle_laser_mod_changed(self, model):
@@ -3712,6 +3747,15 @@ class ioliteOptimiser(QWidget):
             self.lbl_cust_prec.setVisible(is_custom_icp and not is_mc)
             self.spin_cust_prec.setVisible(is_custom_icp and not is_mc)
             
+        if is_custom_icp and hasattr(self, 'cmb_cust_type'):
+            is_tof = (self._get(self.cmb_cust_type, 'currentText') == "TOF")
+        else:
+            is_tof = (getattr(self, 'icp_tech', 'Quadrupole') == "TOF")
+            
+        if hasattr(self, 'lbl_tof_margin'):
+            self.lbl_tof_margin.setVisible(is_tof)
+            self.spin_tof_margin.setVisible(is_tof)
+            
         # --- LASER VISIBILITY ---
         if hasattr(self, 'cmb_cust_rr_type'):
             mode = self._get(self.cmb_cust_rr_type, 'currentText')
@@ -3785,6 +3829,9 @@ class ioliteOptimiser(QWidget):
         # 1. Dialog Labels (Detailed)
         if hasattr(self, 'lbl_icp_status'):
             icp_constraints = f"Allowed Dwell times: {', '.join(map(str, self.allowed_dwells))} ms" if self.allowed_dwells else f"Minimum Dwell Time: {self.min_dwell} ms | Precision: {self.precision} ms"
+            if self.icp_tech == "TOF":
+                margin = self._get(self.spin_tof_margin, 'value') if hasattr(self, 'spin_tof_margin') else getattr(self, 'persistent_settings', {}).get('tof_margin', 10.0)
+                icp_constraints += f" | Margin: {margin:g} %"
             self.lbl_icp_status.setText(f"Type: {self.icp_tech} | {icp_constraints}")
 
         if hasattr(self, 'lbl_laser_status'):
@@ -3796,6 +3843,11 @@ class ioliteOptimiser(QWidget):
             icp_header = "<b style='font-size: 1.1em;'>ICP-MS</b>"
             icp_details = f"Manufacturer: <b>{icp_mfr}</b><br/>Model: <b>{icp_mod}</b><br/>Type: <b>{self.icp_tech}</b>"
             icp_constraints = f"Allowed Dwell times: {', '.join(map(str, self.allowed_dwells))} ms" if self.allowed_dwells else f"Minimum Dwell Time: {self.min_dwell} ms | Precision: {self.precision} ms"
+            
+            if self.icp_tech == "TOF":
+                margin = self._get(self.spin_tof_margin, 'value') if hasattr(self, 'spin_tof_margin') else getattr(self, 'persistent_settings', {}).get('tof_margin', 10.0)
+                icp_constraints += f" | Margin: {margin:g} %"
+            
             icp_full = f"{icp_header}<br/>{icp_details}<br/><span style='font-size: 11px;'><b><i>{icp_constraints}</i></b></span>"
             
             las_header = "<b style='font-size: 1.1em;'>Laser</b>"
@@ -3805,6 +3857,28 @@ class ioliteOptimiser(QWidget):
             las_full = f"{las_header}<br/>{las_details}<br/><span style='font-size: 11px;'><b><i>{las_constraints}</i></b></span>"
             
             self.lbl_hw_sum.setText(f"{icp_full}<br/><br/>{las_full}")
+
+    def _on_pulses_changed(self, value):
+        if hasattr(self, 'chk_sync_dosage') and self.chk_sync_dosage.isChecked():
+            self._block_signals(self.spin_dosage, True)
+            self.spin_dosage.setValue(value)
+            self._block_signals(self.spin_dosage, False)
+        self._on_ui_change()
+
+    def _on_dosage_changed(self, value):
+        if hasattr(self, 'chk_sync_dosage') and self.chk_sync_dosage.isChecked():
+            self._block_signals(self.chk_sync_dosage, True)
+            self.chk_sync_dosage.setChecked(False)
+            self._block_signals(self.chk_sync_dosage, False)
+        self._on_ui_change()
+
+    def _on_sync_dosage_toggled(self, checked):
+        if hasattr(self, 'spin_dosage'):
+            if checked:
+                self._block_signals(self.spin_dosage, True)
+                self.spin_dosage.setValue(self.spin_pulses.value)
+                self._block_signals(self.spin_dosage, False)
+        self._on_ui_change()
 
     def _on_ui_change(self, *args):
         # Refresh visibility of custom fields
@@ -4075,9 +4149,12 @@ class ioliteOptimiser(QWidget):
                 'init_rr': self._get(self.spin_init_rr, 'value'),
                 'scale_signal': self._get(self.chk_scale, 'isChecked'),
                 'pulses': self._get(self.spin_pulses, 'value'),
+                'dosage': self._get(self.spin_dosage, 'value'),
+                'sync_dosage': self._get(self.chk_sync_dosage, 'isChecked'),
                 'target_sigma': self._get(self.spin_sigma, 'value'),
                 'min_snr': self._get(self.spin_snr, 'value'),
                 'min_duty': self._get(self.spin_duty, 'value'),
+                'tof_margin': self._get(self.spin_tof_margin, 'value') if hasattr(self, 'spin_tof_margin') else 10.0,
                 'cell_type': self._get(self.cmb_cell, 'currentText'),
                 # 'auto_detect': self._get(self.chk_auto, 'isChecked'), # Not saved
                 # 'normalise': self._get(self.chk_norm, 'isChecked'), # Not saved
@@ -5506,6 +5583,13 @@ class ioliteOptimiser(QWidget):
             
             # ... 
             
+            base_washout = self._get(self.spin_wash, 'value')
+            if getattr(self, 'icp_tech', 'Quadrupole') == "TOF":
+                margin_pct = getattr(self, 'persistent_settings', {}).get('tof_margin', 10.0)
+                if hasattr(self, 'spin_tof_margin'):
+                    margin_pct = self._get(self.spin_tof_margin, 'value')
+                base_washout = base_washout * (1.0 + (margin_pct / 100.0))
+
             c = {
                 'icp_mfr': mfr,
                 'icp_model': model,
@@ -5518,9 +5602,10 @@ class ioliteOptimiser(QWidget):
                 'allowed_dwells': self.allowed_dwells,
                 'max_speed_um_s': self.max_speed,
                 'rr_prec_hz': self._get(self.spin_cust_rr_prec, 'value') if hasattr(self, 'spin_cust_rr_prec') else 1.0,
-                'washout_ms': self._get(self.spin_wash, 'value'),
+                'washout_ms': base_washout,
                 'spot_size_um': fixed_spot_um if fixed_spot_um else self._get(self.spin_spot, 'value'),
                 'pulses_per_pixel': self._get(self.spin_pulses, 'value'),
+                'dosage': self._get(self.spin_dosage, 'value'),
                 'mode': self._get(self.cmb_mode, 'currentText'),
                 'img_height': self._get(self.spin_height, 'value') if hasattr(self, 'spin_height') else 1000.0,
                 'img_width': self._get(self.spin_width, 'value') if hasattr(self, 'spin_width') else 1000.0,
@@ -5620,11 +5705,11 @@ class ioliteOptimiser(QWidget):
                 })
 
             # --- HARMONIC SCALING PRE-OPTIMIZATION ---
-            is_mc_sys = TYPE_TO_TECH_MAP.get(self.icp_tech) == "Multi-Collector"
+            is_simultaneous = TYPE_TO_TECH_MAP.get(self.icp_tech) in ["Multi-Collector", "TOF"]
             min_dwell_total = 0.0
             if isotope_data:
-                if is_mc_sys:
-                    # MC: Channels are simultaneous. The budget needed is the maximum 
+                if is_simultaneous:
+                    # MC/TOF: Channels are simultaneous. The budget needed is the maximum 
                     # requirement of any active channel, not the sum.
                     reqs = []
                     for iso in isotope_data:
@@ -5734,6 +5819,7 @@ class ioliteOptimiser(QWidget):
             
             # Reset 'pulses_per_pixel' to user input to ensure Error Calculation compares against Target, not Optimized result from previous run.
             c['pulses_per_pixel'] = self._get(self.spin_pulses, 'value')
+            c['dosage'] = self._get(self.spin_dosage, 'value')
             c['log_prefix'] = "Optimised Sync"
             sync = Logic.calculate_constrained_at(c)
             
@@ -5866,10 +5952,10 @@ class ioliteOptimiser(QWidget):
 
             if not self._get(self.chk_avoid_gaps, 'isChecked'):
                  # "Avoid Gaps" OFF -> Floor Strategy.
-                 self.lbl_opt_pulses.setText(f"<b>{sync['actual_pulses']:.4f}</b> Pulses")
+                 self.lbl_opt_pulses.setText(f"<b>{sync['n_dose']:.1f}</b> Shots")
             else:
                  # "Avoid Gaps" ON -> Ceil Strategy (Overlap).
-                 self.lbl_opt_pulses.setText(f"<b>{sync['actual_pulses']:.4f}</b> Pulses")
+                 self.lbl_opt_pulses.setText(f"<b>{sync['n_dose']:.1f}</b> Shots")
 
             self.lbl_opt_overlap.setText(f"<b>{sync['overlap_um']:.1f}</b> µm")
 
