@@ -2,7 +2,7 @@
 #/ Description: Characterises your system's single-pulse washout to calculate the optimal balance of spot size, scan speed, and repetition rate that achieves your target data quality.
 #/ Type: UI
 #/ Authors: Adam Douglas
-#/ Version: 0.9.10
+#/ Version: 0.9.11
 #/ Contact: Adam.Douglas@icpms.com
 
 import math
@@ -60,7 +60,7 @@ except ImportError:
         pass
 
 # --- EMBEDDED CONSTANTS ---
-VERSION = "0.9.10"
+VERSION = "0.9.11"
 
 ICP_SPECS = {
     "Agilent": {
@@ -169,7 +169,7 @@ PLOT_COLORS = [
 # --- EMBEDDED LOGIC ---
 class Logic:
     @staticmethod
-    def analyse_washout_peaks(df, isotope, prominence_threshold=100.0, min_distance=1, is_cps=True):
+    def analyse_washout_peaks(df, isotope, prominence_threshold=100.0, min_distance=1, is_cps=True, wlen=None, apply_smoothing=False, smooth_window=5, bg_sub=False, bg_start_s=2.0, bg_end_s=8.0):
         """
         Analyses washout peaks (Single Pulse Response) for a given isotope.
         Calculates FW0.1M (10% Height) and FW0.01M (1% Height).
@@ -183,10 +183,29 @@ class Logic:
         y_proc = df[isotope].values
         time_proc = df['Time'].values
 
+        t0 = time_proc[0] if len(time_proc) > 0 else 0
+        t_zeroed = time_proc - t0 if len(time_proc) > 0 else time_proc
+
+        # --- BACKGROUND SUBTRACTION ---
+        if bg_sub:
+            bg_mask = (t_zeroed >= bg_start_s) & (t_zeroed <= bg_end_s)
+            if bg_mask.any():
+                bg_mean = np.mean(y_proc[bg_mask])
+                y_proc = np.clip(y_proc - bg_mean, 0, None)
+
+        # Calculate typical sample rate (dt)
+        dt = np.median(np.diff(time_proc)) if len(time_proc) > 1 else 1.0
+
+        if apply_smoothing and smooth_window > 0:
+            smooth_window_pts = max(3, int(round(smooth_window / dt)))
+            y_proc_series = pd.Series(y_proc)
+            y_proc = y_proc_series.rolling(window=smooth_window_pts, center=True, min_periods=1).median().values
+
         # 1. Find Peaks
         try:
-            # Pass min_distance (distance in samples)
-            peaks, properties = find_peaks(y_proc, prominence=prominence_threshold, distance=max(1, int(min_distance)))
+            min_distance_pts = max(1, int(round(min_distance / dt)))
+            wlen_pts = max(1, int(round(wlen / dt))) if wlen is not None and wlen > 0 else None
+            peaks, properties = find_peaks(y_proc, prominence=prominence_threshold, distance=min_distance_pts, wlen=wlen_pts)
         except Exception as e:
             return pd.DataFrame(), {"Error": str(e)}
         
@@ -271,41 +290,60 @@ class Logic:
         return stats
 
     @staticmethod
-    def generate_composite_peak(df, isotope, peaks_df):
+    def generate_composite_peak(df, isotope, peaks_df, bg_sub=False, bg_start_s=2.0, bg_end_s=8.0):
         """
         Generates a composite (averaged) peak shape by aligning and normalizing detected peaks.
         Uses asymmetric windows that split the baseline gap between adjacent pulses.
-        Aligned such that Relative Time 0 is at the 1% Rise Marker (l001).
+        Aligned such that Relative Time 0 is at the Maximum Intensity Time (Peak Time (s)).
         """
         if peaks_df.empty or isotope not in df.columns or "Time" not in df.columns:
             return None
 
-        y_raw = df[isotope].values
+        y_raw = df[isotope].values.copy()
         t_raw = df['Time'].values
+        
+        if bg_sub:
+            t0 = t_raw[0] if len(t_raw) > 0 else 0
+            t_zeroed = t_raw - t0 if len(t_raw) > 0 else t_raw
+            bg_mask = (t_zeroed >= bg_start_s) & (t_zeroed <= bg_end_s)
+            if bg_mask.any():
+                bg_mean = np.mean(y_raw[bg_mask])
+                y_raw = np.clip(y_raw - bg_mean, 0, None)
         
         # Calculate typical sample rate
         dt = np.median(np.diff(t_raw)) if len(t_raw) > 1 else 1.0
         
         # 1. Calculate the core pulse dimensions
-        # Alignment is at l001. We want to cover from the start of the buffer to the end of the pulse + buffer.
-        max_fw001 = (peaks_df['r001'] - peaks_df['l001']).max()
+        # Alignment is at Peak Time (s). Use robust percentiles instead of max to avoid outliers pulling in other peaks.
+        dist_left = peaks_df['Peak Time (s)'] - peaks_df['l001']
+        dist_right = peaks_df['r001'] - peaks_df['Peak Time (s)']
+        
+        core_left = np.percentile(dist_left, 90)
+        core_right = np.percentile(dist_right, 90)
+        core_fw = core_left + core_right
         
         # 2. Asymmetric baseline buffers
         if len(peaks_df) > 1:
             pdf = peaks_df.sort_values('Peak Time (s)')
             gaps = pdf['l001'].values[1:] - pdf['r001'].values[:-1]
             median_gap = max(0, np.median(gaps))
+            p2p = np.median(np.diff(pdf['Peak Time (s)'].values))
             
-            # !0 % Margin Left, 20 % Margin 
-            b_left = 0.1 * max_fw001
-            b_right = 0.20 * max_fw001
+            # 10 % Margin Left, 20 % Margin 
+            b_left = core_left + (0.1 * core_fw)
+            b_right = core_right + (0.20 * core_fw)
             
-            # Safety: Ensure we don't clip next peak (40% of gap)
-            b_right = min(b_right, 0.4 * median_gap)
+            # Safety 1: Ensure we don't clip adjacent peaks via gap allocation
+            b_left = min(b_left, core_left + (0.4 * median_gap))
+            b_right = min(b_right, core_right + (0.4 * median_gap))
+            
+            # Safety 2: Hard limit to never exceed halfway to the next peak
+            b_left = min(b_left, 0.45 * p2p)
+            b_right = min(b_right, 0.45 * p2p)
         else:
             # Single peak fallbacks
-            b_left = 0.1 * max_fw001
-            b_right = 0.20 * max_fw001
+            b_left = core_left + (0.1 * core_fw)
+            b_right = core_right + (0.20 * core_fw)
             
         # Global minimums (0.1ms / 0.1ms) - Fixes "needle" peaks
         b_left = max(b_left, 0.0001)
@@ -314,9 +352,9 @@ class Logic:
         peak_segments = []
         
         for i, row in peaks_df.iterrows():
-            # Align at l001 absolute time
-            t_start_abs = row['l001'] - b_left
-            t_end_abs = row['r001'] + b_right
+            # Align at Peak Time (s) absolute time
+            t_start_abs = row['Peak Time (s)'] - b_left
+            t_end_abs = row['Peak Time (s)'] + b_right
             
             # Convert to indices
             idx_start = np.searchsorted(t_raw, t_start_abs)
@@ -325,7 +363,7 @@ class Logic:
             if idx_end <= idx_start: continue
             
             seg_y = y_raw[idx_start:idx_end]
-            seg_t = t_raw[idx_start:idx_end] - row['l001'] # Center t=0 at l001
+            seg_t = t_raw[idx_start:idx_end] - row['Peak Time (s)'] # Center t=0 at Peak Time (s)
             
             # Normalise intensity
             mx = row['Max Intensity']
@@ -337,8 +375,8 @@ class Logic:
             return None
 
         # Interpolation to a common grid
-        # Grid covers from -b_left to max_pulse_width + b_right
-        grid_t = np.arange(-b_left, max_fw001 + b_right + dt, dt)
+        # Grid covers from -b_left to b_right
+        grid_t = np.arange(-b_left, b_right + dt, dt)
         sum_y = np.zeros_like(grid_t)
         count_y = np.zeros_like(grid_t)
         
@@ -348,6 +386,18 @@ class Logic:
             count_y += 1
             
         avg_y = sum_y / count_y if len(peak_segments) > 0 else sum_y
+        
+        # Shift X-axis so that 0 represents the 1% rise (FW0.01M left edge)
+        # This preserves the highest-point alignment between all pulses, but normalizes the visual start time.
+        lvl = 0.01
+        above_idx = np.where(avg_y >= lvl)[0]
+        if len(above_idx) > 0:
+            idx_l = above_idx[0]
+            if idx_l > 0:
+                t_l = np.interp(lvl, [avg_y[idx_l-1], avg_y[idx_l]], [grid_t[idx_l-1], grid_t[idx_l]])
+            else:
+                t_l = grid_t[idx_l]
+            grid_t = grid_t - t_l
         
         return pd.DataFrame({'Relative Time (s)': grid_t, 'Normalised Intensity': avg_y})
 
@@ -428,8 +478,8 @@ class Logic:
         valid_times_s = [d/1000.0 for d in (inputs.get('allowed_dwells') or [])]
         p_s = inputs['precision_ms'] / 1000.0
 
-        at_from_washout = n_val * fw_s
-        rr_ideal = 1.0 / fw_s if fw_s > 0 else rr_max
+        at_from_washout = fw_s
+        rr_ideal = n_val / fw_s if fw_s > 0 else rr_max
         at_from_rr = n_val / rr_max if rr_ideal > rr_max else at_from_washout
         ss_ideal = (bs * rr_ideal) / n_dose if n_dose > 0 else 0
         at_from_ss = (bs * n_val) / (ss_max * n_dose) if (n_dose > 0 and ss_ideal > ss_max) else at_from_washout
@@ -447,7 +497,7 @@ class Logic:
         if ss_max > 0 and at_from_ss > (at_from_washout + 1e-7): at_reasons.append("Stage Speed Limit")
 
         # --- HARMONIC SCALING ---
-        rr_h1 = max(1, math.floor(1.0 / fw_s if fw_s > 0 else rr_max))
+        rr_h1 = max(1, math.floor(n_val / fw_s if fw_s > 0 else rr_max))
         at_h1 = n_val / rr_h1
         base_washout = round(at_h1 / p_s) * p_s 
         base = max(base_washout, at_from_rr, at_from_ss)
@@ -502,10 +552,18 @@ class Logic:
         else:
             # Standard: Pulse-Driven. Re-calculate AT to match an integer RR if not avoid_gaps.
             if allowed_rr:
-                valid = [r for r in allowed_rr if (r >= rr_theoretical - 1e-9 if avoid_gaps else r <= rr_theoretical + 1e-9)]
-                rr_actual = (min(valid) if avoid_gaps else max(valid)) if valid else (max(allowed_rr) if avoid_gaps else min(allowed_rr))
+                # Calculate natural floor limits first
+                rr_floor = max([r for r in allowed_rr if r <= rr_theoretical + 1e-9]) if any(r <= rr_theoretical + 1e-9 for r in allowed_rr) else min(allowed_rr)
+                
+                # Only enforce gap avoidance if the natural floor produces a negative error
+                actually_avoid = avoid_gaps and (rr_floor * at_actual_s) < n_val
+                
+                valid = [r for r in allowed_rr if (r >= rr_theoretical - 1e-9 if actually_avoid else r <= rr_theoretical + 1e-9)]
+                rr_actual = (min(valid) if actually_avoid else max(valid)) if valid else (max(allowed_rr) if actually_avoid else min(allowed_rr))
             else:
-                rr_actual = (math.ceil(rr_theoretical / rr_prec - 1e-9) if avoid_gaps else math.floor(rr_theoretical / rr_prec + 1e-9)) * rr_prec
+                rr_floor = math.floor(rr_theoretical / rr_prec + 1e-9) * rr_prec
+                actually_avoid = avoid_gaps and (rr_floor * at_actual_s) < n_val
+                rr_actual = (math.ceil(rr_theoretical / rr_prec - 1e-9) if actually_avoid else math.floor(rr_theoretical / rr_prec + 1e-9)) * rr_prec
             
             if rr_actual <= 1e-9: rr_actual = rr_prec
             
@@ -513,6 +571,8 @@ class Logic:
                 optimised_n = rr_actual * at_actual_s
             else:
                 at_actual_s = round((n_val / rr_actual) / p_s) * p_s
+                prec_decimals = max(0, int(round(-math.log10(p_s)))) if p_s > 0 else 3
+                at_actual_s = round(at_actual_s, prec_decimals)
                 optimised_n = n_val
 
         # --- PERFECT EVEN SPLIT: Adjust AT to avoid drift in Even mode ---
@@ -534,10 +594,15 @@ class Logic:
             
             # Recalculate RR to maintain synchronization with the nudged AT
             rr_theoretical_even = optimised_n / at_actual_s if at_actual_s > 0 else 0
+            rr_rounded = round(rr_theoretical_even / rr_prec) * rr_prec
+            
             if avoid_gaps:
-                rr_actual = math.ceil(rr_theoretical_even / rr_prec - 1e-9) * rr_prec
+                if (rr_rounded * at_actual_s) >= n_val:
+                    rr_actual = rr_rounded
+                else:    
+                    rr_actual = math.ceil(rr_theoretical_even / rr_prec - 1e-9) * rr_prec
             else:
-                rr_actual = math.floor(rr_theoretical_even / rr_prec + 1e-9) * rr_prec
+                rr_actual = rr_rounded
 
         # Derived parameters (CALCULATED LAST)
         actual_pulses = rr_actual * at_actual_s
@@ -1433,7 +1498,7 @@ class ioliteOptimiser(QWidget):
         # Debounce timer for SPR peak detection
         self.spr_debounce_timer = QTimer()
         self.spr_debounce_timer.setSingleShot(True)
-        self.spr_debounce_timer.timeout.connect(self.run_spr_analysis)
+        self.spr_debounce_timer.timeout.connect(self._run_spr_analysis_forced)
 
         # Initialize hardware state
         self.icp_tech = "Quadrupole"
@@ -1667,7 +1732,7 @@ class ioliteOptimiser(QWidget):
         grid_det.setColumnStretch(3, 1) # Push content left
         
         self.cmb_spr_iso = QComboBox()
-        self.cmb_spr_iso.currentTextChanged.connect(self.run_spr_analysis)
+        self.cmb_spr_iso.currentTextChanged.connect(self._on_spr_iso_changed)
         grid_det.addWidget(QLabel("Select Channel:"), 0, 0)
         grid_det.addWidget(self.cmb_spr_iso, 0, 1)
         
@@ -1691,24 +1756,123 @@ class ioliteOptimiser(QWidget):
         grid_det.addWidget(QLabel("Peak Cutoff:"), 1, 0)
         grid_det.addLayout(l_prom, 1, 1)
         
-        self.spin_spr_dist = QSpinBox()
-        self.spin_spr_dist.setRange(1, 100000)
-        self.spin_spr_dist.setValue(self.persistent_settings.get('spr_min_distance', 10))
-        self.spin_spr_dist.setSuffix(" data pts.")
-        self.spin_spr_dist.setToolTip("Minimum distance between peaks. Prevents detecting multiple points on the same peak.")
+        self.spin_spr_dist = QDoubleSpinBox()
+        self.spin_spr_dist.setRange(0.0001, 100000)
+        self.spin_spr_dist.setDecimals(4)
+        self.spin_spr_dist.setValue(float(self.persistent_settings.get('spr_min_distance', 0.1)))
+        self.spin_spr_dist.setToolTip("Minimum distance between peaks in time. Prevents detecting multiple points on the same peak.")
         self.spin_spr_dist.valueChanged.connect(self._on_spr_dist_changed)
         self.spin_spr_dist.valueChanged.connect(self.save_persistent_settings)
         grid_det.addWidget(QLabel("Min. Distance:"), 2, 0)
         grid_det.addWidget(self.spin_spr_dist, 2, 1)
         
+        self.spin_spr_baseline_window = QDoubleSpinBox()
+        self.spin_spr_baseline_window.setRange(0, 100000)
+        self.spin_spr_baseline_window.setDecimals(4)
+        self.spin_spr_baseline_window.setValue(float(self.persistent_settings.get('spr_baseline_window', 1000.0)))
+        self.spin_spr_baseline_window.setToolTip("Restricts how far the algorithm looks for a baseline minimum in time (0=Inf).")
+        self.spin_spr_baseline_window.valueChanged.connect(self._run_spr_analysis_forced)
+        self.spin_spr_baseline_window.valueChanged.connect(self.save_persistent_settings)
+        
+        lbl_baseline_window = QLabel("Baseline Window:")
+        grid_det.addWidget(lbl_baseline_window, 3, 0)
+        grid_det.addWidget(self.spin_spr_baseline_window, 3, 1)
+        
+        # Hide the baseline controls per user request, but keep the logic
+        lbl_baseline_window.hide()
+        self.spin_spr_baseline_window.hide()
+
+        l_smooth = QHBoxLayout()
+        l_smooth.setContentsMargins(0, 0, 0, 0)
+        
+        self.chk_spr_smooth = QCheckBox("Apply Smoothing")
+        self.chk_spr_smooth.setChecked(self.persistent_settings.get('spr_apply_smooth', False))
+        self.chk_spr_smooth.toggled.connect(self._run_spr_analysis_forced)
+        self.chk_spr_smooth.toggled.connect(self.save_persistent_settings)
+        l_smooth.addWidget(self.chk_spr_smooth)
+
+        self.spin_spr_smooth_window = QDoubleSpinBox()
+        self.spin_spr_smooth_window.setRange(0.0001, 100)
+        self.spin_spr_smooth_window.setDecimals(4)
+        self.spin_spr_smooth_window.setValue(float(self.persistent_settings.get('spr_smooth_window', 0.05)))
+        self.spin_spr_smooth_window.setToolTip("Window size in time for the median filter to smooth out deep noise valleys.")
+        self.spin_spr_smooth_window.valueChanged.connect(self._run_spr_analysis_forced)
+        self.spin_spr_smooth_window.valueChanged.connect(self.save_persistent_settings)
+        self.spin_spr_smooth_window.setEnabled(self.chk_spr_smooth.isChecked())
+        self.chk_spr_smooth.toggled.connect(self.spin_spr_smooth_window.setEnabled)
+        l_smooth.addWidget(self.spin_spr_smooth_window)
+
+        lbl_baseline_smoothing = QLabel("Baseline Smoothing:")
+        grid_det.addWidget(lbl_baseline_smoothing, 4, 0)
+        grid_det.addLayout(l_smooth, 4, 1)
+        
+        # Hide the smoothing controls per user request
+        lbl_baseline_smoothing.hide()
+        self.chk_spr_smooth.hide()
+        self.spin_spr_smooth_window.hide()
+        
         self.cmb_spr_unit = QComboBox()
         self.cmb_spr_unit.addItems(["Seconds (s)", "Milliseconds (ms)"])
         # Load selection or default to ms
         self.cmb_spr_unit.setCurrentText(self.persistent_settings.get('spr_time_unit', "Milliseconds (ms)"))
-        self.cmb_spr_unit.currentTextChanged.connect(self.run_spr_analysis)
+        self.cmb_spr_unit.currentTextChanged.connect(self._update_spr_time_suffixes)
+        self.cmb_spr_unit.currentTextChanged.connect(self._run_spr_analysis_forced)
         self.cmb_spr_unit.currentTextChanged.connect(self.save_persistent_settings)
-        grid_det.addWidget(QLabel("Time Unit:"), 3, 0)
-        grid_det.addWidget(self.cmb_spr_unit, 3, 1)
+        grid_det.addWidget(QLabel("Time Unit:"), 5, 0)
+        
+        self._update_spr_time_suffixes()  # Run once to set suffixes and decimals initially
+        grid_det.addWidget(self.cmb_spr_unit, 5, 1)
+        
+        # Row 6: Background sub
+        grid_det.addWidget(QLabel("Subtract Background:"), 6, 0)
+        self.chk_spr_bg_sub = QCheckBox("")
+        self.chk_spr_bg_sub.setChecked(self.persistent_settings.get('spr_bg_sub', True))
+        self.chk_spr_bg_sub.toggled.connect(self._run_spr_analysis_forced)
+        self.chk_spr_bg_sub.toggled.connect(self.save_persistent_settings)
+        
+        self.chk_spr_auto_bg = QCheckBox("Auto Select Region")
+        # Default Auto to True
+        self.chk_spr_auto_bg.setChecked(self.persistent_settings.get('spr_auto_bg', True))
+        self.chk_spr_auto_bg.toggled.connect(self._on_spr_auto_bg_toggled)
+        self.chk_spr_auto_bg.toggled.connect(self.save_persistent_settings)
+        
+        self.spin_spr_bg_start = QDoubleSpinBox()
+        self.spin_spr_bg_start.setRange(0, 10000)
+        self.spin_spr_bg_start.setDecimals(2)
+        self.spin_spr_bg_start.setFixedWidth(60)
+        self.spin_spr_bg_start.setValue(float(self.persistent_settings.get('spr_bg_start', 2.0)))
+        self.spin_spr_bg_start.valueChanged.connect(self._on_spr_bg_changed)
+        
+        self.spin_spr_bg_end = QDoubleSpinBox()
+        self.spin_spr_bg_end.setRange(0, 10000)
+        self.spin_spr_bg_end.setDecimals(2)
+        self.spin_spr_bg_end.setFixedWidth(60)
+        self.spin_spr_bg_end.setValue(float(self.persistent_settings.get('spr_bg_end', 8.0)))
+        self.spin_spr_bg_end.valueChanged.connect(self._on_spr_bg_changed)
+        
+        # We don't need enable logic, we just use visibility logic (in the right panel setup)
+        
+        grid_det.addWidget(self.chk_spr_bg_sub, 6, 1)
+        
+        h_excl = QHBoxLayout()
+        h_excl.setContentsMargins(0, 0, 0, 0)
+        
+        self.chk_spr_auto_exclude = QCheckBox("Auto-Exclude Wide Outliers (Percentile >)")
+        self.chk_spr_auto_exclude.setChecked(False)
+        self.chk_spr_auto_exclude.toggled.connect(self._on_spr_auto_exclude_toggled)
+        
+        self.spin_spr_auto_exclude_pct = QDoubleSpinBox()
+        self.spin_spr_auto_exclude_pct.setRange(50.0, 99.9)
+        self.spin_spr_auto_exclude_pct.setDecimals(1)
+        self.spin_spr_auto_exclude_pct.setValue(90.0)
+        self.spin_spr_auto_exclude_pct.setSingleStep(1.0)
+        self.spin_spr_auto_exclude_pct.setSuffix(" %")
+        self.spin_spr_auto_exclude_pct.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.spin_spr_auto_exclude_pct.valueChanged.connect(self._on_spr_auto_exclude_pct_changed)
+        
+        h_excl.addWidget(self.chk_spr_auto_exclude)
+        h_excl.addWidget(self.spin_spr_auto_exclude_pct)
+        grid_det.addLayout(h_excl, 3, 0, 1, 2)
         
         v_det.addLayout(grid_det)
         grp_det.setLayout(v_det)
@@ -1987,10 +2151,10 @@ class ioliteOptimiser(QWidget):
         h_btns_max.addWidget(self.btn_apply_max_val)
         l_max.addLayout(h_btns_max)
         
-        self.btn_all_channel_stats = QPushButton("All Channel Stats")
-        self.btn_all_channel_stats.setFixedHeight(30)
-        self.btn_all_channel_stats.clicked.connect(self._on_all_channel_stats_clicked)
-        l_max.addWidget(self.btn_all_channel_stats)
+        self.chk_spr_show_all_stats = QCheckBox("Show All Channel Stats")
+        self.chk_spr_show_all_stats.setChecked(False)
+        self.chk_spr_show_all_stats.toggled.connect(self._on_spr_show_all_stats_toggled)
+        l_max.addWidget(self.chk_spr_show_all_stats)
         
         self.grp_spr_max.setLayout(l_max)
         l_settings.addWidget(self.grp_spr_max)
@@ -2022,6 +2186,26 @@ class ioliteOptimiser(QWidget):
         h_ctrl_spr.addWidget(self.chk_rescale_spr)
         h_ctrl_spr.addStretch()
         
+        h_ctrl_spr.addWidget(self.chk_spr_auto_bg)
+        self.lbl_bg_prefix = QLabel("Background (s):")
+        h_ctrl_spr.addWidget(self.lbl_bg_prefix)
+        h_ctrl_spr.addWidget(self.spin_spr_bg_start)
+        self.lbl_bg_to = QLabel("to")
+        h_ctrl_spr.addWidget(self.lbl_bg_to)
+        h_ctrl_spr.addWidget(self.spin_spr_bg_end)
+        h_ctrl_spr.addSpacing(10)
+        
+        def _toggle_bg_layout_vis(visible):
+            self.chk_spr_auto_bg.setVisible(visible)
+            self.lbl_bg_prefix.setVisible(visible)
+            self.spin_spr_bg_start.setVisible(visible)
+            self.lbl_bg_to.setVisible(visible)
+            self.spin_spr_bg_end.setVisible(visible)
+            
+        self.chk_spr_bg_sub.toggled.connect(_toggle_bg_layout_vis)
+        # Init
+        _toggle_bg_layout_vis(self.chk_spr_bg_sub.isChecked())
+        
         # Hide Summary Stats Checkbox (Right Aligned)
         self.chk_hide_stats = QCheckBox("Hide Summary Stats")
         self.chk_hide_stats.setChecked(False)
@@ -2045,13 +2229,28 @@ class ioliteOptimiser(QWidget):
         self.lbl_spr_table_title.setAlignment(Qt.AlignCenter)
         right_layout.addWidget(self.lbl_spr_table_title)
         
+        self.spr_table_stack = QStackedWidget()
+        
         self.spr_table = CopyableTableWidget()
         self.spr_table.setColumnCount(7)
         self.spr_table.setHorizontalHeaderLabels(["Peak", "Time (s)", "FW0.1M (10 %) (s)", "FW0.1M (10 %) Area", "FW0.01M (1 %) (s)", "FW0.01M (1 %) Area", "Max Intensity"])
         self.spr_table.verticalHeader().setVisible(False)
         self.spr_table.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
         self.spr_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        right_layout.addWidget(self.spr_table, 1)
+        self.spr_table_stack.addWidget(self.spr_table)
+        
+        self.spr_all_stats_table = CopyableTableWidget()
+        self.spr_all_stats_table.setColumnCount(11)
+        self.spr_all_stats_table.setHorizontalHeaderLabels([
+            "Channel", "Avg (10%)", "Max (10%)", "Comp (10%)", "RSD (10%)", "Area 10% (Avg)", 
+            "Avg (1%)", "Max (1%)", "Comp (1%)", "RSD (1%)", "Area 1% (Avg)"
+        ])
+        self.spr_all_stats_table.verticalHeader().setVisible(False)
+        self.spr_all_stats_table.horizontalHeader().setDefaultAlignment(Qt.AlignCenter)
+        self.spr_all_stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.spr_table_stack.addWidget(self.spr_all_stats_table)
+        
+        right_layout.addWidget(self.spr_table_stack, 1)
         
         main_layout.addLayout(left_layout)
         main_layout.addLayout(right_layout)
@@ -2060,8 +2259,19 @@ class ioliteOptimiser(QWidget):
         # Exclusion tracking
         self.spr_excluded_peaks = {} # isotope -> set of peak indices
         self.spr_peak_label_map = {} # artist -> peak index
+        
+        # Caching & Per-Channel States
+        self.spr_channel_prominence = {} # isotope -> user's preferred prominence
+        self.spr_channel_auto_prom = {} # isotope -> whether it uses auto prominence
+        self.spr_auto_exclude = False
+        self.spr_auto_exclude_pct = 90.0
+        self.spr_all_raw_results = {} # isotope -> cached raw_results df
+        self.spr_all_raw_results = {} # isotope -> cached raw_results df
 
-    def run_spr_analysis(self, *args, rescale=None):
+    def _run_spr_analysis_forced(self, *args, **kwargs):
+        self.run_spr_analysis(force_refresh=True)
+
+    def run_spr_analysis(self, *args, rescale=None, **kwargs):
         if self.spr_df is None or find_peaks is None:
             return
         
@@ -2076,10 +2286,18 @@ class ioliteOptimiser(QWidget):
         if self._get(self.chk_spr_auto_prom, 'isChecked'):
             self._auto_detect_spr_prominence()
             
+        # Auto-detect background if enabled
+        if self._get(getattr(self, 'chk_spr_auto_bg', None), 'isChecked'):
+            self._auto_detect_spr_bg()
+            
         iso = self._get(self.cmb_spr_iso, 'currentText')
         prominence = self._get(self.spin_spr_prom, 'value')
         unit_text = self._get(self.cmb_spr_unit, 'currentText')
         distance = self._get(self.spin_spr_dist, 'value')
+        wlen_val = self._get(self.spin_spr_baseline_window, 'value')
+        wlen = None if wlen_val == 0 else wlen_val
+        apply_smoothing = self._get(self.chk_spr_smooth, 'isChecked')
+        smooth_window = self._get(self.spin_spr_smooth_window, 'value')
         
         if iso is None or prominence is None or unit_text is None:
             return
@@ -2097,9 +2315,31 @@ class ioliteOptimiser(QWidget):
         unit_label = "ms" if is_ms else "s"
         prec = 2 if is_ms else 4
 
+        # Convert ui values to Seconds since analyse_washout_peaks requires seconds
+        distance_s = distance / mult
+        wlen_s = wlen / mult if wlen is not None else None
+        smooth_window_s = smooth_window / mult
+
+        bg_sub = self._get(self.chk_spr_bg_sub, 'isChecked')
+        bg_start_s = self._get(self.spin_spr_bg_start, 'value')
+        bg_end_s = self._get(self.spin_spr_bg_end, 'value')
+
         # 1. Detect All Peaks (Cache or find new)
-        # For simplicity we re-detect if prominence/distance changed, but we keep results_df for toggling
-        raw_result = Logic.analyse_washout_peaks(self.spr_df, iso, prominence, min_distance=distance, is_cps=is_cps)
+        # We now run the global update first which caches raw dataframe results for all channels
+        # If force_refresh is passed, we wipe the cache first to ensure new percentiles are calculated
+        force_refresh = kwargs.get('force_refresh', False)
+        if force_refresh and hasattr(self, 'spr_all_raw_results'):
+            self.spr_all_raw_results.clear()
+            
+        if not getattr(self, '_is_updating_all', False) and (force_refresh or not hasattr(self, 'spr_all_raw_results') or not self.spr_all_raw_results):
+            self._is_updating_all = True
+            self._update_all_channel_stats()
+            self._is_updating_all = False
+            
+        if hasattr(self, 'spr_all_raw_results') and iso in self.spr_all_raw_results:
+             raw_result = self.spr_all_raw_results[iso]
+        else:
+             raw_result = (None, {"Error": "Channel data not available in cache."})
         
         if isinstance(raw_result, tuple):
              # Handle Error or Empty Count return (df, dict)
@@ -2115,7 +2355,19 @@ class ioliteOptimiser(QWidget):
              if iso not in self.spr_excluded_peaks:
                  self.spr_excluded_peaks[iso] = set()
                  
-             excluded = self.spr_excluded_peaks[iso]
+             excluded = self.spr_excluded_peaks[iso].copy()
+             
+             # Auto-exclusion filter
+             auto_excl = getattr(self, 'spr_auto_exclude', False)
+             if auto_excl and len(self.spr_raw_results_df) > 5:
+                 pct_val = getattr(self, 'spr_auto_exclude_pct', 90.0)
+                 df_temp = self.spr_raw_results_df
+                 fw = df_temp['r001'] - df_temp['l001']
+                 fw_p_upper = np.percentile(fw, pct_val)
+                 
+                 outliers = df_temp[fw > fw_p_upper]['Peak Index'].values
+                 excluded.update(outliers)
+                 
              filtered_df = self.spr_raw_results_df[~self.spr_raw_results_df['Peak Index'].isin(excluded)]
                  
              # 3. Summarize
@@ -2286,9 +2538,28 @@ class ioliteOptimiser(QWidget):
         # Get theme-aware foreground color
         fg_col = plt.rcParams['axes.labelcolor']
 
+        # --- BACKGROUND SUBTRACTION FOR PLOT ---
+        y_plot = self.spr_df[iso].values.copy()
+        if bg_sub:
+            bg_mask = (t_zeroed >= bg_start_s) & (t_zeroed <= bg_end_s)
+            if bg_mask.any():
+                bg_mean = np.mean(y_plot[bg_mask])
+                y_plot = np.clip(y_plot - bg_mean, 0, None)
+            
+            if hasattr(self, 'cached_is_dark'):
+                is_dark = self.cached_is_dark
+            else:
+                is_dark = plt.rcParams['axes.facecolor'] not in ['white', '#ffffff', 'w']
+            bg_col = '#808080' if is_dark else '#9e9e9e' # Slate/Medium Grey (more visible)
+            v_alpha = 0.35 if is_dark else 0.25
+
+            self.spr_bg_span = ax.axvspan(bg_start_s, bg_end_s, color=bg_col, alpha=v_alpha, lw=0)
+        else:
+            self.spr_bg_span = None
+
         # Plot individual channel (Always seconds X)
         # Uses first color from palette (now Purple)
-        line, = ax.plot(t_zeroed, self.spr_df[iso], lw=1.5, alpha=0.9, label=iso)
+        line, = ax.plot(t_zeroed, y_plot, lw=1.5, alpha=0.9, label=iso)
         
         # Peak Index Labels (Always seconds X)
         self.spr_peak_label_map = {}
@@ -2333,7 +2604,7 @@ class ioliteOptimiser(QWidget):
             
         # Composite Peak Plotting
         if show_composite and self.spr_ax_comp:
-            comp_df = Logic.generate_composite_peak(self.spr_df, iso, filtered_df)
+            comp_df = Logic.generate_composite_peak(self.spr_df, iso, filtered_df, bg_sub=bg_sub, bg_start_s=bg_start_s, bg_end_s=bg_end_s)
             if comp_df is not None:
                 # Use the anchor color (Index 0 of safe_palette)
                 # Switch to ms for X-axis readability (User Request)
@@ -2550,21 +2821,94 @@ class ioliteOptimiser(QWidget):
             # This prevents picking up noise spikes as valid peaks
             auto_val = max(y_range * 0.1, 10 * bg_std)
             
-            # Round to integer for UI readability (User Request)
             auto_val = round(auto_val, 0)
                 
             self._block_signals(self.spin_spr_prom, True)
             self.spin_spr_prom.setValue(auto_val)
             self._block_signals(self.spin_spr_prom, False)
+            
+            # Save the auto-detected baseline so it is respected as a default by the global table
+            self.spr_channel_prominence[iso] = auto_val
         except Exception as e:
             # IoLog.error(f"iolite Optimiser: Error in auto-prominence detection: {e}")
             pass
 
-    def _on_spr_prom_changed(self):
+    def _auto_detect_spr_bg(self, iso=None):
+        if self.spr_df is None: return
+        t_orig = self.spr_df['Time'].values
+        if len(t_orig) == 0: return
+        t0 = t_orig[0]
+        
+        try:
+            (bg_s, bg_e), _ = Logic.auto_detect_regions(self.spr_df)
+            bg_s_rel = max(0.0, float(bg_s - t0))
+            bg_e_rel = max(0.0, float(bg_e - t0))
+            self._block_signals(self.spin_spr_bg_start, True)
+            self._block_signals(self.spin_spr_bg_end, True)
+            self.spin_spr_bg_start.setValue(bg_s_rel)
+            self.spin_spr_bg_end.setValue(bg_e_rel)
+            self._block_signals(self.spin_spr_bg_start, False)
+            self._block_signals(self.spin_spr_bg_end, False)
+        except:
+            pass
+
+    def _on_spr_bg_changed(self):
+        # 1. Turn off Auto if manually adjusted
+        if self._get(self.chk_spr_auto_bg, 'isChecked'):
+            self._block_signals(self.chk_spr_auto_bg, True)
+            self.chk_spr_auto_bg.setChecked(False)
+            self._block_signals(self.chk_spr_auto_bg, False)
+        # 2. Debounce visual update
+        self.spr_debounce_timer.start(300)
+
+    def _on_spr_auto_bg_toggled(self, checked):
+        if checked:
+            self._auto_detect_spr_bg()
+            self.run_spr_analysis(force_refresh=True)
+
+    def _on_spr_iso_changed(self, text):
+        if not text: return
+        
+        # Restore Auto Prominence state (default to True if not seen before)
+        is_auto = True
+        if hasattr(self, 'spr_channel_auto_prom') and text in self.spr_channel_auto_prom:
+             is_auto = self.spr_channel_auto_prom[text]
+             
+        self._block_signals(self.chk_spr_auto_prom, True)
+        self.chk_spr_auto_prom.setChecked(is_auto)
+        self._block_signals(self.chk_spr_auto_prom, False)
+        
+        # Restore Auto-Exclude state
+        self._block_signals(self.chk_spr_auto_exclude, True)
+        self.chk_spr_auto_exclude.setChecked(getattr(self, 'spr_auto_exclude', False))
+        self._block_signals(self.chk_spr_auto_exclude, False)
+        
+        # Restore Auto-Exclude Pct
+        self._block_signals(self.spin_spr_auto_exclude_pct, True)
+        self.spin_spr_auto_exclude_pct.setValue(getattr(self, 'spr_auto_exclude_pct', 90.0))
+        self._block_signals(self.spin_spr_auto_exclude_pct, False)
+        
+        # Restore custom channel prominence if we're not in Auto
+        if not is_auto and hasattr(self, 'spr_channel_prominence') and text in self.spr_channel_prominence:
+             self._block_signals(self.spin_spr_prom, True)
+             self.spin_spr_prom.setValue(self.spr_channel_prominence[text])
+             self._block_signals(self.spin_spr_prom, False)
+        elif is_auto:
+             self._auto_detect_spr_prominence(text)
+             
+        self.run_spr_analysis()
+
+    def _on_spr_prom_changed(self, *args):
         """
         Called when SPR peak cutoff (prominence) is manually adjusted.
         Auto-deselects the 'Auto' checkbox and applies 300ms debouncing.
         """
+        # Save custom prominence for this channel
+        curr_iso = self._get(self.cmb_spr_iso, 'currentText')
+        if curr_iso and hasattr(self, 'spr_channel_prominence'):
+             self.spr_channel_prominence[curr_iso] = self.spin_spr_prom.value()
+             self.spr_channel_auto_prom[curr_iso] = False
+             
         # 1. Uncheck the Auto box if it's currently checked
         if self._get(self.chk_spr_auto_prom, 'isChecked'):
             self._block_signals(self.chk_spr_auto_prom, True)
@@ -2577,7 +2921,7 @@ class ioliteOptimiser(QWidget):
         # This prevents the plot from flickering/re-calculating on every digit entered
         self.spr_debounce_timer.start(500)
 
-    def _on_spr_dist_changed(self):
+    def _on_spr_dist_changed(self, *args):
         """
         Called when SPR Min Distance is manually adjusted.
         Applies 500ms debouncing.
@@ -2587,8 +2931,22 @@ class ioliteOptimiser(QWidget):
 
     def _on_spr_auto_prom_toggled(self, checked):
         # Removed: self.spin_spr_prom.setEnabled(not checked)
+        curr_iso = self._get(self.cmb_spr_iso, 'currentText')
+        if curr_iso and hasattr(self, 'spr_channel_auto_prom'):
+             self.spr_channel_auto_prom[curr_iso] = checked
+             
         if checked:
-            self.run_spr_analysis()
+            self.run_spr_analysis(force_refresh=True)
+
+    def _on_spr_auto_exclude_toggled(self, checked):
+        self.spr_auto_exclude = checked
+        self.run_spr_analysis(force_refresh=True)
+        
+    def _on_spr_auto_exclude_pct_changed(self, *args):
+        self.spr_auto_exclude_pct = self._get(self.spin_spr_auto_exclude_pct, 'value')
+        
+        # Wait for the user to finish typing 
+        self.spr_debounce_timer.start(500)
 
     def _on_stats_toggled(self, checked):
         # Toggle visibility without re-running analysis (Preserves Zoom)
@@ -2599,6 +2957,22 @@ class ioliteOptimiser(QWidget):
                 self.spr_canvas.draw_idle()
             else:
                 self.spr_canvas.draw()
+
+    def _update_spr_time_suffixes(self, *args):
+        unit_text = self._get(self.cmb_spr_unit, 'currentText')
+        if unit_text is None: return
+        is_ms = "ms" in unit_text
+        suffix = " ms" if is_ms else " s"
+        decimals = 2 if is_ms else 4
+        
+        self.spin_spr_dist.setSuffix(suffix)
+        self.spin_spr_dist.setDecimals(decimals)
+        
+        self.spin_spr_baseline_window.setSuffix(f'{suffix} (0=Inf)')
+        self.spin_spr_baseline_window.setDecimals(decimals)
+        
+        self.spin_spr_smooth_window.setSuffix(suffix)
+        self.spin_spr_smooth_window.setDecimals(decimals)
 
     def _on_spr_apply_clicked(self, mode):
         # mode can be '10avg', '10max', '10comp', '1avg', '1max', '1comp'
@@ -2615,35 +2989,76 @@ class ioliteOptimiser(QWidget):
         self.tabs.setCurrentIndex(1) # Switch back to Optimiser
         IoLog.information(f"iolite Optimiser: Applied {mode} washout value: {val_ms:.2f} ms")
 
-    def _on_all_channel_stats_clicked(self):
-        if self.spr_df is None or find_peaks is None:
-            QMessageBox.warning(self, "No Data", "Please reload data from iolite first.")
-            return
+    def _on_spr_show_all_stats_toggled(self, checked):
+        if checked:
+            self.spr_table_stack.setCurrentIndex(1)
+            self.lbl_spr_table_title.setText("All Channel Stats")
+        else:
+            self.spr_table_stack.setCurrentIndex(0)
+            num_detected = len(getattr(self, 'spr_raw_results_df', []))
+            num_excluded = len(getattr(self, 'spr_excluded_peaks', {}).get(self._get(self.cmb_spr_iso, 'currentText'), []))
+            self.lbl_spr_table_title.setText(f"SPR Peaks Detected - {num_detected} | SPR Peaks Excluded - {num_excluded}")
+            
 
-        # Disable button during scan
-        self.btn_all_channel_stats.setEnabled(False)
-        self.btn_all_channel_stats.setText("Scanning All Channels...")
-        QApplication.processEvents() # Ensure UI updates
+    def _update_all_channel_stats(self):
+        if getattr(self, 'spr_df', None) is None or find_peaks is None:
+            return
 
         try:
             # 1. Get current detection settings
-            prominence = self._get(self.spin_spr_prom, 'value')
+            ui_prominence = self._get(self.spin_spr_prom, 'value')
             distance = self._get(self.spin_spr_dist, 'value')
+            wlen_val = self._get(self.spin_spr_baseline_window, 'value')
+            wlen = None if wlen_val == 0 else wlen_val
+            apply_smoothing = self._get(self.chk_spr_smooth, 'isChecked')
+            smooth_window = self._get(self.spin_spr_smooth_window, 'value')
             unit_text = self._get(self.cmb_spr_unit, 'currentText')
             is_ms = "ms" in unit_text
             mult = 1000.0 if is_ms else 1.0
             unit_label = "ms" if is_ms else "s"
+            
+            bg_sub = self._get(self.chk_spr_bg_sub, 'isChecked')
+            bg_start_s = self._get(self.spin_spr_bg_start, 'value')
+            bg_end_s = self._get(self.spin_spr_bg_end, 'value')
 
             winning_iso = None
             max_fw1 = -1.0
             winning_stats = None
+            
+            table_rows = []
 
             # 2. Iterate through all channels in the combo boxes
             all_isos = [self.cmb_spr_iso.itemText(i) for i in range(self.cmb_spr_iso.count)]
+            current_ui_iso = self._get(self.cmb_spr_iso, 'currentText')
             
             for iso in all_isos:
                 if not iso or iso not in self.spr_df.columns:
                     continue
+                    
+                # Calculate optimal prominence for this channel
+                is_auto_prom = getattr(self, 'spr_channel_auto_prom', {}).get(iso, True)
+                
+                if iso == current_ui_iso:
+                    # Use the UI overridden value for the currently viewed channel
+                    prominence = ui_prominence
+                elif not is_auto_prom and hasattr(self, 'spr_channel_prominence') and iso in self.spr_channel_prominence:
+                    # Use the stored manual value for other channels
+                    prominence = self.spr_channel_prominence[iso]
+                else:
+                    y = self.spr_df[iso].values
+                    if len(y) < 2:
+                        prominence = 100
+                    else:
+                        init_window = max(10, int(len(y) * 0.05))
+                        bg_est = y[:init_window]
+                        bg_mean = np.nanmean(bg_est)
+                        bg_std = np.nanstd(bg_est) if len(bg_est) > 1 else 0
+                        y_max = np.nanmax(y)
+                        y_range = y_max - bg_mean
+                        prominence = max(y_range * 0.1, 10 * bg_std)
+                        prominence = round(prominence, 0)
+                        if hasattr(self, 'spr_channel_prominence'):
+                            self.spr_channel_prominence[iso] = prominence
 
                 # Detect CPS status for this channel
                 is_cps = True
@@ -2652,21 +3067,48 @@ class ioliteOptimiser(QWidget):
                 elif getattr(self, 'cached_unit_label', "Counts") == "Counts":
                     is_cps = False
 
-                # Run analysis (Ignore runtime exclusions for global scan)
-                raw_result = Logic.analyse_washout_peaks(self.spr_df, iso, prominence, min_distance=distance, is_cps=is_cps)
+                distance_s = distance / mult
+                wlen_s = wlen / mult if wlen is not None else None
+                smooth_window_s = smooth_window / mult
+
+                raw_result = Logic.analyse_washout_peaks(
+                    self.spr_df, iso, prominence, min_distance=distance_s, is_cps=is_cps,
+                    wlen=wlen_s, apply_smoothing=apply_smoothing, smooth_window=smooth_window_s,
+                    bg_sub=bg_sub, bg_start_s=bg_start_s, bg_end_s=bg_end_s
+                )
                 
                 if isinstance(raw_result, tuple):
-                    # Error or no peaks
+                    table_rows.append((iso, {'Count': 0}))
+                    if hasattr(self, 'spr_all_raw_results'):
+                        self.spr_all_raw_results[iso] = raw_result
                     continue
                 
-                # Summarize ALL detected peaks (no exclusions for this automated scan)
-                stats = Logic.summarize_peaks(raw_result)
+                if hasattr(self, 'spr_all_raw_results'):
+                     self.spr_all_raw_results[iso] = raw_result
+                     
+                df = raw_result
+                excluded = getattr(self, 'spr_excluded_peaks', {}).get(iso, set()).copy()
+                
+                # Auto-exclusion filter
+                auto_excl = getattr(self, 'spr_auto_exclude', False)
+                if auto_excl and len(df) > 5:
+                    pct_val = getattr(self, 'spr_auto_exclude_pct', 90.0)
+                    fw = df['r001'] - df['l001']
+                    fw_p_upper = np.percentile(fw, pct_val)
+                    
+                    outliers = df[fw > fw_p_upper]['Peak Index'].values
+                    excluded.update(outliers)
+                
+                if excluded:
+                     df = df[~df['Peak Index'].isin(excluded)]
+                
+                stats = Logic.summarize_peaks(df)
                 
                 if "Error" in stats or stats.get("Count", 0) == 0:
+                    table_rows.append((iso, {'Count': 0}))
                     continue
 
-                # Generate composite to get composite width
-                comp_df = Logic.generate_composite_peak(self.spr_df, iso, raw_result)
+                comp_df = Logic.generate_composite_peak(self.spr_df, iso, df, bg_sub=bg_sub, bg_start_s=bg_start_s, bg_end_s=bg_end_s)
                 comp_width_1 = 0.0
                 comp_width_10 = 0.0
                 if comp_df is not None:
@@ -2681,29 +3123,30 @@ class ioliteOptimiser(QWidget):
                             if lvl == 0.01: comp_width_1 = t_r - t_l
                             else: comp_width_10 = t_r - t_l
 
-                # Compare: Winning criteria is FW0.01M Mean (worst washout)
-                # (User request: Max SPR seen across all channels)
-                current_fw1 = stats['FW0.01M Mean']
+                stats['FW0.01M Comp'] = comp_width_1
+                stats['FW0.1M Comp'] = comp_width_10
+                
+                table_rows.append((iso, stats))
+
+                current_fw1 = stats['FW0.01M Max']
                 if current_fw1 > max_fw1:
                     max_fw1 = current_fw1
                     winning_iso = iso
-                    stats['FW0.01M Comp'] = comp_width_1
-                    stats['FW0.1M Comp'] = comp_width_10
                     winning_stats = stats
 
-            # 3. Update UI with results
+            # 3. Update UI
+            
+            def _adap(v):
+                if v >= 100: return f"{v:.0f}"
+                if v >= 10:  return f"{v:.1f}"
+                if v >= 1:   return f"{v:.2f}"
+                return f"{v:.3f}"
+                
             if winning_iso:
                 self.lbl_spr_max_iso.setText(f"Channel: <b>{winning_iso}</b>")
                 
-                # Shared formatting helper
                 def _fmt(val_s):
                     return f"<b>{_adap(val_s * mult)}</b> {unit_label}"
-                
-                def _adap(v): # Inner copy of adaptive rounding
-                    if v >= 100: return f"{v:.0f}"
-                    if v >= 10:  return f"{v:.1f}"
-                    if v >= 1:   return f"{v:.2f}"
-                    return f"{v:.3f}"
 
                 self.lbl_spr_max_avg10.setText(_fmt(winning_stats['FW0.1M Mean']))
                 self.lbl_spr_max_avg1.setText(_fmt(winning_stats['FW0.01M Mean']))
@@ -2712,7 +3155,6 @@ class ioliteOptimiser(QWidget):
                 self.lbl_spr_max_comp10.setText(_fmt(winning_stats['FW0.1M Comp']))
                 self.lbl_spr_max_comp1.setText(_fmt(winning_stats['FW0.01M Comp']))
                 
-                # Store for Apply logic (Always MS, rounded)
                 def _rnd(v_s):
                     v_ms = v_s * 1000.0
                     if v_ms >= 100: return round(v_ms, 0)
@@ -2724,18 +3166,57 @@ class ioliteOptimiser(QWidget):
                     'max': _rnd(winning_stats['FW0.01M Max']),
                     'comp': _rnd(winning_stats['FW0.01M Comp'])
                 }
-                IoLog.information(f"iolite Optimiser: All-Channel Scan complete. Max SPR: {winning_iso} ({max_fw1*1000:.1f} ms)")
             else:
                 self.lbl_spr_max_iso.setText("Channel: None Detected")
-                QMessageBox.information(self, "No Peaks", "No valid peaks were found in any channel with current settings.")
+                self.lbl_spr_max_avg10.setText("-")
+                self.lbl_spr_max_avg1.setText("-")
+                self.lbl_spr_max_max10.setText("-")
+                self.lbl_spr_max_max1.setText("-")
+                self.lbl_spr_max_comp10.setText("-")
+                self.lbl_spr_max_comp1.setText("-")
+                if hasattr(self, '_max_spr_winners'):
+                    del self._max_spr_winners
+                    
+            # 4. Populate spr_all_stats_table
+            def _it(text):
+                item = QTableWidgetItem(text)
+                item.setFlags(item.flags() & ~Qt.ItemIsEditable)
+                item.setTextAlignment(Qt.AlignCenter)
+                return item
+                
+            def _si(val):
+                if val >= 1e9: return f"{val/1e9:.2f}", " G"
+                if val >= 1e6: return f"{val/1e6:.2f}", " M"
+                if val >= 1e3: return f"{val/1e3:.2f}", " k"
+                return f"{val:.2f}", " "
+
+            self.spr_all_stats_table.setRowCount(0)
+            self.spr_all_stats_table.setRowCount(len(table_rows))
+            
+            # ["Channel", "Avg (10%)", "Max (10%)", "Comp (10%)", "RSD (10%)", "Area 10% (Avg)", "Avg (1%)", "Max (1%)", "Comp (1%)", "RSD (1%)", "Area 1% (Avg)"]
+            for i, (iso, stats) in enumerate(table_rows):
+                self.spr_all_stats_table.setItem(i, 0, _it(iso))
+                if stats.get('Count', 0) == 0:
+                    for col in range(1, 11):
+                        self.spr_all_stats_table.setItem(i, col, _it("-"))
+                else:
+                    self.spr_all_stats_table.setItem(i, 1, _it(f"{_adap(stats.get('FW0.1M Mean', 0) * mult)}"))
+                    self.spr_all_stats_table.setItem(i, 2, _it(f"{_adap(stats.get('FW0.1M Max', 0) * mult)}"))
+                    self.spr_all_stats_table.setItem(i, 3, _it(f"{_adap(stats.get('FW0.1M Comp', 0) * mult)}"))
+                    self.spr_all_stats_table.setItem(i, 4, _it(f"{stats.get('FW0.1M RSD', 0):.1f} %"))
+                    s_a10, p_a10 = _si(stats.get('Area 10% Mean', 0.0))
+                    self.spr_all_stats_table.setItem(i, 5, _it(f"{s_a10}{p_a10}"))
+                    
+                    self.spr_all_stats_table.setItem(i, 6, _it(f"{_adap(stats.get('FW0.01M Mean', 0) * mult)}"))
+                    self.spr_all_stats_table.setItem(i, 7, _it(f"{_adap(stats.get('FW0.01M Max', 0) * mult)}"))
+                    self.spr_all_stats_table.setItem(i, 8, _it(f"{_adap(stats.get('FW0.01M Comp', 0) * mult)}"))
+                    self.spr_all_stats_table.setItem(i, 9, _it(f"{stats.get('FW0.01M RSD', 0):.1f} %"))
+                    s_a001, p_a001 = _si(stats.get('Area 1% Mean', 0.0))
+                    self.spr_all_stats_table.setItem(i, 10, _it(f"{s_a001}{p_a001}"))
 
         except Exception as e:
-            IoLog.error(f"iolite Optimiser: Error in All Channel Scan: {e}")
-            IoLog.error(traceback.format_exc())
-            QMessageBox.critical(self, "Scan Error", f"An error occurred during scanning:\n{e}")
-        finally:
-            self.btn_all_channel_stats.setEnabled(True)
-            self.btn_all_channel_stats.setText("All Channel Stats")
+            # IoLog.error(f"iolite Optimiser: Error in All Channel Stats update: {e}")
+            pass
 
     def _on_spr_apply_max_clicked(self, mode):
         # mode can be 'avg', 'max', 'comp' (applying the 1% values of the winning channel)
@@ -4193,6 +4674,9 @@ class ioliteOptimiser(QWidget):
                 'avoid_gaps': self._get(self.chk_avoid_gaps, 'isChecked') if hasattr(self, 'chk_avoid_gaps') else False,
                 'spr_time_unit': self._get(self.cmb_spr_unit, 'currentText'),
                 'spr_min_distance': self._get(self.spin_spr_dist, 'value'),
+                'spr_baseline_window': self._get(self.spin_spr_baseline_window, 'value'),
+                'spr_apply_smooth': self._get(self.chk_spr_smooth, 'isChecked'),
+                'spr_smooth_window': self._get(self.spin_spr_smooth_window, 'value'),
                 'opt_y_zoom': self._get(self.chk_y_zoom, 'isChecked'),
                 # 'opt_rescale_y': Ephemeral
                 'spr_y_zoom': self._get(self.chk_y_zoom_spr, 'isChecked'),
@@ -4723,8 +5207,10 @@ class ioliteOptimiser(QWidget):
             if not is_shift:
                 is_shift = str(getattr(event, 'key', '')).lower() in ('shift', 's')
             
-            # 1. Handle Region Edge Picking (Optimiser Plot Only)
-            if is_shift and event.canvas == getattr(self, 'canvas', None) and event.inaxes:
+            # 1. Handle Region Edge Picking (Opt and SPR Plots)
+            is_opt_canvas = event.canvas == getattr(self, 'canvas', None)
+            is_spr_canvas = event.canvas == getattr(self, 'spr_canvas', None)
+            if is_shift and (is_opt_canvas or is_spr_canvas) and event.inaxes:
                 if event.xdata is not None:
                     xlim = event.inaxes.get_xlim()
                     # Permissive threshold: 1% of plot width
@@ -4732,22 +5218,38 @@ class ioliteOptimiser(QWidget):
                     t_shift = getattr(self, 't_start', 0)
                     
                     found_edge = None
-                    if hasattr(self, 'bg_times') and self.bg_times:
-                        s_bg, e_bg = self.bg_times[0] - t_shift, self.bg_times[1] - t_shift
-                        if abs(event.xdata - s_bg) < threshold: found_edge = 'bg_start'
-                        elif abs(event.xdata - e_bg) < threshold: found_edge = 'bg_end'
-                        
-                    if not found_edge and hasattr(self, 'sig_times') and self.sig_times:
-                        s_sig, e_sig = self.sig_times[0] - t_shift, self.sig_times[1] - t_shift
-                        if abs(event.xdata - s_sig) < threshold: found_edge = 'sig_start'
-                        elif abs(event.xdata - e_sig) < threshold: found_edge = 'sig_end'
+                    if is_opt_canvas:
+                        if hasattr(self, 'bg_times') and self.bg_times:
+                            s_bg, e_bg = self.bg_times[0] - t_shift, self.bg_times[1] - t_shift
+                            if abs(event.xdata - s_bg) < threshold: found_edge = 'bg_start'
+                            elif abs(event.xdata - e_bg) < threshold: found_edge = 'bg_end'
+                            
+                        if not found_edge and hasattr(self, 'sig_times') and self.sig_times:
+                            s_sig, e_sig = self.sig_times[0] - t_shift, self.sig_times[1] - t_shift
+                            if abs(event.xdata - s_sig) < threshold: found_edge = 'sig_start'
+                            elif abs(event.xdata - e_sig) < threshold: found_edge = 'sig_end'
+                    elif is_spr_canvas:
+                        if self._get(getattr(self, 'chk_spr_bg_sub', None), 'isChecked'):
+                            s_bg = self._get(getattr(self, 'spin_spr_bg_start', None), 'value')
+                            e_bg = self._get(getattr(self, 'spin_spr_bg_end', None), 'value')
+                            if s_bg is not None and e_bg is not None:
+                                if abs(event.xdata - s_bg) < threshold: found_edge = 'spr_bg_start'
+                                elif abs(event.xdata - e_bg) < threshold: found_edge = 'spr_bg_end'
                         
                     if found_edge:
                         self.dragged_edge = found_edge
-                        if hasattr(self, 'chk_auto'):
-                            self._block_signals(self.chk_auto, True)
-                            self.chk_auto.setChecked(False)
-                            self._block_signals(self.chk_auto, False)
+                        if found_edge.startswith('spr_'):
+                            if hasattr(self, 'chk_spr_auto_bg'):
+                                self._block_signals(self.chk_spr_auto_bg, True)
+                                self.chk_spr_auto_bg.setChecked(False)
+                                self._block_signals(self.chk_spr_auto_bg, False)
+                                self.spin_spr_bg_start.setEnabled(True)
+                                self.spin_spr_bg_end.setEnabled(True)
+                        else:
+                            if hasattr(self, 'chk_auto'):
+                                self._block_signals(self.chk_auto, True)
+                                self.chk_auto.setChecked(False)
+                                self._block_signals(self.chk_auto, False)
                         return # Edge dragging takes precedence
             
             # 2. Initiate Panning (Standard or SPR) - STORE STARTING STATE
@@ -4783,6 +5285,10 @@ class ioliteOptimiser(QWidget):
             elif self.dragged_edge == 'sig_end':
                 sb = self.spin_sig_end
                 self.sig_times = (self.sig_times[0], val + t_shift)
+            elif self.dragged_edge == 'spr_bg_start':
+                sb = self.spin_spr_bg_start
+            elif self.dragged_edge == 'spr_bg_end':
+                sb = self.spin_spr_bg_end
                 
             if sb:
                 self._block_signals(sb, True)
@@ -4794,7 +5300,10 @@ class ioliteOptimiser(QWidget):
                 self._opt_axis_limits = (event.inaxes.get_xlim(), event.inaxes.get_ylim())
             
             # Update plot visuals ONLY (no optimization)
-            self.update_plot(preserve_zoom=True)
+            if self.dragged_edge.startswith('spr_'):
+                self.run_spr_analysis(rescale=False)
+            else:
+                self.update_plot(preserve_zoom=True)
             return
 
         # 2. Handle Panning (Fixed-reference for maximum stability)
@@ -4831,18 +5340,28 @@ class ioliteOptimiser(QWidget):
             except: pass
         is_shift = bool(mod & Qt.ShiftModifier) or str(getattr(event, 'key', '')).lower() in ('shift', 's')
                    
-        if is_shift and event.canvas == getattr(self, 'canvas', None) and event.inaxes:
+        is_opt_canvas = event.canvas == getattr(self, 'canvas', None)
+        is_spr_canvas = event.canvas == getattr(self, 'spr_canvas', None)
+        if is_shift and (is_opt_canvas or is_spr_canvas) and event.inaxes:
             xlim = event.inaxes.get_xlim()
             threshold = (xlim[1] - xlim[0]) * 0.01
             t_shift = getattr(self, 't_start', 0)
             
             near_edge = False
-            for times in [self.bg_times, self.sig_times]:
-                if times:
-                    if abs(event.xdata - (times[0]-t_shift)) < threshold or \
-                       abs(event.xdata - (times[1]-t_shift)) < threshold:
-                        near_edge = True
-                        break
+            if is_opt_canvas:
+                for times in [self.bg_times, self.sig_times]:
+                    if times:
+                        if abs(event.xdata - (times[0]-t_shift)) < threshold or \
+                           abs(event.xdata - (times[1]-t_shift)) < threshold:
+                            near_edge = True
+                            break
+            elif is_spr_canvas:
+                if self._get(getattr(self, 'chk_spr_bg_sub', None), 'isChecked'):
+                    s_bg = self._get(getattr(self, 'spin_spr_bg_start', None), 'value')
+                    e_bg = self._get(getattr(self, 'spin_spr_bg_end', None), 'value')
+                    if s_bg is not None and e_bg is not None:
+                        if abs(event.xdata - s_bg) < threshold or abs(event.xdata - e_bg) < threshold:
+                            near_edge = True
             
             if near_edge:
                 event.canvas.setCursor(Qt.SizeHorCursor)
@@ -4856,6 +5375,7 @@ class ioliteOptimiser(QWidget):
 
     def on_release(self, event):
         was_dragging = self.dragged_edge is not None
+        edged = self.dragged_edge
         self.plot_panning = False
         self.press_x_pix = None
         self.press_y_pix = None
@@ -4873,8 +5393,11 @@ class ioliteOptimiser(QWidget):
             if ax:
                  self._opt_axis_limits = (ax.get_xlim(), ax.get_ylim())
 
-            # Trigger final optimization and sync
-            self.on_region_edited()
+            if edged and edged.startswith('spr_'):
+                self.run_spr_analysis(rescale=False)
+            else:
+                # Trigger final optimization and sync
+                self.on_region_edited()
 
     def on_pick(self, event):
         try:
@@ -5968,7 +6491,7 @@ class ioliteOptimiser(QWidget):
                 if mode == "Spot":
                     # Spot: Time = Shots / RepRate
                     shots = float(self._get(self.spin_shots, 'value'))
-                    rr = sync.get('Laser Rep Rate (Hz)', 1.0)
+                    rr = sync.get('rr_actual', 1.0)
                     if rr > 0:
                         est_sec = shots / rr
                         
