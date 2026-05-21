@@ -2,8 +2,47 @@
 #/ Description: Characterises your system's single-pulse washout to calculate the optimal balance of spot size, scan speed, and repetition rate that achieves your target data quality.
 #/ Type: UI
 #/ Authors: Adam Douglas
-#/ Version: 0.9.11
+#/ Version: dev
 #/ Contact: Adam.Douglas@icpms.com
+
+# ==============================================================================
+# COPYRIGHT AND GPLv3 LICENSE NOTICE
+# ==============================================================================
+# Copyright (C) 2026 [Adam Douglas <adamdouglas82@gmail.com>]
+#
+# This program is free software: you can redistribute it and/or modify it under 
+# the terms of the GNU General Public License as published by the Free Software 
+# Foundation, either version 3 of the License, or any later version.
+#
+# This program is distributed in the hope that it will be useful, but WITHOUT 
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS 
+# FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along with 
+# this program. If not, see <https://gnu.org>.
+# ==============================================================================
+
+# ==============================================================================
+# SCIENTIFIC CITATION REQUIREMENT (GPLv3 Section 7 Additional Terms)
+# ==============================================================================
+# Under Section 7 of the GNU General Public License v3.0, you must preserve the 
+# author attributions and literature citation requirements stipulated below. 
+#
+# If you use this script, or elements of the mathematical code/logic herein, 
+# to process data for any peer-reviewed publication, abstract, or presentation, 
+# you are required to cite the following primary foundational literature:
+# 
+#     - Tanner, S. D. (2010). "Shorter signals for improved signal to noise ratio, the influence of Poisson distribution." Journal of Analytical Atomic Spectrometry (JAAS), 25, 405–407.
+#     - Donard, A., et al. (2015). "Determination of relative rare earth element distributions in very small quantities of uranium ore concentrates using femtosecond UV laser ablation– SF-ICP-MS coupling." J. Anal. At. Spectrom., 30, 2420–2428.
+#     - Van Malderen, S. J., et al. (2018). "Considerations on data acquisition in laser ablation-inductively coupled plasma-mass spectrometry with low-dispersion interfaces." Spectrochimica Acta Part B, 140, 29–34.
+#     - Van Elteren, J. T., et al. (2019). "Insights into the selection of 2D LA-ICP-MS (multi) elemental mapping conditions." J. Anal. At. Spectrom., 34, 1919.
+#     - Ulianov, A., et al. (2015). "The ICPMS signal as a Poisson process: a review of basic concepts." J. Anal. At. Spectrom., 30, 1297–1321.
+#     - Currie, L. A. (1968). "Limits for qualitative detection and quantitative determination: Application to Radiochemistry." Anal. Chem., 40, 586-593.
+#     - Currie, L. A. (1972). "The Measurement of Environmental Levels of Rare Gas Nuclides and the Treatment of Very Low-Level Counting Data." IEEE Trans. Nucl. Sci., NS19, (1), 119-126.
+#     - Lockwood, E. T. (2024). "Multiplexed elemental bioimaging with quadrupole ICP-MS and high-frequency laser ablation systems" J. Anal. At. Spectrom., 39, 1125
+# ==============================================================================
+
+# pyright: reportMissingImports=false, reportMissingModuleSource=false
 
 import math
 import os
@@ -59,8 +98,11 @@ except ImportError:
     except ImportError:
         pass
 
+# --- FEATURE ENABLE ---
+SHOW_PULSE_TRAIN_SIMULATOR = False  # Currently Beta
+
 # --- EMBEDDED CONSTANTS ---
-VERSION = "0.9.11"
+VERSION = "dev"
 
 ICP_SPECS = {
     "Agilent": {
@@ -1736,6 +1778,12 @@ class ioliteOptimiser(QWidget):
         self.spr_debounce_timer.setSingleShot(True)
         self.spr_debounce_timer.timeout.connect(self._run_spr_analysis_forced)
 
+        # Debounce timer for Pulse Train Simulation
+        self.pulse_debounce_timer = QTimer()
+        self.pulse_debounce_timer.setSingleShot(True)
+        self.pulse_debounce_timer.setInterval(500)
+        self.pulse_debounce_timer.timeout.connect(self.run_pulse_simulation)
+
         # Initialize hardware state
         self.icp_tech = "Quadrupole"
         self.min_dwell = 0.1
@@ -1924,16 +1972,41 @@ class ioliteOptimiser(QWidget):
         self.tabs.addTab(self.tab_opt, "Method Optimiser")
         
         # Tab 3: Pulse Train Simulator
-        IoLog.information("iolite Optimiser: Adding Pulse Train Tab...")
-        self.tab_pulse = QWidget()
-        self.init_pulse_train_tab()
-        self.tabs.addTab(self.tab_pulse, "Pulse Train Simulator")
+        if SHOW_PULSE_TRAIN_SIMULATOR:
+            IoLog.information("iolite Optimiser: Adding Pulse Train Tab...")
+            self.tab_pulse = QWidget()
+            self.init_pulse_train_tab()
+            self.tabs.addTab(self.tab_pulse, "Pulse Train Simulator")
         
         # Select Optimiser by default for now (or SPR if desired)
         self.tabs.setCurrentIndex(1)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
         
         main_layout.addWidget(self.tabs)
         self.setLayout(main_layout)
+        
+    def _on_tab_changed(self, index):
+        if index == 2:
+            if hasattr(self, 'last_sync') and self.last_sync:
+                rr = self.last_sync.get('rr_actual', 1.0)
+                at_ms = self.last_sync.get('at_actual_s', 0.1) * 1000.0
+                pulses = self.last_sync.get('actual_pulses', 1.0)
+                
+                if hasattr(self, 'grp_pulse_override') and not self.grp_pulse_override.isChecked():
+                    self._block_signals(self.spin_pulse_rr, True)
+                    self._block_signals(self.spin_pulse_at, True)
+                    self._block_signals(self.spin_pulse_count, True)
+                    
+                    self.spin_pulse_rr.setValue(rr)
+                    self.spin_pulse_at.setValue(at_ms)
+                    self.spin_pulse_count.setValue(pulses)
+                    
+                    self._block_signals(self.spin_pulse_rr, False)
+                    self._block_signals(self.spin_pulse_at, False)
+                    self._block_signals(self.spin_pulse_count, False)
+            
+            # Auto-run simulation when switching to this tab
+            self.pulse_debounce_timer.start()
         
     def init_spr_tab(self):
         main_layout = QHBoxLayout()
@@ -2963,7 +3036,7 @@ class ioliteOptimiser(QWidget):
         
         # Engineering Notation (k, M, G)
         # Matches main Optimiser plot style
-        ax.yaxis.set_major_formatter(EngFormatter(places=0, sep=" "))
+        ax.yaxis.set_major_formatter(EngFormatter(sep=" "))
         ax.yaxis.get_offset_text().set_color(fg_col)
         ax.grid(False, which='both')
         
@@ -4279,7 +4352,11 @@ class ioliteOptimiser(QWidget):
         # Precise calculation preserves imported file timing
         self.detected_overhead_ms = max(0, self.detected_at_ms - total_init_dwell_ms)
         
-        IoLog.information(f"iolite Optimiser: Overhead updated to {self.detected_overhead_ms:.3f}ms (AT={self.detected_at_ms:.3f}, Dwell={total_init_dwell_ms:.3f})")
+        tech_raw = getattr(self, 'icp_tech', 'Quadrupole')
+        mapped = TYPE_TO_TECH_MAP.get(tech_raw, tech_raw)
+        dwell_label = "Max Dwell" if mapped in ["Multi-Collector", "TOF"] else "Sum of Dwells"
+        
+        IoLog.information(f"iolite Optimiser: Overhead updated to {self.detected_overhead_ms:.3f}ms (AT={self.detected_at_ms:.3f}, {dwell_label}={total_init_dwell_ms:.3f})")
         
         # Re-run optimization to refresh results if needed
         # self.run_optimisation(refresh=False) # Optional: might be too aggressive on every change?
@@ -5011,7 +5088,14 @@ class ioliteOptimiser(QWidget):
             if new_df is not None:
                 # Calculate Acquisition Time EARLY so DwellDialog can show it
                 if 'Time' in new_df.columns and len(new_df['Time']) > 1:
-                    self.detected_at_ms = new_df['Time'].diff().median() * 1000.0
+                    time_vals = new_df['Time'].values
+                    # Exclude the first timestamp if we have at least 3 points, 
+                    # as the first interval often includes instrument setup overheads
+                    if len(time_vals) > 2:
+                        slope = np.polyfit(np.arange(len(time_vals) - 1), time_vals[1:], 1)[0]
+                    else:
+                        slope = np.polyfit(np.arange(len(time_vals)), time_vals, 1)[0]
+                    self.detected_at_ms = slope * 1000.0
                     IoLog.information(f"iolite Optimiser: Detected Acquisition Time: {self.detected_at_ms:.3f} ms")
                 else:
                     self.detected_at_ms = None
@@ -5023,6 +5107,12 @@ class ioliteOptimiser(QWidget):
             
             # --- SPR TAB DATA ---
             if tab == "spr" or tab is None:
+                # Fully clear previous SPR state to prevent data pollution
+                if hasattr(self, 'spr_all_raw_results'): self.spr_all_raw_results.clear()
+                if hasattr(self, 'spr_excluded_peaks'): self.spr_excluded_peaks.clear()
+                if hasattr(self, 'spr_channel_prominence'): self.spr_channel_prominence.clear()
+                if hasattr(self, 'spr_channel_auto_prom'): self.spr_channel_auto_prom.clear()
+                
                 self.spr_df = new_df
                 if new_df is not None:
                     self.spr_metadata = new_meta # Store specifically for SPR
@@ -5036,7 +5126,8 @@ class ioliteOptimiser(QWidget):
                          self.cmb_spr_iso.addItems(cols)
                          self._block_signals(self.cmb_spr_iso, False)
                          
-                         self.run_spr_analysis()
+                         # Force refresh to wipe internal caches in run_spr_analysis
+                         self.run_spr_analysis(force_refresh=True)
 
             # --- OPTIMISER TAB DATA ---
             if tab == "opt" or tab is None:
@@ -5059,8 +5150,10 @@ class ioliteOptimiser(QWidget):
                              sb.setRange(-100, max_rel_t + 100) # Give some buffer
                              self._block_signals(sb, False)
                          
-                         # Calculate Actual AT
-                         self.detected_at_ms = self.opt_df['Time'].diff().median() * 1000.0
+                         # Calculate Actual AT via linear regression
+                         time_vals = self.opt_df['Time'].values
+                         slope = np.polyfit(np.arange(len(time_vals)), time_vals, 1)[0]
+                         self.detected_at_ms = slope * 1000.0
     
                          # Resolve Dwells & Calculate Overhead
                          # Dwells already populated in local block and assigned to self.opt_dwells
@@ -5395,46 +5488,129 @@ class ioliteOptimiser(QWidget):
             self._block_signals(self.chk_rescale_spr, False)
         self.save_persistent_settings()
 
+    def _on_pulse_rescale_toggled(self, checked):
+        if checked:
+            self._block_signals(self.chk_y_zoom_pulse, True)
+            self.chk_y_zoom_pulse.setChecked(False)
+            self._block_signals(self.chk_y_zoom_pulse, False)
+            if hasattr(self, 'pulse_figure') and self.pulse_figure.axes:
+                self.rescale_to_visible(ax=self.pulse_figure.axes[0], canvas=self.pulse_canvas)
+        self.save_persistent_settings()
+
+    def _on_pulse_y_zoom_toggled(self, checked):
+        if checked:
+            self._block_signals(self.chk_rescale_pulse, True)
+            self.chk_rescale_pulse.setChecked(False)
+            self._block_signals(self.chk_rescale_pulse, False)
+        self.save_persistent_settings()
+
     def on_zoom(self, event):
-        if event.inaxes is None or event.inaxes == getattr(self, 'spr_ax_comp', None): return
-        ax = event.inaxes
         canvas = event.canvas
+        fig = canvas.figure
+        ax = event.inaxes
         
-        # Scale factor
+        # 1. Resolve Target AX (Handle scrolling on labels outside data area)
+        if ax is None:
+            for a in fig.axes:
+                bbox = a.get_window_extent()
+                if (bbox.y0 - 50 < event.y < bbox.y1 + 50) and (bbox.x0 - 50 < event.x < bbox.x1 + 50):
+                    ax = a
+                    break
+        
+        if ax is None or ax == getattr(self, 'spr_ax_comp', None): return
+        
+        # 2. Scale factor
         if event.button == 'up': scale_factor = 0.8 # Zoom IN
         elif event.button == 'down': scale_factor = 1.25 # Zoom OUT
-        else: scale_factor = 1.0
+        else: return
         
-        # Always Zoom X
-        cur_xlim = ax.get_xlim()
-        cur_xrange = (cur_xlim[1] - cur_xlim[0])
-        xdata = event.xdata
-        new_width = cur_xrange * scale_factor
-        relx = (cur_xlim[1] - xdata) / cur_xrange
-        new_xlim = [xdata - new_width * (1-relx), xdata + new_width * (relx)]
-        ax.set_xlim(new_xlim)
+        bbox = ax.get_window_extent()
         
-        # Determine if Y zoom is enabled for this canvas
-        is_spr = (hasattr(self, 'spr_canvas') and canvas == self.spr_canvas)
-        chk_y = getattr(self, 'chk_y_zoom_spr', None) if is_spr else getattr(self, 'chk_y_zoom', None)
-        y_zoom = self._get(chk_y, 'isChecked') if chk_y else False
+        # 3. Determine Zoom Region
+        # Over Y-axis label/spine area (Left)
+        over_y_axis = (bbox.y0 <= event.y <= bbox.y1) and (event.x < bbox.x0)
+        # Over X-axis label/spine area (Bottom)
+        over_x_axis = (bbox.x0 <= event.x <= bbox.x1) and (event.y < bbox.y0)
+        # Over the actual plot area
+        over_plot = (bbox.x0 <= event.x <= bbox.x1) and (bbox.y0 <= event.y <= bbox.y1)
         
-        if y_zoom:
+        zoom_x = over_x_axis or over_plot
+        zoom_y = over_y_axis # By default if on Y axis
+        
+        if over_plot:
+            # Check if Y zoom is enabled by UI for central plot area
+            is_spr = (hasattr(self, 'spr_canvas') and canvas == self.spr_canvas)
+            is_pulse = (hasattr(self, 'pulse_canvas') and canvas == self.pulse_canvas)
+            if is_spr: chk_y = getattr(self, 'chk_y_zoom_spr', None)
+            elif is_pulse: chk_y = getattr(self, 'chk_y_zoom_pulse', None)
+            else: chk_y = getattr(self, 'chk_y_zoom', None)
+            
+            if self._get(chk_y, 'isChecked'):
+                zoom_y = True
+        
+        # 4. Apply Zoom
+        if zoom_x:
+            cur_xlim = ax.get_xlim()
+            cur_xrange = (cur_xlim[1] - cur_xlim[0])
+            
+            # Use mouse position if in data area, else convert from pixels
+            if event.xdata is not None:
+                xdata_pivot = event.xdata
+            else:
+                # Convert pixel X to data X even if outside data range (e.g. over labels)
+                try: xdata_pivot = ax.transData.inverted().transform((event.x, event.y))[0]
+                except: xdata_pivot = (cur_xlim[0] + cur_xlim[1]) / 2.0
+            
+            new_width = cur_xrange * scale_factor
+            relx = (cur_xlim[1] - xdata_pivot) / cur_xrange
+            ax.set_xlim([xdata_pivot - new_width * (1-relx), xdata_pivot + new_width * relx])
+            
+        if zoom_y:
+            # Uncheck Auto-Rescale if manual zooming Y
+            is_spr = (hasattr(self, 'spr_canvas') and canvas == self.spr_canvas)
+            is_pulse = (hasattr(self, 'pulse_canvas') and canvas == self.pulse_canvas)
+            rescale_chk = getattr(self, 'chk_rescale_spr', None) if is_spr else (getattr(self, 'chk_rescale_pulse', None) if is_pulse else getattr(self, 'chk_rescale', None))
+            if rescale_chk and self._get(rescale_chk, 'isChecked'):
+                 self._block_signals(rescale_chk, True)
+                 rescale_chk.setChecked(False)
+                 self._block_signals(rescale_chk, False)
+
             cur_ylim = ax.get_ylim()
             cur_yrange = (cur_ylim[1] - cur_ylim[0])
-            ydata = event.ydata
+            
+            # Use mouse position if in data area, else convert from pixels
+            if event.ydata is not None:
+                ydata_pivot = event.ydata
+            else:
+                # Convert pixel Y to data Y even if outside data range (e.g. over labels)
+                try: ydata_pivot = ax.transData.inverted().transform((event.x, event.y))[1]
+                except: ydata_pivot = (cur_ylim[0] + cur_ylim[1]) / 2.0
+                
             new_height = cur_yrange * scale_factor
-            rely = (cur_ylim[1] - ydata) / cur_yrange
-            new_ylim = [ydata - new_height * (1-rely), ydata + new_height * (rely)]
-            ax.set_ylim(new_ylim)
+            rely = (cur_ylim[1] - ydata_pivot) / cur_yrange
+            ax.set_ylim([ydata_pivot - new_height * (1-rely), ydata_pivot + new_height * rely])
             
         canvas.draw()
 
     def on_press(self, event):
-        if event.inaxes is None or event.inaxes == getattr(self, 'spr_ax_comp', None): return
+        canvas = event.canvas
+        fig = canvas.figure
+        ax = event.inaxes
+        
+        # Resolve Target AX (Handle clicking on labels outside data area)
+        if ax is None:
+            for a in fig.axes:
+                bbox = a.get_window_extent()
+                # Use a buffer for easier clicking
+                if (bbox.y0 - 50 < event.y < bbox.y1 + 50) and (bbox.x0 - 50 < event.x < bbox.x1 + 50):
+                    ax = a
+                    break
+
+        if ax is None or ax == getattr(self, 'spr_ax_comp', None): return
+        
         if event.dblclick:
             # RESET VIEW (X and Y)
-            self.rescale_to_visible(rescale_x=True, rescale_y=True, ax=event.inaxes, canvas=event.canvas)
+            self.rescale_to_visible(rescale_x=True, rescale_y=True, ax=ax, canvas=canvas)
             return
             
         if event.button == 1: # Left Click
@@ -5449,12 +5625,24 @@ class ioliteOptimiser(QWidget):
             if not is_shift:
                 is_shift = str(getattr(event, 'key', '')).lower() in ('shift', 's')
             
+            bbox = ax.get_window_extent()
+            
+            # Determine Interaction Region
+            # Over Y-axis label/spine area (Left)
+            over_y_axis = (bbox.y0 <= event.y <= bbox.y1) and (event.x < bbox.x0)
+            # Over X-axis label/spine area (Bottom)
+            over_x_axis = (bbox.x0 <= event.x <= bbox.x1) and (event.y < bbox.y0)
+            # Over the actual plot area
+            over_plot = (bbox.x0 <= event.x <= bbox.x1) and (bbox.y0 <= event.y <= bbox.y1)
+            
+            self.press_region = 'y_axis' if over_y_axis else ('x_axis' if over_x_axis else 'plot')
+
             # 1. Handle Region Edge Picking (Opt and SPR Plots)
-            is_opt_canvas = event.canvas == getattr(self, 'canvas', None)
-            is_spr_canvas = event.canvas == getattr(self, 'spr_canvas', None)
-            if is_shift and (is_opt_canvas or is_spr_canvas) and event.inaxes:
+            is_opt_canvas = canvas == getattr(self, 'canvas', None)
+            is_spr_canvas = canvas == getattr(self, 'spr_canvas', None)
+            if is_shift and (is_opt_canvas or is_spr_canvas):
                 if event.xdata is not None:
-                    xlim = event.inaxes.get_xlim()
+                    xlim = ax.get_xlim()
                     # Permissive threshold: 1% of plot width
                     threshold = (xlim[1] - xlim[0]) * 0.01
                     t_shift = getattr(self, 't_start', 0)
@@ -5485,8 +5673,10 @@ class ioliteOptimiser(QWidget):
                                 self._block_signals(self.chk_spr_auto_bg, True)
                                 self.chk_spr_auto_bg.setChecked(False)
                                 self._block_signals(self.chk_spr_auto_bg, False)
-                                self.spin_spr_bg_start.setEnabled(True)
-                                self.spin_spr_bg_end.setEnabled(True)
+                                try:
+                                    self.spin_spr_bg_start.setEnabled(True)
+                                    self.spin_spr_bg_end.setEnabled(True)
+                                except: pass
                         else:
                             if hasattr(self, 'chk_auto'):
                                 self._block_signals(self.chk_auto, True)
@@ -5498,19 +5688,33 @@ class ioliteOptimiser(QWidget):
             self.plot_panning = True
             self.press_x_pix = event.x
             self.press_y_pix = event.y
-            self.start_xlim = event.inaxes.get_xlim()
-            self.start_ylim = event.inaxes.get_ylim()
-            self.press_ax = event.inaxes
+            self.start_xlim = ax.get_xlim()
+            self.start_ylim = ax.get_ylim()
+            self.press_ax = ax
             # Capture data width for each axis once at start
-            self.start_dx_per_pix = (self.start_xlim[1] - self.start_xlim[0]) / (event.inaxes.bbox.width or 1)
-            self.start_dy_per_pix = (self.start_ylim[1] - self.start_ylim[0]) / (event.inaxes.bbox.height or 1)
+            self.start_dx_per_pix = (self.start_xlim[1] - self.start_xlim[0]) / (ax.bbox.width or 1)
+            self.start_dy_per_pix = (self.start_ylim[1] - self.start_ylim[0]) / (ax.bbox.height or 1)
 
     def on_drag(self, event):
-        if event.inaxes is None: return
+        # Allow panning/dragging to continue even if mouse moves outside the axis area
+        is_panning = getattr(self, 'plot_panning', False)
+        is_edge_drag = bool(getattr(self, 'dragged_edge', None))
         
+        if event.inaxes is None and not is_panning and not is_edge_drag:
+            return
+            
+        ax = event.inaxes if event.inaxes else getattr(self, 'press_ax', None)
+        if ax is None: return
+
         # 1. Handle Edge Dragging (Priority)
-        if self.dragged_edge and event.xdata is not None:
-            val = max(0, event.xdata)
+        if self.dragged_edge:
+            # For edge dragging, we need xdata. If it's None, try to compute it from pixels.
+            xdata = event.xdata
+            if xdata is None:
+                try: xdata = ax.transData.inverted().transform((event.x, event.y))[0]
+                except: return
+            
+            val = max(0, xdata)
             t_shift = getattr(self, 't_start', 0)
             
             # Determine which spinbox and which internal times to update
@@ -5562,16 +5766,34 @@ class ioliteOptimiser(QWidget):
             dx_data = dx_pix * getattr(self, 'start_dx_per_pix', 0)
             dy_data = dy_pix * getattr(self, 'start_dy_per_pix', 0)
             
-            # Update limits based on displacement from STARTing limits
-            if hasattr(self, 'start_xlim'):
-                ax.set_xlim(self.start_xlim[0] - dx_data, self.start_xlim[1] - dx_data)
+            region = getattr(self, 'press_region', 'plot')
             
+            # Handle X-Panning
+            if region in ('plot', 'x_axis'):
+                if hasattr(self, 'start_xlim'):
+                    ax.set_xlim(self.start_xlim[0] - dx_data, self.start_xlim[1] - dx_data)
+            
+            # Handle Y-Panning
             is_spr = (hasattr(self, 'spr_canvas') and canvas == self.spr_canvas)
-            chk_y = getattr(self, 'chk_y_zoom_spr', None) if is_spr else getattr(self, 'chk_y_zoom', None)
-            if self._get(chk_y, 'isChecked') and hasattr(self, 'start_ylim'):
+            is_pulse = (hasattr(self, 'pulse_canvas') and canvas == self.pulse_canvas)
+            
+            if is_spr: chk_y = getattr(self, 'chk_y_zoom_spr', None)
+            elif is_pulse: chk_y = getattr(self, 'chk_y_zoom_pulse', None)
+            else: chk_y = getattr(self, 'chk_y_zoom', None)
+            
+            # Pan Y if: 1. Region is Y-axis OR 2. Region is plot AND checkbox is checked
+            pan_y = (region == 'y_axis') or (region == 'plot' and self._get(chk_y, 'isChecked'))
+            
+            if pan_y and hasattr(self, 'start_ylim'):
+                # Uncheck Auto-Rescale if manual panning Y
+                rescale_chk = getattr(self, 'chk_rescale_spr', None) if is_spr else (getattr(self, 'chk_rescale_pulse', None) if is_pulse else getattr(self, 'chk_rescale', None))
+                if rescale_chk and self._get(rescale_chk, 'isChecked'):
+                     self._block_signals(rescale_chk, True)
+                     rescale_chk.setChecked(False)
+                     self._block_signals(rescale_chk, False)
                 ax.set_ylim(self.start_ylim[0] - dy_data, self.start_ylim[1] - dy_data)
 
-            canvas.draw() # More robust than draw_idle
+            canvas.draw()
             return
 
         # 3. Hover Cursor Feedback
@@ -6056,8 +6278,8 @@ class ioliteOptimiser(QWidget):
 
                 # Apply SI Formatting to Y-Axis (if not normalised)
                 if not normalise:
-                    # EngFormatter with places=0 (no decimals) and sep=" " (space before unit)
-                    ax.yaxis.set_major_formatter(EngFormatter(places=0, sep=" "))
+                    # EngFormatter with sep=" " (space before unit)
+                    ax.yaxis.set_major_formatter(EngFormatter(sep=" "))
                 
                 # Force Colors for Labels/Ticks (Fix Dark Mode Visibility)
                 # We specifically grab the 'text.color' or 'axes.labelcolor' from current params
@@ -7024,14 +7246,14 @@ class ioliteOptimiser(QWidget):
         form_settings = QFormLayout()
         
         self.spin_pulse_bg = QDoubleSpinBox()
-        self.spin_pulse_bg.setRange(0, 100)
+        self.spin_pulse_bg.setRange(0, 9999)
         self.spin_pulse_bg.setValue(5.0)
         self.spin_pulse_bg.setSuffix(" s")
         form_settings.addRow("Background Time:", self.spin_pulse_bg)
         
         self.spin_pulse_sig = QDoubleSpinBox()
-        self.spin_pulse_sig.setRange(0, 100)
-        self.spin_pulse_sig.setValue(10.0)
+        self.spin_pulse_sig.setRange(0, 9999)
+        self.spin_pulse_sig.setValue(30.0)
         self.spin_pulse_sig.setSuffix(" s")
         form_settings.addRow("Signal Duration:", self.spin_pulse_sig)
         
@@ -7039,20 +7261,24 @@ class ioliteOptimiser(QWidget):
         left_layout.addWidget(grp_settings)
         
         # Overrides Group
-        self.grp_pulse_override = QGroupBox("Overrides")
-        self.grp_pulse_override.setCheckable(True)
-        self.grp_pulse_override.setChecked(False)
+        self.grp_pulse_override = QGroupBox("Overrides / Manual Adjustment")
+        self.grp_pulse_override.setCheckable(False)
         form_overrides = QFormLayout()
         
+        self.btn_pulse_reset = QPushButton("Reset to Optimum")
+        self.btn_pulse_reset.clicked.connect(self.reset_pulse_params_to_optimum)
+        form_overrides.addRow(self.btn_pulse_reset)
+         
+        
         self.spin_pulse_rr = QDoubleSpinBox()
-        self.spin_pulse_rr.setRange(0.1, 100000)
-        self.spin_pulse_rr.setDecimals(1)
+        self.spin_pulse_rr.setRange(0.0001, 100000)
+        self.spin_pulse_rr.setDecimals(4)
         self.spin_pulse_rr.setSuffix(" Hz")
         form_overrides.addRow("Rep Rate:", self.spin_pulse_rr)
         
         self.spin_pulse_at = QDoubleSpinBox()
         self.spin_pulse_at.setRange(0.001, 10000)
-        self.spin_pulse_at.setDecimals(3)
+        self.spin_pulse_at.setDecimals(4)
         self.spin_pulse_at.setSuffix(" ms")
         form_overrides.addRow("Acq Time:", self.spin_pulse_at)
         
@@ -7061,19 +7287,22 @@ class ioliteOptimiser(QWidget):
         self.spin_pulse_count.setDecimals(3)
         form_overrides.addRow("Pulses / Acq:", self.spin_pulse_count)
         
-        # Connect signals for auto-calc
+        # Connect signals for auto-calc and debounce timer
+        self.spin_pulse_bg.valueChanged.connect(lambda: self.pulse_debounce_timer.start())
+        self.spin_pulse_sig.valueChanged.connect(lambda: self.pulse_debounce_timer.start())
+        
         self.spin_pulse_rr.valueChanged.connect(self._calc_pulse_params_from_rr)
         self.spin_pulse_at.valueChanged.connect(self._calc_pulse_params_from_at)
         self.spin_pulse_count.valueChanged.connect(self._calc_pulse_params_from_count)
         
+        self.spin_pulse_rr.valueChanged.connect(lambda: self.pulse_debounce_timer.start())
+        self.spin_pulse_at.valueChanged.connect(lambda: self.pulse_debounce_timer.start())
+        self.spin_pulse_count.valueChanged.connect(lambda: self.pulse_debounce_timer.start())
+        
+        # self.grp_pulse_override.toggled.connect(lambda: self.pulse_debounce_timer.start())
+        
         self.grp_pulse_override.setLayout(form_overrides)
         left_layout.addWidget(self.grp_pulse_override)
-        
-        # Simulation Button
-        self.btn_simulate = QPushButton("Simulate Pulse Train")
-        self.btn_simulate.clicked.connect(self.run_pulse_simulation)
-        self.btn_simulate.setFixedHeight(40)
-        left_layout.addWidget(self.btn_simulate)
         
         left_layout.addStretch()
         
@@ -7098,11 +7327,16 @@ class ioliteOptimiser(QWidget):
         self.chk_rescale_pulse.setChecked(True)
         self.chk_rescale_pulse.toggled.connect(self._on_pulse_rescale_toggled)
         
+        self.chk_show_bg = QCheckBox("Show Background")
+        self.chk_show_bg.setChecked(True)
+        self.chk_show_bg.toggled.connect(lambda: self.update_pulse_plot(preserve_zoom=False))
+        
         h_ctrl.addWidget(QLabel("Theme:"))
         h_ctrl.addWidget(self.combo_theme_pulse)
         h_ctrl.addWidget(self.chk_norm_pulse)
         h_ctrl.addWidget(self.chk_y_zoom_pulse)
         h_ctrl.addWidget(self.chk_rescale_pulse)
+        h_ctrl.addWidget(self.chk_show_bg)
         h_ctrl.addStretch()
         
         right_layout.addLayout(h_ctrl)
@@ -7119,15 +7353,64 @@ class ioliteOptimiser(QWidget):
         
         self.pulse_legend_map = {} # Mapping for interactive legend
         
-        right_layout.addWidget(self.pulse_canvas)
+        right_layout.addWidget(self.pulse_canvas, 1) # Set stretch to 1 to give plot more space
+        
+        # RSD Stats Table
+        self.lbl_pulse_table_title = QLabel("<b>Pulse Simulation Stability (Signal Area ± 1s crop)</b>")
+        self.lbl_pulse_table_title.setAlignment(Qt.AlignCenter)
+        right_layout.addWidget(self.lbl_pulse_table_title)
+        
+        # Use the custom CopyableTableWidget if available, or fallback to standard
+        try:
+            self.pulse_table = CopyableTableWidget()
+        except:
+            self.pulse_table = QTableWidget()
+            
+        self.pulse_table.setColumnCount(6)
+        self.pulse_table.setHorizontalHeaderLabels([
+            "Channel", "Mean Intensity", "RSD (%)", 
+            "Ideal Match (%)", "Max Error (%)", "Duty Cycle (%)"
+        ])
+        self.pulse_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        # self.pulse_table.setFixedHeight(120) # REMOVED: Allow it to stretch
+        self.pulse_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.pulse_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.pulse_table.setAlternatingRowColors(True)
+        right_layout.addWidget(self.pulse_table, 1) # Give it equal stretch with the canvas
         
         main_layout.addLayout(left_layout, 1)
         main_layout.addLayout(right_layout, 4)
         
         self.tab_pulse.setLayout(main_layout)
 
+    def reset_pulse_params_to_optimum(self):
+        # Pull from last_sync (Optimiser Tab results)
+        if hasattr(self, 'last_sync') and self.last_sync:
+            rr = self.last_sync.get('rr_actual', 10.0)
+            at_ms = self.last_sync.get('at_actual_s', 0.1) * 1000.0
+            pulses = self.last_sync.get('actual_pulses', 1.0)
+        else:
+            rr = 10.0
+            at_ms = 100.0
+            pulses = 1.0
+            
+        # Update spinboxes (Block signals to avoid double-triggers, then manually start timer)
+        self.spin_pulse_rr.blockSignals(True)
+        self.spin_pulse_at.blockSignals(True)
+        self.spin_pulse_count.blockSignals(True)
+        
+        self.spin_pulse_rr.setValue(rr)
+        self.spin_pulse_at.setValue(at_ms)
+        self.spin_pulse_count.setValue(pulses)
+        
+        self.spin_pulse_rr.blockSignals(False)
+        self.spin_pulse_at.blockSignals(False)
+        self.spin_pulse_count.blockSignals(False)
+        
+        # Trigger simulation refresh
+        self.pulse_debounce_timer.start()
+
     def _calc_pulse_params_from_rr(self):
-        if not self.grp_pulse_override.isChecked(): return
         self.spin_pulse_count.blockSignals(True)
         try:
             rr = self.spin_pulse_rr.value
@@ -7137,7 +7420,6 @@ class ioliteOptimiser(QWidget):
         self.spin_pulse_count.blockSignals(False)
 
     def _calc_pulse_params_from_at(self):
-        if not self.grp_pulse_override.isChecked(): return
         self.spin_pulse_count.blockSignals(True)
         try:
             rr = self.spin_pulse_rr.value
@@ -7147,35 +7429,22 @@ class ioliteOptimiser(QWidget):
         self.spin_pulse_count.blockSignals(False)
 
     def _calc_pulse_params_from_count(self):
-        if not self.grp_pulse_override.isChecked(): return
-        self.spin_pulse_at.blockSignals(True)
+        self.spin_pulse_rr.blockSignals(True)
         try:
-            # If user changes pulse count, we adjust AT (keeping RR constant usually safest)
-            # OR we adjust RR (keeping AT constant).
-            # Usually Integration time is the flexible parameter in simulation?
-            # Or Rep Rate?
-            # Let's adjust Acquisition Time as it's often the dependent variable in syncing.
             p = self.spin_pulse_count.value
-            rr = self.spin_pulse_rr.value
-            if rr > 0:
-                at_s = p / rr
-                self.spin_pulse_at.setValue(at_s * 1000.0)
+            at_s = self.spin_pulse_at.value / 1000.0
+            if at_s > 0:
+                rr = p / at_s
+                self.spin_pulse_rr.setValue(rr)
         except: pass
-        self.spin_pulse_at.blockSignals(False)
+        self.spin_pulse_rr.blockSignals(False)
 
     def run_pulse_simulation(self):
         try:
             IoLog.information("iolite Optimiser: run_pulse_simulation called")
             # 1. Gather Inputs
             if not hasattr(self, 'last_sync') or self.last_sync is None:
-                IoLog.warning("iolite Optimiser: No last_sync found")
-                # Try to grab from table if missing
-                if hasattr(self, 'lbl_result'):
-                    self.lbl_result.setText("No synchronization data available. Please run Optimization first.")
-                IoLog.warning("Pulse Train: No sync data")
-                # If overrides are enabled, we might proceed, but let's enforce flow for now
-                if not self.grp_pulse_override.isChecked():
-                    return
+                IoLog.warning("Pulse Train: No sync data found yet. Using current or default parameters.")
                 # If override checked, we can proceed with just defaults if logic handles None sync
 
             # Get Analyzed Isotopes
@@ -7196,51 +7465,12 @@ class ioliteOptimiser(QWidget):
             
 
             
-            # Get Timing
-            if self.grp_pulse_override.isChecked():
-                rr = self.spin_pulse_rr.value
-                at_ms = self.spin_pulse_at.value
-                at_s = at_ms / 1000.0
-                pulses = rr * at_s # Approx
-                
-                # Update pulse count box if not already set (initial load)
-                self.spin_pulse_count.blockSignals(True)
-                self.spin_pulse_count.setValue(pulses)
-                self.spin_pulse_count.blockSignals(False)
-            else:
-                if hasattr(self, 'last_sync') and self.last_sync:
-                    rr = self.last_sync.get('Laser Rep Rate (Hz)', 1.0)
-                    at_ms = self.last_sync.get('Acquisition Time (ms)', 0.1)
-                    pulses = self.last_sync.get('Actual Pulses', 1.0)
-                else:
-                    rr = 10.0
-                    at_ms = 100.0
-                    pulses = 1.0
-                    
-                at_s = at_ms / 1000.0
-                
-                # Update override boxes for visibility
-                self.spin_pulse_rr.blockSignals(True)
-                self.spin_pulse_at.blockSignals(True)
-                self.spin_pulse_count.blockSignals(True)
-                
-                self.spin_pulse_rr.setValue(rr)
-                self.spin_pulse_at.setValue(at_ms)
-                self.spin_pulse_count.setValue(pulses)
-                
-                self.spin_pulse_rr.blockSignals(False)
-                self.spin_pulse_at.blockSignals(False)
-                self.spin_pulse_count.blockSignals(False)
+            # Get Timing (Always use spinbox values)
+            rr = self.spin_pulse_rr.value
+            at_ms = self.spin_pulse_at.value
+            at_s = at_ms / 1000.0
+            pulses = self.spin_pulse_count.value
             
-            IoLog.information(f"iolite Optimiser: Simulation Params - RR: {rr}, AT: {at_ms}ms, Pulses: {pulses}")
-
-            try:
-                bg_s = self.spin_pulse_bg.value
-                sig_s = self.spin_pulse_sig.value
-            except Exception as e:
-                 IoLog.error(f"iolite Optimiser: Failed to get spinbox values: {e}")
-                 return
-
             IoLog.information(f"iolite Optimiser: Simulation Params - RR: {rr}, AT: {at_ms}ms, Pulses: {pulses}")
 
             try:
@@ -7283,7 +7513,7 @@ class ioliteOptimiser(QWidget):
                     # Scale dwell if AT has been overridden
                     ratio = 1.0
                     if hasattr(self, 'last_sync') and self.last_sync:
-                         orig_at = self.last_sync.get('Acquisition Time (ms)', 1.0)
+                         orig_at = self.last_sync.get('at_actual_s', 0.001) * 1000.0
                          if orig_at > 0: ratio = at_ms / orig_at
                     
                     dwell_s = (dwell_ms * ratio) / 1000.0
@@ -7402,12 +7632,26 @@ class ioliteOptimiser(QWidget):
                 global_max_meas = np.max(all_intensities)
             if global_max_meas <= 0: global_max_meas = 1.0
             
-            if norm:
-                mx_t = np.max(y_theo) if len(y_theo) > 0 else 1
-                if mx_t > 0: y_theo = y_theo / mx_t
+            own_theo_max = np.max(y_theo) if len(y_theo) > 0 else 1.0
+            if own_theo_max <= 0: own_theo_max = 1.0
+
+            # --- CROP LOGIC ---
+            show_bg = self.chk_show_bg.isChecked()
+            bg_s = self.spin_pulse_bg.value
+            sig_s = self.spin_pulse_sig.value
+            t_min_crop = bg_s + 1.0
+            t_max_crop = bg_s + sig_s - 1.0
+
+            if not show_bg:
+                # Normalise to max within signal window for overlay
+                mask_theo = (t_theo >= t_min_crop) & (t_theo <= t_max_crop)
+                theo_sig_max = np.max(y_theo[mask_theo]) if any(mask_theo) else own_theo_max
+                y_theo = y_theo / (theo_sig_max if theo_sig_max > 0 else 1)
+            elif norm:
+                y_theo = y_theo / own_theo_max
             else:
-                # If raw, scale Theo to match data max so it is visible
-                y_theo = y_theo * global_max_meas
+                # If raw, normalize Theo to 1, then scale to match data max so it is visible
+                y_theo = (y_theo / own_theo_max) * global_max_meas
 
             # Plot Theoretical once (Faint background)
             ax.plot(t_theo, y_theo, label="Theoretical (Pulse Stream)", color='gray', alpha=0.3, lw=1)
@@ -7419,9 +7663,16 @@ class ioliteOptimiser(QWidget):
                 t_meas = meas_df['Time'].values
                 y_meas = meas_df['Intensity'].values
                 
-                if norm:
-                    # Normalize against GLOBAL max to preserve relative scale
-                    y_meas = y_meas / global_max_meas
+                if not show_bg:
+                    # LOCAL NORM in signal window for shape comparison (overlay)
+                    mask_meas = (t_meas >= t_min_crop) & (t_meas <= t_max_crop)
+                    meas_sig_max = np.nanmax(y_meas[mask_meas]) if any(mask_meas) else (np.max(y_meas) if len(y_meas)>0 else 1)
+                    y_meas = y_meas / (meas_sig_max if meas_sig_max > 0 else 1)
+                elif norm:
+                    # Normalize against OWN max so shapes can be compared visually
+                    own_max = np.max(y_meas) if len(y_meas) > 0 else 1
+                    if own_max > 0:
+                        y_meas = y_meas / own_max
                 
                 color = colors[idx % len(colors)]
                 
@@ -7431,12 +7682,62 @@ class ioliteOptimiser(QWidget):
                 ax.plot(t_meas, y_meas, label=f"{iso}", color=color, marker='o', markersize=4, lw=2)
             
             ax.set_xlabel("Time (s)", color=fg_color)
-            ax.set_ylabel("Normalized Intensity" if norm else "Intensity", color=fg_color)
+            if not show_bg:
+                t_low = t_min_crop - 2.5
+                t_high = t_max_crop + 2.5
+                ax.set_xlim(t_low, t_high)
+                
+                # --- DYNAMIC Y-SCALING to fill 90% ---
+                # Determine min/max based ONLY on the stable measured signal plateau [t_min_crop, t_max_crop]
+                # We EXCLUDE the theoretical trace here because it pulses down to 0, which would 
+                # prevent the zoom from focusing on the measurement stability/shape.
+                all_signal_plateau_y = []
+                
+                # Measured (normalized to 1.0 locally)
+                for i_iso, (iso, (_, m_df)) in enumerate(self.pulse_results.items()):
+                    tm = m_df['Time'].values
+                    ym = m_df['Intensity'].values
+                    
+                    # Local max for this isotope (in stable region)
+                    mask_m_stable = (tm >= t_min_crop) & (tm <= t_max_crop)
+                    if not any(mask_m_stable): continue
+                    
+                    m_max = np.nanmax(ym[mask_m_stable])
+                    if m_max <= 0: m_max = 1.0
+                    
+                    all_signal_plateau_y.extend(ym[mask_m_stable] / m_max)
+                
+                if all_signal_plateau_y:
+                    y_min_data = np.nanmin(all_signal_plateau_y)
+                    y_max_data = np.nanmax(all_signal_plateau_y) 
+                    
+                    data_range = y_max_data - y_min_data
+                    if data_range <= 0: data_range = 0.001
+                    
+                    H = data_range / 0.9
+                    
+                    y_top = y_max_data + 0.05 * H
+                    y_bottom = y_top - H
+                    
+                    ax.autoscale(False)
+                    ax.set_ylim(y_bottom, y_top)
+
+                ax.set_ylabel("Normalized Intensity (Signal Overlay)", color=fg_color)
+            else:
+                ax.set_ylabel("Normalized Intensity" if norm else "Intensity", color=fg_color)
             
             # Legend with interactivity
             self.pulse_legend_map = {}
             handles, labels = ax.get_legend_handles_labels()
-            leg = ax.legend(handles, labels, loc='upper right', framealpha=0.5, fontsize='small')
+            
+            import matplotlib.transforms as mtransforms
+            leg = ax.legend(handles, labels, loc='lower center', 
+                            bbox_to_anchor=(0.5, 1.0), 
+                            bbox_transform=mtransforms.blended_transform_factory(ax.figure.transFigure, ax.transAxes),
+                            borderaxespad=0.5, ncol=min(10, len(handles)), frameon=True, fontsize='small',
+                            handlelength=1.5, handletextpad=0.7, columnspacing=1.5)
+            
+            leg.get_frame().set_alpha(0.0) # Transparent frame
             
             for legline, handle in zip(leg.get_lines(), handles):
                 legline.set_picker(5) # 5 pts tolerance
@@ -7452,9 +7753,9 @@ class ioliteOptimiser(QWidget):
             
             # Use EngFormatter for non-normalized
             if not norm:
-                 ax.yaxis.set_major_formatter(EngFormatter(places=0, sep=" "))
+                 ax.yaxis.set_major_formatter(EngFormatter(sep=" "))
             
-            if self.chk_rescale_pulse.isChecked() and not preserve_zoom:
+            if self.chk_rescale_pulse.isChecked() and not preserve_zoom and show_bg:
                  self.rescale_to_visible(ax=ax, canvas=None)
             elif preserve_zoom:
                  pass 
@@ -7462,6 +7763,97 @@ class ioliteOptimiser(QWidget):
             self._update_smart_margins(self.pulse_canvas)
             self.pulse_canvas.draw()
             IoLog.information("iolite Optimiser: pulse_canvas.draw() called successfully")
+            
+            # --- Update RSD Stats Table ---
+            self.pulse_table.setRowCount(0)
+            self.pulse_table.setRowCount(len(self.pulse_results))
+            
+            try:
+                bg_s = self.spin_pulse_bg.value
+                sig_s = self.spin_pulse_sig.value
+                t_min = bg_s + 1.0
+                t_max = bg_s + sig_s - 1.0
+                
+                # Helper for SI Formatting
+                def _si_pulse(val):
+                    if val >= 1e9: return f"{val/1e9:.2f} G"
+                    if val >= 1e6: return f"{val/1e6:.2f} M"
+                    if val >= 1e3: return f"{val/1e3:.2f} k"
+                    return f"{val:.2f}"
+                
+                # Calculate Theoretical Mean in signal window for Ideal Match
+                t_theo = theo_df['Time'].values
+                y_theo = theo_df['Intensity'].values
+                # We need to re-apply the same scaling/normalization to y_theo that was used for plotting
+                # but it's simpler to just use raw intensities for the ratio.
+                # Logic: Ideal Match compares the 'area' or 'average' of measured vs theory.
+                theo_mask = (t_theo >= t_min) & (t_theo <= t_max)
+                y_theo_crop = y_theo[theo_mask]
+                theo_mean = np.nanmean(y_theo_crop) if len(y_theo_crop) > 0 else 1.0
+                if theo_mean <= 0: theo_mean = 1.0
+                
+                # Total Cycle Time (Acq Time)
+                cycle_time_ms = self.spin_pulse_at.value
+                if cycle_time_ms <= 0: cycle_time_ms = 1.0
+
+                for i, (iso, (_, meas_df)) in enumerate(self.pulse_results.items()):
+                    t_meas = meas_df['Time'].values
+                    y_meas = meas_df['Intensity'].values
+                    
+                    mask = (t_meas >= t_min) & (t_meas <= t_max)
+                    y_crop = y_meas[mask]
+                    
+                    if len(y_crop) > 1:
+                        m = np.nanmean(y_crop)
+                        s = np.nanstd(y_crop)
+                        rsd = (s / m * 100.0) if m > 0 else 0.0
+                        
+                        # Duty Cycle: Dwell / AT
+                        # We need to find the dwell and scale for this isotope
+                        dwell_ms = 1.0
+                        ch_scale = 1.0
+                        if hasattr(self, 'optimised_results') and self.optimised_results:
+                             for res in self.optimised_results:
+                                 if res.get('Isotope') == iso:
+                                     dwell_ms = res.get('Final Dwell (ms)', 1.0)
+                                     # Get scaling factor (same logic as run_pulse_simulation)
+                                     try:
+                                         if 'Signal CPS' in res: ch_scale = float(res['Signal CPS'])
+                                         elif 'Resultant SNR' in res: ch_scale = float(res['Resultant SNR'])
+                                     except: pass
+                                     break
+                        
+                        # Ideal Match: How close is the measured mean to the theoretical mean (scaled)?
+                        # Theoretical mean is based on 0-1 pulse intensity. 
+                        # Measured is based on CPS or SNR (the ch_scale).
+                        scaled_theo_mean = theo_mean * ch_scale
+                        ideal_match = (m / scaled_theo_mean * 100.0) if scaled_theo_mean > 0 else 0.0
+                        
+                        # Max Error: Largest deviation from scaled theoretical mean
+                        max_err_abs = np.nanmax(np.abs(y_crop - scaled_theo_mean))
+                        max_err_pct = (max_err_abs / scaled_theo_mean * 100.0) if scaled_theo_mean > 0 else 0.0
+                        
+                        duty_cycle = (dwell_ms / cycle_time_ms * 100.0)
+
+                        def _it(txt):
+                            it = QTableWidgetItem(txt)
+                            it.setTextAlignment(Qt.AlignCenter)
+                            return it
+                            
+                        self.pulse_table.setItem(i, 0, _it(iso))
+                        self.pulse_table.setItem(i, 1, _it(_si_pulse(m)))
+                        self.pulse_table.setItem(i, 2, _it(f"{rsd:.2f} %"))
+                        self.pulse_table.setItem(i, 3, _it(f"{ideal_match:.1f} %"))
+                        self.pulse_table.setItem(i, 4, _it(f"{max_err_pct:.1f} %"))
+                        self.pulse_table.setItem(i, 5, _it(f"{duty_cycle:.1f} %"))
+                    else:
+                        for col in range(6):
+                            txt = iso if col == 0 else ("N/A (Window too small)" if col == 1 else "-")
+                            it = QTableWidgetItem(txt)
+                            it.setTextAlignment(Qt.AlignCenter)
+                            self.pulse_table.setItem(i, col, it)
+            except Exception as e:
+                IoLog.error(f"Pulse Table Update Error: {e}")
             
         except Exception as e:
             IoLog.error(f"iolite Optimiser: update_pulse_plot failed: {e}")
@@ -7570,5 +7962,5 @@ def createUIElements():
     IoLog.information("iolite Optimiser: createUIElements called")
     action = QAction("iolite Optimiser", None)
     action.triggered.connect(create_widget)
-    ui.setAction(action)
-    ui.setMenuName(['Tools'])
+    ui.setAction(action) # type: ignore
+    ui.setMenuName(['Tools']) # type: ignore

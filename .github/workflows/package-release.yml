@@ -1,0 +1,80 @@
+name: Package Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      custom_version:
+        description: 'Optional: Manually set a version number (e.g. 0.9.12-beta). If left blank, the commit hash is used.'
+        required: false
+        default: ''
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Determine Version
+        id: version
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            # Extract tag name, e.g., v1.0.0
+            RAW_VERSION=${GITHUB_REF#refs/tags/}
+            # Strip leading 'v' if present
+            VERSION=${RAW_VERSION#v}
+          else
+            # Fallback for manual runs
+            if [[ -n "${{ github.event.inputs.custom_version }}" ]]; then
+              VERSION="${{ github.event.inputs.custom_version }}"
+            else
+              # Get latest tag, fallback to 0.0.0 if no tags found
+              LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0")
+              BASE_VERSION=${LATEST_TAG#v}
+              COMMIT_HASH=$(git rev-parse --short HEAD)
+              VERSION="${BASE_VERSION}-${COMMIT_HASH}"
+            fi
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+          echo "Determined version: $VERSION"
+
+      - name: Update Version in Code
+        run: |
+          # Replace the metadata version comment at the top
+          sed -i -E "s|#/ Version: .*|#/ Version: ${VERSION}|" "iolite Optimiser.py"
+          # Replace the embedded VERSION variable string
+          sed -i -E "s|VERSION = \".*\"|VERSION = \"${VERSION}\"|" "iolite Optimiser.py"
+
+      - name: Create Zip Archive
+        run: |
+          # Create a flat zip containing the main script, LICENSE, and all PDFs from the docs folder
+          zip -j "iolite-Optimiser-v${VERSION}.zip" "iolite Optimiser.py" LICENSE docs/*.pdf
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: iolite-optimiser-v${{ env.VERSION }}
+          path: "iolite-Optimiser-v${{ env.VERSION }}.zip"
+
+      - name: Generate Release Notes
+        run: |
+          git log -1 --pretty=format:"%B" > release_body.md
+          echo "=== RELEASE NOTES ==="
+          cat release_body.md
+          echo "====================="
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: "iolite-Optimiser-v${{ env.VERSION }}.zip"
+          body_path: release_body.md
+          generate_release_notes: false
+

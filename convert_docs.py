@@ -15,8 +15,16 @@ def convert_md_to_pdf(md_path, pdf_path):
         styled_html = f"""
         <html>
         <head>
+        <script>
+        MathJax = {{
+          tex: {{
+            inlineMath: [['$', '$'], ['\\\\(', '\\\\)']]
+          }}
+        }};
+        </script>
+        <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
         <style>
-            body {{ font-family: sans-serif; line-height: 1.6; padding: 40px; }}
+            body {{ font-family: sans-serif; font-size: 11pt; line-height: 1.6; padding: 0px; }}
             h1, h2, h3 {{ color: #1e3a5f; }}
             table {{ border-collapse: collapse; width: 100%; margin: 20px 0; }}
             th, td {{ border: 1px solid #ddd; padding: 8px; text-align: left; }}
@@ -34,7 +42,7 @@ def convert_md_to_pdf(md_path, pdf_path):
         with sync_playwright() as p:
             browser = p.chromium.launch()
             page = browser.new_page()
-            page.set_content(styled_html)
+            page.set_content(styled_html, wait_until="networkidle")
             page.pdf(path=pdf_path, format="A4", margin={"top": "1cm", "bottom": "1cm", "left": "1cm", "right": "1cm"})
             browser.close()
         print("Done.")

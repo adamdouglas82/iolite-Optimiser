@@ -242,9 +242,9 @@ The algorithms and logic used in the iolite Optimiser are based on established s
 - **Optimization Workflow & Loop Logic**:
   - Van Malderen, S. J., et al. "Considerations on data acquisition in laser ablation-inductively coupled plasma-mass spectrometry with low-dispersion interfaces" Spectrochimica Acta Part B, (2018), 140, 29–34
   - Van Elteren, J. T., et al. "Insights into the selection of 2D LA-ICP-MS (multi) elemental mapping conditions" J. Anal. At. Spectrom., (2019), 34, 1919
+  - Lockwood, E. T. (2024). "Multiplexed elemental bioimaging with quadrupole ICP-MS andhigh-frequency laser ablation systems" J. Anal. At. Spectrom., 39, 1125
 - **Single Pulse Response and Washout Analysis**:
   - Ulianov, A., et al. "The ICPMS signal as a Poisson process: a review of basic concepts" J. Anal. At. Spectrom., (2015), 30, 1297–1321
 - **Statistical Framework**:
   - Currie, L. A. "Limits for qualitative detection and quantitative determination: Application to Radiochemistry." Anal. Chem., (1968), 40, 586-593.
   - Currie, L. A. "The Measurement of Environmental Levels of Rare Gas Nuclides and the Treatment of Very Low-Level Counting Data", IEEE Trans. Nucl. Sci., (1972), NS19, (1), 119-126.
-  - Based on the Square Root Transform rule for variance stabilization in counting statistics.
