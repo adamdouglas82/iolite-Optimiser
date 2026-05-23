@@ -6406,8 +6406,9 @@ class ioliteOptimiser(QWidget):
                 if ma: has_mass = True
                 
                 # Only load data if lengths match (crucial check)
-                if len(ch.data()) == len(time_data):
-                    data_dict[ch.name] = ch.data()
+                ch_data = ch.data()
+                if len(ch_data) == len(time_data):
+                    data_dict[ch.name] = ch_data
             
             self.show_meta = {'Element': has_el, 'Mass': has_mass}
             return pd.DataFrame(data_dict), local_metadata
