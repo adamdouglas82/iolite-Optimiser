@@ -541,39 +541,30 @@ class Logic:
             
             start_time = background_s
             
-            # Vectorized Pulse Addition (Optimization)
-            # Find indices for one pulse placed at t=0 relative to grid
-            # Then shift indices for each pulse
+            # Pre-interpolate the composite pulse shape once to the simulation resolution (dt_s)
+            comp_t_shifted = comp_t - comp_t.min()
+            pulse_duration = comp_t_shifted.max()
+            pulse_grid_t = np.arange(0, pulse_duration + dt_s, dt_s)
+            pulse_grid_y = np.interp(pulse_grid_t, comp_t_shifted, comp_y, left=0, right=0)
             
-            # Interpolant centered at l001? composite_df is centered at l001=0 usually?
-            # composite_df['Relative Time (s)'] is relative to l001? Yes.
-            
-            # To avoid huge loop, we can convolve? 
-            # Convolution is slow if kernel is small and signal huge. 
-            # Direct addition is better for sparse pulses.
+            n_pulse_samples = len(pulse_grid_y)
+            n_total_samples = len(y_theoretical)
             
             for i in range(n_pulses):
                 t_pulse = start_time + i * pulse_period_s
                 
-                # Align composite to this time
-                # comp_t + t_pulse maps to t_axis
-                # t_axis_shifted = t_axis - t_pulse
-                # y = interp(comp_t, comp_y, t_axis - t_pulse)
+                # Align the left edge of the pulse
+                idx_start = int((t_pulse + comp_t.min()) / dt_s)
+                idx_end = idx_start + n_pulse_samples
                 
-                # Windowing to speed up
-                t_min = t_pulse + comp_t.min()
-                t_max = t_pulse + comp_t.max()
+                if idx_start >= n_total_samples: break
+                if idx_start < 0: continue
                 
-                idx_start = int(t_min / dt_s)
-                idx_end = int(t_max / dt_s) + 2
-                
-                if idx_start < 0: idx_start = 0
-                if idx_end > len(t_axis): idx_end = len(t_axis)
-                
-                if idx_end > idx_start:
-                    t_segment = t_axis[idx_start:idx_end]
-                    y_segment = np.interp(t_segment - t_pulse, comp_t, comp_y, left=0, right=0)
-                    y_theoretical[idx_start:idx_end] += y_segment
+                if idx_end > n_total_samples:
+                    valid_len = n_total_samples - idx_start
+                    y_theoretical[idx_start:n_total_samples] += pulse_grid_y[:valid_len]
+                else:
+                    y_theoretical[idx_start:idx_end] += pulse_grid_y
 
             # 4. Integrate (Measured Signal) for EACH Channel
             channel_results = {}
