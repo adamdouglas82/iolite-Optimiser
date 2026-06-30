@@ -62,8 +62,15 @@ except ImportError:
 try:
     import matplotlib
     import matplotlib.pyplot as plt
-    matplotlib.use('Qt5Agg')
-    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+    
+    # Try unified QtAgg backend (supports both Qt 5 & Qt 6)
+    try:
+        matplotlib.use('qtagg')
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+    except Exception:
+        matplotlib.use('Qt5Agg')
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        
     from matplotlib.figure import Figure
     from matplotlib.ticker import MaxNLocator, EngFormatter, ScalarFormatter
     from cycler import cycler
@@ -75,31 +82,29 @@ except Exception as e:
 
 
 # iolite-specific imports (PythonQt)
+from iolite.QtGui import (QAction, QSizePolicy, QWidget, QLabel, QDoubleSpinBox, QSpinBox, QCheckBox, 
+                          QComboBox, QGridLayout, QHBoxLayout, QVBoxLayout, QGroupBox, QFormLayout, 
+                          QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QMenu, 
+                          QColorDialog, QDialog, QPushButton, QScrollArea, QSplitter, QFrame, 
+                          QLineEdit, QTabWidget, QStackedWidget, QApplication, QPalette, QColor,
+                          QListWidget, QListWidgetItem, QTextEdit, QInputDialog, QMessageBox)
+from iolite.QtCore import Qt, QTimer, QSize, QEvent, QUrl
+
 try:
-    from iolite.QtGui import (QAction, QSizePolicy, QWidget, QLabel, QDoubleSpinBox, QSpinBox, QCheckBox, 
-                              QComboBox, QGridLayout, QHBoxLayout, QVBoxLayout, QGroupBox, QFormLayout, 
-                              QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QMenu, 
-                              QColorDialog, QDialog, QPushButton, QScrollArea, QSplitter, QFrame, 
-                              QLineEdit, QTabWidget, QStackedWidget, QApplication, QPalette, QColor,
-                              QListWidget, QListWidgetItem, QTextEdit, QInputDialog, QMessageBox)
-    from iolite.QtCore import Qt, QTimer, QSize, QEvent, QUrl
-    from iolite import data, IoLog
-except ImportError:
-    # Fallback for non-iolite environments (VSCode)
-    try:
-        from PyQt5.QtWidgets import (QAction, QSizePolicy, QWidget, QLabel, QDoubleSpinBox, QSpinBox, QCheckBox, 
-                                     QComboBox, QGridLayout, QHBoxLayout, QVBoxLayout, QGroupBox, QFormLayout, 
-                                     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QMenu, 
-                                     QColorDialog, QDialog, QPushButton, QScrollArea, QSplitter, QFrame, 
-                                     QLineEdit, QTabWidget, QStackedWidget, QApplication,
-                                     QListWidget, QListWidgetItem, QTextEdit, QInputDialog, QMessageBox)
-        from PyQt5.QtCore import Qt, QTimer, QSize, QEvent, QUrl
-        from PyQt5.QtGui import QPalette, QColor
-    except ImportError:
-        pass
+    data
+except NameError:
+    from iolite import data
+
+try:
+    IoLog
+except NameError:
+    from iolite import IoLog
+
+# Backward-compatible alias for trapezoidal integration (NumPy 1.x vs 2.x)
+trapz = getattr(np, 'trapezoid', getattr(np, 'trapz', None))
 
 # --- FEATURE ENABLE ---
-SHOW_PULSE_TRAIN_SIMULATOR = False  # Currently Beta
+SHOW_PULSE_TRAIN_SIMULATOR = True  # Currently Beta
 
 # --- EMBEDDED CONSTANTS ---
 VERSION = "dev"
@@ -210,6 +215,49 @@ PLOT_COLORS = [
     "#17becf", "#9edae5"
 ]
 
+def get_settings_dir():
+    try:
+        home = os.path.expanduser("~")
+        
+        # Determine the official iolite 4.11 AppData path
+        if os.name == 'nt' or 'LOCALAPPDATA' in os.environ:
+            # Windows: AppData/Local/iolite-software/iolite4/iolite Optimiser
+            app_data = os.environ.get('LOCALAPPDATA', os.path.join(home, 'AppData', 'Local'))
+            new_dir = os.path.join(app_data, 'iolite-software', 'iolite4', 'iolite Optimiser')
+        else:
+            # macOS: Library/Application Support/iolite-software/iolite4/iolite Optimiser
+            new_dir = os.path.join(home, 'Library', 'Application Support', 'iolite-software', 'iolite4', 'iolite Optimiser')
+
+        # Setup the old paths for migration checks
+        old_dir = os.path.join(home, "Documents", "iolite", "iolite Optimiser")
+        old_alt_dir = os.path.join(home, "OneDrive", "Documents", "iolite", "iolite Optimiser")
+
+        # Create the new directory if it doesn't exist
+        os.makedirs(new_dir, exist_ok=True)
+
+        # Migrate files if needed
+        for filename in ["iolite Optimiser Settings.json", "iolite Optimiser Channel Presets.json"]:
+            new_file = os.path.join(new_dir, filename)
+            if not os.path.exists(new_file):
+                for src_dir in [old_dir, old_alt_dir]:
+                    src_file = os.path.join(src_dir, filename)
+                    if os.path.exists(src_file):
+                        try:
+                            import shutil
+                            shutil.copy2(src_file, new_file)
+                            break
+                        except Exception:
+                            pass
+        return new_dir
+    except Exception:
+        try:
+            home = os.path.expanduser("~")
+            fallback = os.path.join(home, "Documents", "iolite", "iolite Optimiser")
+            os.makedirs(fallback, exist_ok=True)
+            return fallback
+        except Exception:
+            return ""
+
 # --- EMBEDDED LOGIC ---
 class Logic:
     @staticmethod
@@ -284,9 +332,9 @@ class Logic:
             idx_end_001 = min(len(time_proc), int(np.ceil(right_ips_001[i])))
             if idx_end_001 > idx_start_001:
                 if is_cps:
-                    area_001 = np.trapz(y_proc[idx_start_001:idx_end_001], x=time_proc[idx_start_001:idx_end_001])
-                    area_01 = np.trapz(y_proc[max(0, int(np.floor(left_ips_01[i]))):min(len(time_proc), int(np.ceil(right_ips_01[i])))], 
-                                       x=time_proc[max(0, int(np.floor(left_ips_01[i]))):min(len(time_proc), int(np.ceil(right_ips_01[i])))])
+                    area_001 = trapz(y_proc[idx_start_001:idx_end_001], x=time_proc[idx_start_001:idx_end_001])
+                    area_01 = trapz(y_proc[max(0, int(np.floor(left_ips_01[i]))):min(len(time_proc), int(np.ceil(right_ips_01[i])))], 
+                                    x=time_proc[max(0, int(np.floor(left_ips_01[i]))):min(len(time_proc), int(np.ceil(right_ips_01[i])))])
                 else:
                     area_001 = np.sum(y_proc[idx_start_001:idx_end_001])
                     area_01 = np.sum(y_proc[max(0, int(np.floor(left_ips_01[i]))):min(len(time_proc), int(np.ceil(right_ips_01[i])))])
@@ -1536,21 +1584,7 @@ class DataConfigDialog(QDialog):
                 self.cmb_preset.blockSignals(False)
     
     def _get_preset_file(self):
-        import os
-        home = os.path.expanduser("~")
-        # Define the base directory (matches main class logic)
-        base_dir = os.path.join(home, "Documents", "iolite", "iolite Optimiser")
-        if not os.path.exists(base_dir):
-            alt_path = os.path.join(home, "OneDrive", "Documents", "iolite", "iolite Optimiser")
-            if os.path.exists(alt_path):
-                base_dir = alt_path
-        
-        # Ensure directory exists if we're trying to save
-        if not os.path.exists(base_dir):
-            try:
-                os.makedirs(base_dir)
-            except: pass
-            
+        base_dir = get_settings_dir()
         return os.path.join(base_dir, 'iolite Optimiser Channel Presets.json')
     
     def _load_presets(self):
@@ -1786,17 +1820,7 @@ class ioliteOptimiser(QWidget):
         self.max_speed = 20000
         
         try:
-            home = os.path.expanduser("~")
-            ol_path = os.path.join(home, "Documents", "iolite", "iolite Optimiser")
-            if not os.path.exists(ol_path):
-                 # Try OneDrive fallback
-                 alt_path = os.path.join(home, "OneDrive", "Documents", "iolite", "iolite Optimiser")
-                 if os.path.exists(os.path.join(home, "OneDrive", "Documents", "iolite")):
-                     if not os.path.exists(alt_path): os.makedirs(alt_path)
-                     ol_path = alt_path
-                 else:
-                     os.makedirs(ol_path)
-
+            ol_path = get_settings_dir()
             self.settings_json_path = os.path.join(ol_path, "iolite Optimiser Settings.json")
             self.persistent_settings = self.load_persistent_settings()
         except Exception as e:
@@ -1805,9 +1829,7 @@ class ioliteOptimiser(QWidget):
 
         # Create Hardware Settings Dialog early
         self.settings_dlg = SettingsDialog(self)
-        
-        
-        self.initUI()
+        self.ui_initialized = False
 
     def _get(self, obj, attr):
         if not obj or not hasattr(obj, attr): return None
@@ -1938,6 +1960,12 @@ class ioliteOptimiser(QWidget):
         if self.isVisible():
              self.run_optimisation(refresh=True)
         
+    def showEvent(self, event):
+        if not getattr(self, 'ui_initialized', False):
+            self.ui_initialized = True
+            self.initUI()
+        QWidget.showEvent(self, event)
+
     def initUI(self):
         # Resize to 80% of screen
         try:
@@ -2089,14 +2117,14 @@ class ioliteOptimiser(QWidget):
         grid_det = QGridLayout()
         grid_det.setColumnStretch(3, 1) # Push content left
         
-        self.cmb_spr_iso = QComboBox()
+        self.cmb_spr_iso = QComboBox(self)
         self.cmb_spr_iso.currentTextChanged.connect(self._on_spr_iso_changed)
         grid_det.addWidget(QLabel("Select Channel:"), 0, 0)
         grid_det.addWidget(self.cmb_spr_iso, 0, 1)
         
         l_prom = QHBoxLayout()
         l_prom.setContentsMargins(0, 0, 0, 0)
-        self.spin_spr_prom = QDoubleSpinBox()
+        self.spin_spr_prom = QDoubleSpinBox(self)
         self.spin_spr_prom.setRange(0, 1e9)
         self.spin_spr_prom.setDecimals(0)
         self.spin_spr_prom.setValue(100.0)
@@ -2105,7 +2133,7 @@ class ioliteOptimiser(QWidget):
         self.spin_spr_prom.valueChanged.connect(self._on_spr_prom_changed)
         l_prom.addWidget(self.spin_spr_prom)
         
-        self.chk_spr_auto_prom = QCheckBox("Auto")
+        self.chk_spr_auto_prom = QCheckBox("Auto", self)
         self.chk_spr_auto_prom.setChecked(True)
         self.chk_spr_auto_prom.toggled.connect(self._on_spr_auto_prom_toggled)
         l_prom.addWidget(self.chk_spr_auto_prom)
@@ -2114,7 +2142,7 @@ class ioliteOptimiser(QWidget):
         grid_det.addWidget(QLabel("Peak Cutoff:"), 1, 0)
         grid_det.addLayout(l_prom, 1, 1)
         
-        self.spin_spr_dist = QDoubleSpinBox()
+        self.spin_spr_dist = QDoubleSpinBox(self)
         self.spin_spr_dist.setRange(0.0001, 100000)
         self.spin_spr_dist.setDecimals(4)
         self.spin_spr_dist.setValue(float(self.persistent_settings.get('spr_min_distance', 0.1)))
@@ -2124,7 +2152,7 @@ class ioliteOptimiser(QWidget):
         grid_det.addWidget(QLabel("Min. Distance:"), 2, 0)
         grid_det.addWidget(self.spin_spr_dist, 2, 1)
         
-        self.spin_spr_baseline_window = QDoubleSpinBox()
+        self.spin_spr_baseline_window = QDoubleSpinBox(self)
         self.spin_spr_baseline_window.setRange(0, 100000)
         self.spin_spr_baseline_window.setDecimals(4)
         self.spin_spr_baseline_window.setValue(float(self.persistent_settings.get('spr_baseline_window', 1000.0)))
@@ -2143,13 +2171,13 @@ class ioliteOptimiser(QWidget):
         l_smooth = QHBoxLayout()
         l_smooth.setContentsMargins(0, 0, 0, 0)
         
-        self.chk_spr_smooth = QCheckBox("Apply Smoothing")
+        self.chk_spr_smooth = QCheckBox("Apply Smoothing", self)
         self.chk_spr_smooth.setChecked(self.persistent_settings.get('spr_apply_smooth', False))
         self.chk_spr_smooth.toggled.connect(self._run_spr_analysis_forced)
         self.chk_spr_smooth.toggled.connect(self.save_persistent_settings)
         l_smooth.addWidget(self.chk_spr_smooth)
 
-        self.spin_spr_smooth_window = QDoubleSpinBox()
+        self.spin_spr_smooth_window = QDoubleSpinBox(self)
         self.spin_spr_smooth_window.setRange(0.0001, 100)
         self.spin_spr_smooth_window.setDecimals(4)
         self.spin_spr_smooth_window.setValue(float(self.persistent_settings.get('spr_smooth_window', 0.05)))
@@ -2169,7 +2197,7 @@ class ioliteOptimiser(QWidget):
         self.chk_spr_smooth.hide()
         self.spin_spr_smooth_window.hide()
         
-        self.cmb_spr_unit = QComboBox()
+        self.cmb_spr_unit = QComboBox(self)
         self.cmb_spr_unit.addItems(["Seconds (s)", "Milliseconds (ms)"])
         # Load selection or default to ms
         self.cmb_spr_unit.setCurrentText(self.persistent_settings.get('spr_time_unit', "Milliseconds (ms)"))
@@ -2183,25 +2211,25 @@ class ioliteOptimiser(QWidget):
         
         # Row 6: Background sub
         grid_det.addWidget(QLabel("Subtract Background:"), 6, 0)
-        self.chk_spr_bg_sub = QCheckBox("")
+        self.chk_spr_bg_sub = QCheckBox("", self)
         self.chk_spr_bg_sub.setChecked(self.persistent_settings.get('spr_bg_sub', True))
         self.chk_spr_bg_sub.toggled.connect(self._run_spr_analysis_forced)
         self.chk_spr_bg_sub.toggled.connect(self.save_persistent_settings)
         
-        self.chk_spr_auto_bg = QCheckBox("Auto Select Region")
+        self.chk_spr_auto_bg = QCheckBox("Auto Select Region", self)
         # Default Auto to True
         self.chk_spr_auto_bg.setChecked(self.persistent_settings.get('spr_auto_bg', True))
         self.chk_spr_auto_bg.toggled.connect(self._on_spr_auto_bg_toggled)
         self.chk_spr_auto_bg.toggled.connect(self.save_persistent_settings)
         
-        self.spin_spr_bg_start = QDoubleSpinBox()
+        self.spin_spr_bg_start = QDoubleSpinBox(self)
         self.spin_spr_bg_start.setRange(0, 10000)
         self.spin_spr_bg_start.setDecimals(2)
         self.spin_spr_bg_start.setFixedWidth(60)
         self.spin_spr_bg_start.setValue(float(self.persistent_settings.get('spr_bg_start', 2.0)))
         self.spin_spr_bg_start.valueChanged.connect(self._on_spr_bg_changed)
         
-        self.spin_spr_bg_end = QDoubleSpinBox()
+        self.spin_spr_bg_end = QDoubleSpinBox(self)
         self.spin_spr_bg_end.setRange(0, 10000)
         self.spin_spr_bg_end.setDecimals(2)
         self.spin_spr_bg_end.setFixedWidth(60)
@@ -2215,11 +2243,11 @@ class ioliteOptimiser(QWidget):
         h_excl = QHBoxLayout()
         h_excl.setContentsMargins(0, 0, 0, 0)
         
-        self.chk_spr_auto_exclude = QCheckBox("Auto-Exclude Wide Outliers (Percentile >)")
+        self.chk_spr_auto_exclude = QCheckBox("Auto-Exclude Wide Outliers (Percentile >)", self)
         self.chk_spr_auto_exclude.setChecked(False)
         self.chk_spr_auto_exclude.toggled.connect(self._on_spr_auto_exclude_toggled)
         
-        self.spin_spr_auto_exclude_pct = QDoubleSpinBox()
+        self.spin_spr_auto_exclude_pct = QDoubleSpinBox(self)
         self.spin_spr_auto_exclude_pct.setRange(50.0, 99.9)
         self.spin_spr_auto_exclude_pct.setDecimals(1)
         self.spin_spr_auto_exclude_pct.setValue(90.0)
@@ -2545,10 +2573,10 @@ class ioliteOptimiser(QWidget):
         h_ctrl_spr.addStretch()
         
         h_ctrl_spr.addWidget(self.chk_spr_auto_bg)
-        self.lbl_bg_prefix = QLabel("Background (s):")
+        self.lbl_bg_prefix = QLabel("Background (s):", self)
         h_ctrl_spr.addWidget(self.lbl_bg_prefix)
         h_ctrl_spr.addWidget(self.spin_spr_bg_start)
-        self.lbl_bg_to = QLabel("to")
+        self.lbl_bg_to = QLabel("to", self)
         h_ctrl_spr.addWidget(self.lbl_bg_to)
         h_ctrl_spr.addWidget(self.spin_spr_bg_end)
         h_ctrl_spr.addSpacing(10)
@@ -3093,8 +3121,9 @@ class ioliteOptimiser(QWidget):
         self.spr_legend_frame = leg.get_frame()
         
         self.spr_map_legend_to_line = {}
-        # Use legendHandles to ensure we get all markers/lines correctly
-        for legline, legtext in zip(leg.legendHandles, leg.get_texts()):
+        # Backward-compatible access to legend handles (legend_handles in Matplotlib >= 3.7)
+        leg_handles = getattr(leg, 'legend_handles', getattr(leg, 'legendHandles', []))
+        for legline, legtext in zip(leg_handles, leg.get_texts()):
             txt = legtext.get_text()
             legline.set_alpha(1.0) # Ensure fully visible initially
             legline.set_picker(5)
@@ -4023,7 +4052,7 @@ class ioliteOptimiser(QWidget):
         self.chk_avoid_gaps = QCheckBox("Avoid Gaps")
         self.chk_avoid_gaps.setToolTip("Checked: Always Overlap (Increase Rep-Rate). Unchecked: Allow Gaps.")
         self.chk_avoid_gaps.setChecked(self.persistent_settings.get('avoid_gaps', False)) # Default Unchecked
-        self.chk_avoid_gaps.stateChanged.connect(self._on_ui_change)
+        self.chk_avoid_gaps.toggled.connect(self._on_ui_change)
         self.grid_qual.addWidget(self.chk_avoid_gaps, 4, 2, 1, 2)
         l_settings.addWidget(grp_qual)
 
@@ -4070,7 +4099,8 @@ class ioliteOptimiser(QWidget):
         grid_sync.addWidget(self.lbl_opt_at, 0, 5)
 
         # Row 1: (Empty Left), Speed, Overhead
-        grid_sync.addWidget(QLabel("Speed:"), 1, 2)
+        self.lbl_opt_speed_title = QLabel("Speed:")
+        grid_sync.addWidget(self.lbl_opt_speed_title, 1, 2)
         self.lbl_opt_speed = QLabel("- µm s⁻¹")
         grid_sync.addWidget(self.lbl_opt_speed, 1, 3)
 
@@ -4083,7 +4113,8 @@ class ioliteOptimiser(QWidget):
         self.lbl_est_time_hms = QLabel("-")
         grid_sync.addWidget(self.lbl_est_time_hms, 2, 1)
 
-        grid_sync.addWidget(QLabel("Overlap:"), 2, 2)
+        self.lbl_opt_overlap_title = QLabel("Overlap:")
+        grid_sync.addWidget(self.lbl_opt_overlap_title, 2, 2)
         self.lbl_opt_overlap = QLabel("- µm")
         grid_sync.addWidget(self.lbl_opt_overlap, 2, 3)
 
@@ -4095,7 +4126,8 @@ class ioliteOptimiser(QWidget):
         self.lbl_est_time_sec = QLabel("-")
         grid_sync.addWidget(self.lbl_est_time_sec, 3, 1)
 
-        grid_sync.addWidget(QLabel("Dosage:"), 3, 2)
+        self.lbl_opt_dosage_title = QLabel("Dosage:")
+        grid_sync.addWidget(self.lbl_opt_dosage_title, 3, 2)
         self.lbl_opt_pulses = QLabel("- Pulses")
         grid_sync.addWidget(self.lbl_opt_pulses, 3, 3)
 
@@ -4823,6 +4855,18 @@ class ioliteOptimiser(QWidget):
                 self.grid_qual.addWidget(self.spin_width, 2, 3)
                 self.spin_width.setVisible(True)
 
+        # 3. Dynamic visibility for Optimised Settings (Results Summary)
+        # Hide Speed, Overlap, and Dosage fields in Spot mode
+        show_scan_settings = not is_spot
+        if hasattr(self, 'lbl_opt_speed_title'): self.lbl_opt_speed_title.setVisible(show_scan_settings)
+        if hasattr(self, 'lbl_opt_speed'): self.lbl_opt_speed.setVisible(show_scan_settings)
+        
+        if hasattr(self, 'lbl_opt_overlap_title'): self.lbl_opt_overlap_title.setVisible(show_scan_settings)
+        if hasattr(self, 'lbl_opt_overlap'): self.lbl_opt_overlap.setVisible(show_scan_settings)
+        
+        if hasattr(self, 'lbl_opt_dosage_title'): self.lbl_opt_dosage_title.setVisible(show_scan_settings)
+        if hasattr(self, 'lbl_opt_pulses'): self.lbl_opt_pulses.setVisible(show_scan_settings)
+
 
 
     def _handle_mfr_changed(self, mfr):
@@ -5120,108 +5164,84 @@ class ioliteOptimiser(QWidget):
         # Do NOT force tab index if None. None means "Refresh All".
 
         try:
-            new_df, new_meta = self.get_input_dataframe()
-            if new_df is not None:
-                IoLog.information(f"iolite Optimiser: Initial data loaded ({len(new_df)} rows)")
-                # Log channel count here for correct order
-                cols = [c for c in new_df.columns if c != 'Time']
-                IoLog.information(f"iolite Optimiser: Found {len(cols)} channels")
-                
-                # Reset Auto-Rescale to ON for new data (Ephemeral)
-                if hasattr(self, 'chk_rescale'): self.chk_rescale.setChecked(True)
-                if hasattr(self, 'chk_rescale_spr'): self.chk_rescale_spr.setChecked(True)
-            
-            # --- GLOBAL PRE-PROCESSING ---
-            local_resolved_dwells = {}
-            if new_df is not None:
-                # Calculate Acquisition Time EARLY so DwellDialog can show it
-                if 'Time' in new_df.columns and len(new_df['Time']) > 1:
-                    time_vals = new_df['Time'].values
-                    # Exclude the first timestamp if we have at least 3 points, 
-                    # as the first interval often includes instrument setup overheads
-                    if len(time_vals) > 2:
-                        slope = np.polyfit(np.arange(len(time_vals) - 1), time_vals[1:], 1)[0]
-                    else:
-                        slope = np.polyfit(np.arange(len(time_vals)), time_vals, 1)[0]
-                    self.detected_at_ms = slope * 1000.0
-                    IoLog.information(f"iolite Optimiser: Detected Acquisition Time: {self.detected_at_ms:.3f} ms")
-                else:
-                    self.detected_at_ms = None
-                
-                # Resolve Dwell Times & Units Globally (Need a snapshot for later assignment)
-                cols_all = [c for c in new_df.columns if c != 'Time']
-                if cols_all:
-                    local_resolved_dwells = self.resolve_dwell_times(cols_all)
+            # Reset Auto-Rescale to ON for new data (Ephemeral)
+            if hasattr(self, 'chk_rescale'): self.chk_rescale.setChecked(True)
+            if hasattr(self, 'chk_rescale_spr'): self.chk_rescale_spr.setChecked(True)
             
             # --- SPR TAB DATA ---
             if tab == "spr" or tab is None:
-                # Fully clear previous SPR state to prevent data pollution
-                if hasattr(self, 'spr_all_raw_results'): self.spr_all_raw_results.clear()
-                if hasattr(self, 'spr_excluded_peaks'): self.spr_excluded_peaks.clear()
-                if hasattr(self, 'spr_channel_prominence'): self.spr_channel_prominence.clear()
-                if hasattr(self, 'spr_channel_auto_prom'): self.spr_channel_auto_prom.clear()
-                
-                self.spr_df = new_df
-                if new_df is not None:
-                    self.spr_metadata = new_meta # Store specifically for SPR
-                    self.spr_dwells = local_resolved_dwells.copy() # Store specifically for SPR
+                new_df_spr, new_meta_spr = self.get_input_dataframe(tab="spr")
+                if new_df_spr is not None:
+                    # Fully clear previous SPR state to prevent data pollution
+                    if hasattr(self, 'spr_all_raw_results'): self.spr_all_raw_results.clear()
+                    if hasattr(self, 'spr_excluded_peaks'): self.spr_excluded_peaks.clear()
+                    if hasattr(self, 'spr_channel_prominence'): self.spr_channel_prominence.clear()
+                    if hasattr(self, 'spr_channel_auto_prom'): self.spr_channel_auto_prom.clear()
                     
-                if self.spr_df is not None and 'Time' in self.spr_df.columns and len(self.spr_df['Time']) > 0:
-                     cols = [c for c in self.spr_df.columns if c != 'Time']
-                     if hasattr(self, 'cmb_spr_iso'):
-                         self._block_signals(self.cmb_spr_iso, True)
-                         self.cmb_spr_iso.clear()
-                         self.cmb_spr_iso.addItems(cols)
-                         self._block_signals(self.cmb_spr_iso, False)
-                         
-                         # Force refresh to wipe internal caches in run_spr_analysis
-                         self.run_spr_analysis(force_refresh=True)
+                    self.spr_df = new_df_spr
+                    self.spr_metadata = new_meta_spr # Store specifically for SPR
+                    
+                    # Resolve Dwell Times & Units specifically for SPR
+                    cols_all = [c for c in new_df_spr.columns if c != 'Time']
+                    self.spr_dwells = self.resolve_dwell_times(cols_all) if cols_all else {}
+                    
+                    if self.spr_df is not None and 'Time' in self.spr_df.columns and len(self.spr_df['Time']) > 0:
+                         cols = [c for c in self.spr_df.columns if c != 'Time']
+                         if hasattr(self, 'cmb_spr_iso'):
+                             self._block_signals(self.cmb_spr_iso, True)
+                             self.cmb_spr_iso.clear()
+                             self.cmb_spr_iso.addItems(cols)
+                             self._block_signals(self.cmb_spr_iso, False)
+                             
+                             # Force refresh to wipe internal caches in run_spr_analysis
+                             self.run_spr_analysis(force_refresh=True)
 
             # --- OPTIMISER TAB DATA ---
             if tab == "opt" or tab is None:
-                self.opt_df = new_df
-                if new_df is not None:
-                    self.opt_metadata = new_meta # Store specifically for Optimiser
+                new_df_opt, new_meta_opt = self.get_input_dataframe(tab="opt")
+                if new_df_opt is not None:
+                    self.opt_df = new_df_opt
+                    self.opt_metadata = new_meta_opt # Store specifically for Optimiser
                     self.channel_metadata = self.opt_metadata # Backwards compat alias
                     
-                    self.opt_dwells = local_resolved_dwells.copy() # Store specifically for Optimiser
+                    # Resolve Dwell Times & Units specifically for Optimiser
+                    cols_all = [c for c in new_df_opt.columns if c != 'Time']
+                    self.opt_dwells = self.resolve_dwell_times(cols_all) if cols_all else {}
                     self.channel_dwells = self.opt_dwells # Backwards compat alias for calc functions
 
-                if self.opt_df is not None:
-                     if 'Time' in self.opt_df.columns and len(self.opt_df['Time']) > 0:
-                         self.t_start = float(self.opt_df['Time'].iloc[0])
-                         max_rel_t = float(self.opt_df['Time'].iloc[-1] - self.t_start)
-                         
-                         # Update SpinBox Ranges (Block signals to prevent inadvertent optimization triggers)
-                         for sb in [self.spin_bg_start, self.spin_bg_end, self.spin_sig_start, self.spin_sig_end]:
-                             self._block_signals(sb, True)
-                             sb.setRange(-100, max_rel_t + 100) # Give some buffer
-                             self._block_signals(sb, False)
-                         
-                         # Calculate Actual AT via linear regression
-                         time_vals = self.opt_df['Time'].values
-                         slope = np.polyfit(np.arange(len(time_vals)), time_vals, 1)[0]
-                         self.detected_at_ms = slope * 1000.0
-    
-                         # Resolve Dwells & Calculate Overhead
-                         # Dwells already populated in local block and assigned to self.opt_dwells
-                         if len(self.opt_df.columns) > 1:
-                             self.lbl_result.setText(f"Loaded {len(self.opt_df.columns)-1} channels from iolite.")
-                             # Unit/Dwell resolution moved global
-                         
-                         # Recalculate Overhead using the unified method
-                         self._recalculate_overhead()
-    
-                     else:
-                         self.t_start = 0.0
-                         
-                     # Logic for Auto-Detect vs Manual
-                     if self._get(self.chk_auto, 'isChecked'):
-                         self.run_auto_detect()
-                     else:
-                         self.update_plot()
-                         # Trigger real-time optimization when data refreshed with manual regions
-                         self.run_optimisation(refresh=False)
+                    if self.opt_df is not None:
+                         if 'Time' in self.opt_df.columns and len(self.opt_df['Time']) > 0:
+                             self.t_start = float(self.opt_df['Time'].iloc[0])
+                             max_rel_t = float(self.opt_df['Time'].iloc[-1] - self.t_start)
+                             
+                             # Update SpinBox Ranges (Block signals to prevent inadvertent optimization triggers)
+                             for sb in [self.spin_bg_start, self.spin_bg_end, self.spin_sig_start, self.spin_sig_end]:
+                                 self._block_signals(sb, True)
+                                 sb.setRange(-100, max_rel_t + 100) # Give some buffer
+                                 self._block_signals(sb, False)
+                             
+                             # Calculate Actual AT via linear regression
+                             time_vals = self.opt_df['Time'].values
+                             slope = np.polyfit(np.arange(len(time_vals)), time_vals, 1)[0]
+                             self.detected_at_ms = slope * 1000.0
+        
+                             # Resolve Dwells & Calculate Overhead
+                             if len(self.opt_df.columns) > 1:
+                                 self.lbl_result.setText(f"Loaded {len(self.opt_df.columns)-1} channels from iolite.")
+                              
+                             # Recalculate Overhead using the unified method
+                             self._recalculate_overhead()
+        
+                         else:
+                             self.t_start = 0.0
+                             
+                         # Logic for Auto-Detect vs Manual
+                         if self._get(self.chk_auto, 'isChecked'):
+                             self.run_auto_detect()
+                         else:
+                             self.update_plot()
+                             # Trigger real-time optimization when data refreshed with manual regions
+                             self.run_optimisation(refresh=False)
         except Exception as e:
             msg = f"Refresh Error: {e}"
             print(msg)
@@ -6387,11 +6407,62 @@ class ioliteOptimiser(QWidget):
             print(traceback.format_exc())
             self.lbl_result.setText(msg)
 
-    def get_input_dataframe(self):
+    def get_input_dataframe(self, tab=None):
         try:
-            channels = data.timeSeriesList(data.Input)
-            # IoLog.information(f"iolite Optimiser: Found {len(channels) if channels else 0} channels") # Silent/Moved
+            # 1. Check loaded files in iolite session
+            files = data.importedFiles()
+            target_file = None
+            
+            if len(files) == 1:
+                target_file = files[0]
+            elif len(files) > 1:
+                if tab is not None:
+                    keyword = "spr" if tab == "spr" else "opt"
+                    for f in files:
+                        if keyword in f.fileName().lower():
+                            target_file = f
+                            break
+                if not target_file:
+                    target_file = files[0]
+            
+            # 2. Get channels corresponding to target file
+            if target_file is not None:
+                ch_names = target_file.channelList()
+                channels = []
+                for name in ch_names:
+                    ch = data.timeSeries(name)
+                    if ch:
+                        channels.append(ch)
+            else:
+                channels = data.timeSeriesList(data.Input)
+                
             if not channels: return None, {}
+            
+            # --- PRE-COMPUTE TIME SLICING AND CYCLE TIME EARLY ---
+            ref_ch = channels[0]
+            time_data = ref_ch.time()
+            
+            mask = None
+            if target_file is not None:
+                try:
+                    t_start = target_file.startTime().toSecsSinceEpoch()
+                    t_end = target_file.endTime().toSecsSinceEpoch()
+                    mask = (time_data >= t_start) & (time_data <= t_end)
+                    time_data = time_data[mask]
+                except Exception as me:
+                    IoLog.warning(f"iolite Optimiser: Time slicing failed: {me}. Loading full series.")
+                    mask = None
+
+            # Calculate average time step for the sliced timeline
+            detected_at_val = None
+            if len(time_data) > 1:
+                if len(time_data) > 2:
+                    slope = np.polyfit(np.arange(len(time_data) - 1), time_data[1:], 1)[0]
+                else:
+                    slope = np.polyfit(np.arange(len(time_data)), time_data, 1)[0]
+                detected_at_val = slope * 1000.0
+            
+            self.detected_at_ms = detected_at_val
             
             # --- Channel Filtering for Vitesse/icpTOF ---
             ref_ch_0 = channels[0]
@@ -6408,15 +6479,8 @@ class ioliteOptimiser(QWidget):
             if is_tof:
                 ch_names = [ch.name for ch in channels]
                 
-                # Calculate AT early for the dialog
-                ref_time = channels[0].time()
-                if len(ref_time) > 1:
-                    detected_at = (ref_time[1] - ref_time[0]) * 1000.0
-                else:
-                    detected_at = None
-                
                 # Unified Dialog: Channel selection + Global dwell
-                dlg = DataConfigDialog(ch_names, detected_at=detected_at, is_tof=True, parent=self)
+                dlg = DataConfigDialog(ch_names, detected_at=self.detected_at_ms, is_tof=True, parent=self)
                 if dlg.exec_():
                     selected_names = set(dlg.result_channels)
                     channels = [ch for ch in channels if ch.name in selected_names]
@@ -6435,8 +6499,6 @@ class ioliteOptimiser(QWidget):
             
             # --- End Filter Logic ---
             
-            ref_ch = channels[0]
-            time_data = ref_ch.time()
             data_dict = {'Time': time_data}
             
             local_metadata = {}
@@ -6455,10 +6517,19 @@ class ioliteOptimiser(QWidget):
                 
                 # Only load data if lengths match (crucial check)
                 ch_data = ch.data()
-                if len(ch_data) == len(time_data):
-                    data_dict[ch.name] = ch_data
+                if mask is not None:
+                    if len(ch_data) == len(mask):
+                        data_dict[ch.name] = ch_data[mask]
+                else:
+                    if len(ch_data) == len(time_data):
+                        data_dict[ch.name] = ch_data
             
             self.show_meta = {'Element': has_el, 'Mass': has_mass}
+            
+            # Also log file name being loaded for visibility
+            if target_file is not None:
+                IoLog.information(f"iolite Optimiser: Loaded {len(data_dict) - 1} channels from file: {target_file.fileName()}")
+                
             return pd.DataFrame(data_dict), local_metadata
         except Exception as e:
             IoLog.error(f"iolite Optimiser: Input Error: {e}")
@@ -7112,19 +7183,38 @@ class ioliteOptimiser(QWidget):
                 # Mode (Dropdown) - Reuse existing if possible
                 current_status = self.isotope_configs.get(iso_name, {}).get("status", "Auto")
                 
+                # Determine allowed mode items based on hardware technology
+                allowed_items = ["Auto", "Even", "Set to Min", "Exclude", "Custom"]
+                tech = getattr(self, 'icp_tech', 'Quadrupole')
+                if tech == "Quadrupole":
+                    allowed_items.remove("Exclude")
+                    if current_status == "Exclude":
+                        current_status = "Auto"
+                        self.isotope_configs.setdefault(iso_name, {})["status"] = "Auto"
+                elif tech in ["TOF", "Multi-Collector"]:
+                    allowed_items.remove("Set to Min")
+                    if current_status == "Set to Min":
+                        current_status = "Auto"
+                        self.isotope_configs.setdefault(iso_name, {})["status"] = "Auto"
+
                 combo = self.table.cellWidget(i, self.col_map['Mode'])
                 if not combo or rebuild_widgets:
                     combo = QComboBox()
-                    # Centre text in combo if possible
-                    # Note: Some versions of Qt require different approaches, but standard items are always centered now
-                    combo.addItems(["Auto", "Even", "Set to Min", "Exclude", "Custom"])
+                    combo.addItems(allowed_items)
                     combo.setCurrentText(current_status)
                     combo.setProperty("iso_name", str(iso_name))
                     combo.activated.connect(lambda idx, n=iso_name, c=combo: self._on_mode_changed(n, c.itemText(idx)))
                     self.table.setCellWidget(i, self.col_map['Mode'], combo)
                 else:
-                    # Update existing combo without recreating
-                    if self._get(combo, 'currentText') != current_status:
+                    # Check if the combo items need to be refreshed
+                    existing_items = [combo.itemText(j) for j in range(combo.count)]
+                    if existing_items != allowed_items:
+                        combo.blockSignals(True)
+                        combo.clear()
+                        combo.addItems(allowed_items)
+                        combo.setCurrentText(current_status)
+                        combo.blockSignals(False)
+                    elif self._get(combo, 'currentText') != current_status:
                         combo.blockSignals(True)
                         combo.setCurrentText(current_status)
                         combo.blockSignals(False)
@@ -7336,7 +7426,7 @@ class ioliteOptimiser(QWidget):
         self.spin_pulse_count.setDecimals(3)
         form_overrides.addRow("Pulses / Acq:", self.spin_pulse_count)
         
-        self.spin_pulse_washout = QDoubleSpinBox()
+        self.spin_pulse_washout = QDoubleSpinBox(self)
         self.spin_pulse_washout.setRange(0.01, 50000.0)
         self.spin_pulse_washout.setDecimals(2)
         self.spin_pulse_washout.setSuffix(" ms")
@@ -8018,78 +8108,41 @@ class ioliteOptimiser(QWidget):
 # --- UI SETUP ---
 widget = None
 
-
-def create_widget():
+def createUIElements():
+    # 'ui' is a global object provided by iolite for UI plugins
     global widget
-    IoLog.information("iolite Optimiser: create_widget called (Debug Version)")
-    
-    try:
-        if widget is not None:
-            # Force close and recreation to ensure new code is loaded
-            try:
-                widget.close()
-                widget.deleteLater()
-            except: 
-                pass
-            widget = None
-            
-            # Original singleton logic commented out for dev/update:
-            # try:
-            #     if not widget.isVisible():
-            #         widget.show()
-            #     widget.raise_()
-            #     widget.activateWindow()
-            #     return
-            # except RuntimeError:
-            #     widget = None
-
-    except Exception as e:
-        IoLog.error(f"iolite Optimiser: Error checking widget state: {e}")
-        widget = None
-
-    # Zombie cleanup removed by user request
-
-    # Use 'None' as the parent for the widget per official examples
-    IoLog.information("iolite Optimiser: Creating new widget (Parent: None)")
+    IoLog.information("iolite Optimiser: createUIElements called")
     
     try:
         widget = ioliteOptimiser()
-        # widget.setAttribute(Qt.WA_DeleteOnClose) # Keep widget alive to prevent PythonQt crashes
         widget.setWindowTitle(f"iolite Optimiser - v{VERSION}")
-        
-        # Connect destroyed signal to cleanup global reference
-        # widget.destroyed.connect(cleanup_widget)
-        
-        # Default size if not previously set
-        widget.setMinimumHeight(850) # Enforce minimum height for scroll-free layout
-        widget.resize(1100, 850) 
-        widget.show()
-        
-        # Connect signals AFTER the widget is fully initialized and shown
-        # Auto-Sync Disabled: Signals cause layout instability in this environment
-        # widget.connect_signals()
-        try:
-            screen = QApplication.primaryScreen()
-            if screen:
-                rect = screen.availableGeometry()
-                widget.resize(int(rect.width() * 0.9), int(rect.height() * 0.9))
-            else:
-                widget.resize(1536, 864)
-        except:
-             widget.resize(1536, 864)
-        
-        widget.show()
-        widget.raise_()
-        widget.activateWindow()
-        IoLog.information("iolite Optimiser: Widget initialized and shown")
     except Exception as e:
-        IoLog.error(f"iolite Optimiser: Error creating widget: {str(e)}")
+        IoLog.error(f"iolite Optimiser: Error creating widget: {e}")
         IoLog.error(traceback.format_exc())
-
-def createUIElements():
-    # 'ui' is a global object provided by iolite for UI plugins
-    IoLog.information("iolite Optimiser: createUIElements called")
-    action = QAction("iolite Optimiser", None)
-    action.triggered.connect(create_widget)
+        return
+        
+    action = QAction("iolite\nOptimiser", None)
+    
+    try:
+        from iolite.ui import CommonUIPyInterface as CUI
+        cui = CUI()
+        icon = None
+        # Try a few different icon names
+        for name in ['sliders', 'chart', 'chart-line', 'analytics', 'settings', 'funnel', 'trophy']:
+            try:
+                ic = cui.icon(name)
+                if not ic.isNull():
+                    icon = ic
+                    break
+            except: pass
+            
+        if icon:
+            action.setIcon(icon)
+        else:
+            action.setIcon(cui.icon('sliders'))
+    except Exception as e:
+        IoLog.warning(f"iolite Optimiser: Could not set action icon: {e}")
+        
+    ui.setWidget(widget) # type: ignore
     ui.setAction(action) # type: ignore
     ui.setMenuName(['Tools']) # type: ignore
