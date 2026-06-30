@@ -1837,9 +1837,7 @@ class ioliteOptimiser(QWidget):
 
         # Create Hardware Settings Dialog early
         self.settings_dlg = SettingsDialog(self)
-        
-        
-        self.initUI()
+        self.ui_initialized = False
 
     def _get(self, obj, attr):
         if not obj or not hasattr(obj, attr): return None
@@ -1970,6 +1968,12 @@ class ioliteOptimiser(QWidget):
         if self.isVisible():
              self.run_optimisation(refresh=True)
         
+    def showEvent(self, event):
+        if not getattr(self, 'ui_initialized', False):
+            self.ui_initialized = True
+            self.initUI()
+        QWidget.showEvent(self, event)
+
     def initUI(self):
         # Resize to 80% of screen
         try:
@@ -2070,14 +2074,14 @@ class ioliteOptimiser(QWidget):
         grid_det = QGridLayout()
         grid_det.setColumnStretch(3, 1) # Push content left
         
-        self.cmb_spr_iso = QComboBox()
+        self.cmb_spr_iso = QComboBox(self)
         self.cmb_spr_iso.currentTextChanged.connect(self._on_spr_iso_changed)
         grid_det.addWidget(QLabel("Select Channel:"), 0, 0)
         grid_det.addWidget(self.cmb_spr_iso, 0, 1)
         
         l_prom = QHBoxLayout()
         l_prom.setContentsMargins(0, 0, 0, 0)
-        self.spin_spr_prom = QDoubleSpinBox()
+        self.spin_spr_prom = QDoubleSpinBox(self)
         self.spin_spr_prom.setRange(0, 1e9)
         self.spin_spr_prom.setDecimals(0)
         self.spin_spr_prom.setValue(100.0)
@@ -2086,7 +2090,7 @@ class ioliteOptimiser(QWidget):
         self.spin_spr_prom.valueChanged.connect(self._on_spr_prom_changed)
         l_prom.addWidget(self.spin_spr_prom)
         
-        self.chk_spr_auto_prom = QCheckBox("Auto")
+        self.chk_spr_auto_prom = QCheckBox("Auto", self)
         self.chk_spr_auto_prom.setChecked(True)
         self.chk_spr_auto_prom.toggled.connect(self._on_spr_auto_prom_toggled)
         l_prom.addWidget(self.chk_spr_auto_prom)
@@ -2095,7 +2099,7 @@ class ioliteOptimiser(QWidget):
         grid_det.addWidget(QLabel("Peak Cutoff:"), 1, 0)
         grid_det.addLayout(l_prom, 1, 1)
         
-        self.spin_spr_dist = QDoubleSpinBox()
+        self.spin_spr_dist = QDoubleSpinBox(self)
         self.spin_spr_dist.setRange(0.0001, 100000)
         self.spin_spr_dist.setDecimals(4)
         self.spin_spr_dist.setValue(float(self.persistent_settings.get('spr_min_distance', 0.1)))
@@ -2105,7 +2109,7 @@ class ioliteOptimiser(QWidget):
         grid_det.addWidget(QLabel("Min. Distance:"), 2, 0)
         grid_det.addWidget(self.spin_spr_dist, 2, 1)
         
-        self.spin_spr_baseline_window = QDoubleSpinBox()
+        self.spin_spr_baseline_window = QDoubleSpinBox(self)
         self.spin_spr_baseline_window.setRange(0, 100000)
         self.spin_spr_baseline_window.setDecimals(4)
         self.spin_spr_baseline_window.setValue(float(self.persistent_settings.get('spr_baseline_window', 1000.0)))
@@ -2124,13 +2128,13 @@ class ioliteOptimiser(QWidget):
         l_smooth = QHBoxLayout()
         l_smooth.setContentsMargins(0, 0, 0, 0)
         
-        self.chk_spr_smooth = QCheckBox("Apply Smoothing")
+        self.chk_spr_smooth = QCheckBox("Apply Smoothing", self)
         self.chk_spr_smooth.setChecked(self.persistent_settings.get('spr_apply_smooth', False))
         self.chk_spr_smooth.toggled.connect(self._run_spr_analysis_forced)
         self.chk_spr_smooth.toggled.connect(self.save_persistent_settings)
         l_smooth.addWidget(self.chk_spr_smooth)
 
-        self.spin_spr_smooth_window = QDoubleSpinBox()
+        self.spin_spr_smooth_window = QDoubleSpinBox(self)
         self.spin_spr_smooth_window.setRange(0.0001, 100)
         self.spin_spr_smooth_window.setDecimals(4)
         self.spin_spr_smooth_window.setValue(float(self.persistent_settings.get('spr_smooth_window', 0.05)))
@@ -2150,7 +2154,7 @@ class ioliteOptimiser(QWidget):
         self.chk_spr_smooth.hide()
         self.spin_spr_smooth_window.hide()
         
-        self.cmb_spr_unit = QComboBox()
+        self.cmb_spr_unit = QComboBox(self)
         self.cmb_spr_unit.addItems(["Seconds (s)", "Milliseconds (ms)"])
         # Load selection or default to ms
         self.cmb_spr_unit.setCurrentText(self.persistent_settings.get('spr_time_unit', "Milliseconds (ms)"))
@@ -2164,25 +2168,25 @@ class ioliteOptimiser(QWidget):
         
         # Row 6: Background sub
         grid_det.addWidget(QLabel("Subtract Background:"), 6, 0)
-        self.chk_spr_bg_sub = QCheckBox("")
+        self.chk_spr_bg_sub = QCheckBox("", self)
         self.chk_spr_bg_sub.setChecked(self.persistent_settings.get('spr_bg_sub', True))
         self.chk_spr_bg_sub.toggled.connect(self._run_spr_analysis_forced)
         self.chk_spr_bg_sub.toggled.connect(self.save_persistent_settings)
         
-        self.chk_spr_auto_bg = QCheckBox("Auto Select Region")
+        self.chk_spr_auto_bg = QCheckBox("Auto Select Region", self)
         # Default Auto to True
         self.chk_spr_auto_bg.setChecked(self.persistent_settings.get('spr_auto_bg', True))
         self.chk_spr_auto_bg.toggled.connect(self._on_spr_auto_bg_toggled)
         self.chk_spr_auto_bg.toggled.connect(self.save_persistent_settings)
         
-        self.spin_spr_bg_start = QDoubleSpinBox()
+        self.spin_spr_bg_start = QDoubleSpinBox(self)
         self.spin_spr_bg_start.setRange(0, 10000)
         self.spin_spr_bg_start.setDecimals(2)
         self.spin_spr_bg_start.setFixedWidth(60)
         self.spin_spr_bg_start.setValue(float(self.persistent_settings.get('spr_bg_start', 2.0)))
         self.spin_spr_bg_start.valueChanged.connect(self._on_spr_bg_changed)
         
-        self.spin_spr_bg_end = QDoubleSpinBox()
+        self.spin_spr_bg_end = QDoubleSpinBox(self)
         self.spin_spr_bg_end.setRange(0, 10000)
         self.spin_spr_bg_end.setDecimals(2)
         self.spin_spr_bg_end.setFixedWidth(60)
@@ -2196,11 +2200,11 @@ class ioliteOptimiser(QWidget):
         h_excl = QHBoxLayout()
         h_excl.setContentsMargins(0, 0, 0, 0)
         
-        self.chk_spr_auto_exclude = QCheckBox("Auto-Exclude Wide Outliers (Percentile >)")
+        self.chk_spr_auto_exclude = QCheckBox("Auto-Exclude Wide Outliers (Percentile >)", self)
         self.chk_spr_auto_exclude.setChecked(False)
         self.chk_spr_auto_exclude.toggled.connect(self._on_spr_auto_exclude_toggled)
         
-        self.spin_spr_auto_exclude_pct = QDoubleSpinBox()
+        self.spin_spr_auto_exclude_pct = QDoubleSpinBox(self)
         self.spin_spr_auto_exclude_pct.setRange(50.0, 99.9)
         self.spin_spr_auto_exclude_pct.setDecimals(1)
         self.spin_spr_auto_exclude_pct.setValue(90.0)
@@ -2526,10 +2530,10 @@ class ioliteOptimiser(QWidget):
         h_ctrl_spr.addStretch()
         
         h_ctrl_spr.addWidget(self.chk_spr_auto_bg)
-        self.lbl_bg_prefix = QLabel("Background (s):")
+        self.lbl_bg_prefix = QLabel("Background (s):", self)
         h_ctrl_spr.addWidget(self.lbl_bg_prefix)
         h_ctrl_spr.addWidget(self.spin_spr_bg_start)
-        self.lbl_bg_to = QLabel("to")
+        self.lbl_bg_to = QLabel("to", self)
         h_ctrl_spr.addWidget(self.lbl_bg_to)
         h_ctrl_spr.addWidget(self.spin_spr_bg_end)
         h_ctrl_spr.addSpacing(10)
@@ -7976,78 +7980,41 @@ class ioliteOptimiser(QWidget):
 # --- UI SETUP ---
 widget = None
 
-
-def create_widget():
+def createUIElements():
+    # 'ui' is a global object provided by iolite for UI plugins
     global widget
-    IoLog.information("iolite Optimiser: create_widget called (Debug Version)")
-    
-    try:
-        if widget is not None:
-            # Force close and recreation to ensure new code is loaded
-            try:
-                widget.close()
-                widget.deleteLater()
-            except: 
-                pass
-            widget = None
-            
-            # Original singleton logic commented out for dev/update:
-            # try:
-            #     if not widget.isVisible():
-            #         widget.show()
-            #     widget.raise_()
-            #     widget.activateWindow()
-            #     return
-            # except RuntimeError:
-            #     widget = None
-
-    except Exception as e:
-        IoLog.error(f"iolite Optimiser: Error checking widget state: {e}")
-        widget = None
-
-    # Zombie cleanup removed by user request
-
-    # Use 'None' as the parent for the widget per official examples
-    IoLog.information("iolite Optimiser: Creating new widget (Parent: None)")
+    IoLog.information("iolite Optimiser: createUIElements called")
     
     try:
         widget = ioliteOptimiser()
-        # widget.setAttribute(Qt.WA_DeleteOnClose) # Keep widget alive to prevent PythonQt crashes
         widget.setWindowTitle(f"iolite Optimiser - v{VERSION}")
-        
-        # Connect destroyed signal to cleanup global reference
-        # widget.destroyed.connect(cleanup_widget)
-        
-        # Default size if not previously set
-        widget.setMinimumHeight(850) # Enforce minimum height for scroll-free layout
-        widget.resize(1100, 850) 
-        widget.show()
-        
-        # Connect signals AFTER the widget is fully initialized and shown
-        # Auto-Sync Disabled: Signals cause layout instability in this environment
-        # widget.connect_signals()
-        try:
-            screen = QApplication.primaryScreen()
-            if screen:
-                rect = screen.availableGeometry()
-                widget.resize(int(rect.width() * 0.9), int(rect.height() * 0.9))
-            else:
-                widget.resize(1536, 864)
-        except:
-             widget.resize(1536, 864)
-        
-        widget.show()
-        widget.raise_()
-        widget.activateWindow()
-        IoLog.information("iolite Optimiser: Widget initialized and shown")
     except Exception as e:
-        IoLog.error(f"iolite Optimiser: Error creating widget: {str(e)}")
+        IoLog.error(f"iolite Optimiser: Error creating widget: {e}")
         IoLog.error(traceback.format_exc())
-
-def createUIElements():
-    # 'ui' is a global object provided by iolite for UI plugins
-    IoLog.information("iolite Optimiser: createUIElements called")
-    action = QAction("iolite Optimiser", None)
-    action.triggered.connect(create_widget)
+        return
+        
+    action = QAction("iolite\nOptimiser", None)
+    
+    try:
+        from iolite.ui import CommonUIPyInterface as CUI
+        cui = CUI()
+        icon = None
+        # Try a few different icon names
+        for name in ['sliders', 'chart', 'chart-line', 'analytics', 'settings', 'funnel', 'trophy']:
+            try:
+                ic = cui.icon(name)
+                if not ic.isNull():
+                    icon = ic
+                    break
+            except: pass
+            
+        if icon:
+            action.setIcon(icon)
+        else:
+            action.setIcon(cui.icon('sliders'))
+    except Exception as e:
+        IoLog.warning(f"iolite Optimiser: Could not set action icon: {e}")
+        
+    ui.setWidget(widget) # type: ignore
     ui.setAction(action) # type: ignore
     ui.setMenuName(['Tools']) # type: ignore

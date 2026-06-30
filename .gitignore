@@ -1,4 +1,4 @@
-﻿Optimiser Testing/
+Optimiser Testing/
 papers/
 releases/
 *.zip
@@ -8,3 +8,4 @@ releases/
 __pycache__/
 .vscode/
 watch_and_copy.ps1
+UI Examples/
