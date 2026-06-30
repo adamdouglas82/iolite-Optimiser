@@ -62,8 +62,15 @@ except ImportError:
 try:
     import matplotlib
     import matplotlib.pyplot as plt
-    matplotlib.use('Qt5Agg')
-    from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+    
+    # Try unified QtAgg backend (supports both Qt 5 & Qt 6)
+    try:
+        matplotlib.use('qtagg')
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+    except Exception:
+        matplotlib.use('Qt5Agg')
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        
     from matplotlib.figure import Figure
     from matplotlib.ticker import MaxNLocator, EngFormatter, ScalarFormatter
     from cycler import cycler
@@ -5105,108 +5112,84 @@ class ioliteOptimiser(QWidget):
         # Do NOT force tab index if None. None means "Refresh All".
 
         try:
-            new_df, new_meta = self.get_input_dataframe()
-            if new_df is not None:
-                IoLog.information(f"iolite Optimiser: Initial data loaded ({len(new_df)} rows)")
-                # Log channel count here for correct order
-                cols = [c for c in new_df.columns if c != 'Time']
-                IoLog.information(f"iolite Optimiser: Found {len(cols)} channels")
-                
-                # Reset Auto-Rescale to ON for new data (Ephemeral)
-                if hasattr(self, 'chk_rescale'): self.chk_rescale.setChecked(True)
-                if hasattr(self, 'chk_rescale_spr'): self.chk_rescale_spr.setChecked(True)
-            
-            # --- GLOBAL PRE-PROCESSING ---
-            local_resolved_dwells = {}
-            if new_df is not None:
-                # Calculate Acquisition Time EARLY so DwellDialog can show it
-                if 'Time' in new_df.columns and len(new_df['Time']) > 1:
-                    time_vals = new_df['Time'].values
-                    # Exclude the first timestamp if we have at least 3 points, 
-                    # as the first interval often includes instrument setup overheads
-                    if len(time_vals) > 2:
-                        slope = np.polyfit(np.arange(len(time_vals) - 1), time_vals[1:], 1)[0]
-                    else:
-                        slope = np.polyfit(np.arange(len(time_vals)), time_vals, 1)[0]
-                    self.detected_at_ms = slope * 1000.0
-                    IoLog.information(f"iolite Optimiser: Detected Acquisition Time: {self.detected_at_ms:.3f} ms")
-                else:
-                    self.detected_at_ms = None
-                
-                # Resolve Dwell Times & Units Globally (Need a snapshot for later assignment)
-                cols_all = [c for c in new_df.columns if c != 'Time']
-                if cols_all:
-                    local_resolved_dwells = self.resolve_dwell_times(cols_all)
+            # Reset Auto-Rescale to ON for new data (Ephemeral)
+            if hasattr(self, 'chk_rescale'): self.chk_rescale.setChecked(True)
+            if hasattr(self, 'chk_rescale_spr'): self.chk_rescale_spr.setChecked(True)
             
             # --- SPR TAB DATA ---
             if tab == "spr" or tab is None:
-                # Fully clear previous SPR state to prevent data pollution
-                if hasattr(self, 'spr_all_raw_results'): self.spr_all_raw_results.clear()
-                if hasattr(self, 'spr_excluded_peaks'): self.spr_excluded_peaks.clear()
-                if hasattr(self, 'spr_channel_prominence'): self.spr_channel_prominence.clear()
-                if hasattr(self, 'spr_channel_auto_prom'): self.spr_channel_auto_prom.clear()
-                
-                self.spr_df = new_df
-                if new_df is not None:
-                    self.spr_metadata = new_meta # Store specifically for SPR
-                    self.spr_dwells = local_resolved_dwells.copy() # Store specifically for SPR
+                new_df_spr, new_meta_spr = self.get_input_dataframe(tab="spr")
+                if new_df_spr is not None:
+                    # Fully clear previous SPR state to prevent data pollution
+                    if hasattr(self, 'spr_all_raw_results'): self.spr_all_raw_results.clear()
+                    if hasattr(self, 'spr_excluded_peaks'): self.spr_excluded_peaks.clear()
+                    if hasattr(self, 'spr_channel_prominence'): self.spr_channel_prominence.clear()
+                    if hasattr(self, 'spr_channel_auto_prom'): self.spr_channel_auto_prom.clear()
                     
-                if self.spr_df is not None and 'Time' in self.spr_df.columns and len(self.spr_df['Time']) > 0:
-                     cols = [c for c in self.spr_df.columns if c != 'Time']
-                     if hasattr(self, 'cmb_spr_iso'):
-                         self._block_signals(self.cmb_spr_iso, True)
-                         self.cmb_spr_iso.clear()
-                         self.cmb_spr_iso.addItems(cols)
-                         self._block_signals(self.cmb_spr_iso, False)
-                         
-                         # Force refresh to wipe internal caches in run_spr_analysis
-                         self.run_spr_analysis(force_refresh=True)
+                    self.spr_df = new_df_spr
+                    self.spr_metadata = new_meta_spr # Store specifically for SPR
+                    
+                    # Resolve Dwell Times & Units specifically for SPR
+                    cols_all = [c for c in new_df_spr.columns if c != 'Time']
+                    self.spr_dwells = self.resolve_dwell_times(cols_all) if cols_all else {}
+                    
+                    if self.spr_df is not None and 'Time' in self.spr_df.columns and len(self.spr_df['Time']) > 0:
+                         cols = [c for c in self.spr_df.columns if c != 'Time']
+                         if hasattr(self, 'cmb_spr_iso'):
+                             self._block_signals(self.cmb_spr_iso, True)
+                             self.cmb_spr_iso.clear()
+                             self.cmb_spr_iso.addItems(cols)
+                             self._block_signals(self.cmb_spr_iso, False)
+                             
+                             # Force refresh to wipe internal caches in run_spr_analysis
+                             self.run_spr_analysis(force_refresh=True)
 
             # --- OPTIMISER TAB DATA ---
             if tab == "opt" or tab is None:
-                self.opt_df = new_df
-                if new_df is not None:
-                    self.opt_metadata = new_meta # Store specifically for Optimiser
+                new_df_opt, new_meta_opt = self.get_input_dataframe(tab="opt")
+                if new_df_opt is not None:
+                    self.opt_df = new_df_opt
+                    self.opt_metadata = new_meta_opt # Store specifically for Optimiser
                     self.channel_metadata = self.opt_metadata # Backwards compat alias
                     
-                    self.opt_dwells = local_resolved_dwells.copy() # Store specifically for Optimiser
+                    # Resolve Dwell Times & Units specifically for Optimiser
+                    cols_all = [c for c in new_df_opt.columns if c != 'Time']
+                    self.opt_dwells = self.resolve_dwell_times(cols_all) if cols_all else {}
                     self.channel_dwells = self.opt_dwells # Backwards compat alias for calc functions
 
-                if self.opt_df is not None:
-                     if 'Time' in self.opt_df.columns and len(self.opt_df['Time']) > 0:
-                         self.t_start = float(self.opt_df['Time'].iloc[0])
-                         max_rel_t = float(self.opt_df['Time'].iloc[-1] - self.t_start)
-                         
-                         # Update SpinBox Ranges (Block signals to prevent inadvertent optimization triggers)
-                         for sb in [self.spin_bg_start, self.spin_bg_end, self.spin_sig_start, self.spin_sig_end]:
-                             self._block_signals(sb, True)
-                             sb.setRange(-100, max_rel_t + 100) # Give some buffer
-                             self._block_signals(sb, False)
-                         
-                         # Calculate Actual AT via linear regression
-                         time_vals = self.opt_df['Time'].values
-                         slope = np.polyfit(np.arange(len(time_vals)), time_vals, 1)[0]
-                         self.detected_at_ms = slope * 1000.0
-    
-                         # Resolve Dwells & Calculate Overhead
-                         # Dwells already populated in local block and assigned to self.opt_dwells
-                         if len(self.opt_df.columns) > 1:
-                             self.lbl_result.setText(f"Loaded {len(self.opt_df.columns)-1} channels from iolite.")
-                             # Unit/Dwell resolution moved global
-                         
-                         # Recalculate Overhead using the unified method
-                         self._recalculate_overhead()
-    
-                     else:
-                         self.t_start = 0.0
-                         
-                     # Logic for Auto-Detect vs Manual
-                     if self._get(self.chk_auto, 'isChecked'):
-                         self.run_auto_detect()
-                     else:
-                         self.update_plot()
-                         # Trigger real-time optimization when data refreshed with manual regions
-                         self.run_optimisation(refresh=False)
+                    if self.opt_df is not None:
+                         if 'Time' in self.opt_df.columns and len(self.opt_df['Time']) > 0:
+                             self.t_start = float(self.opt_df['Time'].iloc[0])
+                             max_rel_t = float(self.opt_df['Time'].iloc[-1] - self.t_start)
+                             
+                             # Update SpinBox Ranges (Block signals to prevent inadvertent optimization triggers)
+                             for sb in [self.spin_bg_start, self.spin_bg_end, self.spin_sig_start, self.spin_sig_end]:
+                                 self._block_signals(sb, True)
+                                 sb.setRange(-100, max_rel_t + 100) # Give some buffer
+                                 self._block_signals(sb, False)
+                             
+                             # Calculate Actual AT via linear regression
+                             time_vals = self.opt_df['Time'].values
+                             slope = np.polyfit(np.arange(len(time_vals)), time_vals, 1)[0]
+                             self.detected_at_ms = slope * 1000.0
+        
+                             # Resolve Dwells & Calculate Overhead
+                             if len(self.opt_df.columns) > 1:
+                                 self.lbl_result.setText(f"Loaded {len(self.opt_df.columns)-1} channels from iolite.")
+                              
+                             # Recalculate Overhead using the unified method
+                             self._recalculate_overhead()
+        
+                         else:
+                             self.t_start = 0.0
+                             
+                         # Logic for Auto-Detect vs Manual
+                         if self._get(self.chk_auto, 'isChecked'):
+                             self.run_auto_detect()
+                         else:
+                             self.update_plot()
+                             # Trigger real-time optimization when data refreshed with manual regions
+                             self.run_optimisation(refresh=False)
         except Exception as e:
             msg = f"Refresh Error: {e}"
             print(msg)
@@ -6372,11 +6355,62 @@ class ioliteOptimiser(QWidget):
             print(traceback.format_exc())
             self.lbl_result.setText(msg)
 
-    def get_input_dataframe(self):
+    def get_input_dataframe(self, tab=None):
         try:
-            channels = data.timeSeriesList(data.Input)
-            # IoLog.information(f"iolite Optimiser: Found {len(channels) if channels else 0} channels") # Silent/Moved
+            # 1. Check loaded files in iolite session
+            files = data.importedFiles()
+            target_file = None
+            
+            if len(files) == 1:
+                target_file = files[0]
+            elif len(files) > 1:
+                if tab is not None:
+                    keyword = "spr" if tab == "spr" else "opt"
+                    for f in files:
+                        if keyword in f.fileName().lower():
+                            target_file = f
+                            break
+                if not target_file:
+                    target_file = files[0]
+            
+            # 2. Get channels corresponding to target file
+            if target_file is not None:
+                ch_names = target_file.channelList()
+                channels = []
+                for name in ch_names:
+                    ch = data.timeSeries(name)
+                    if ch:
+                        channels.append(ch)
+            else:
+                channels = data.timeSeriesList(data.Input)
+                
             if not channels: return None, {}
+            
+            # --- PRE-COMPUTE TIME SLICING AND CYCLE TIME EARLY ---
+            ref_ch = channels[0]
+            time_data = ref_ch.time()
+            
+            mask = None
+            if target_file is not None:
+                try:
+                    t_start = target_file.startTime().toSecsSinceEpoch()
+                    t_end = target_file.endTime().toSecsSinceEpoch()
+                    mask = (time_data >= t_start) & (time_data <= t_end)
+                    time_data = time_data[mask]
+                except Exception as me:
+                    IoLog.warning(f"iolite Optimiser: Time slicing failed: {me}. Loading full series.")
+                    mask = None
+
+            # Calculate average time step for the sliced timeline
+            detected_at_val = None
+            if len(time_data) > 1:
+                if len(time_data) > 2:
+                    slope = np.polyfit(np.arange(len(time_data) - 1), time_data[1:], 1)[0]
+                else:
+                    slope = np.polyfit(np.arange(len(time_data)), time_data, 1)[0]
+                detected_at_val = slope * 1000.0
+            
+            self.detected_at_ms = detected_at_val
             
             # --- Channel Filtering for Vitesse/icpTOF ---
             ref_ch_0 = channels[0]
@@ -6393,15 +6427,8 @@ class ioliteOptimiser(QWidget):
             if is_tof:
                 ch_names = [ch.name for ch in channels]
                 
-                # Calculate AT early for the dialog
-                ref_time = channels[0].time()
-                if len(ref_time) > 1:
-                    detected_at = (ref_time[1] - ref_time[0]) * 1000.0
-                else:
-                    detected_at = None
-                
                 # Unified Dialog: Channel selection + Global dwell
-                dlg = DataConfigDialog(ch_names, detected_at=detected_at, is_tof=True, parent=self)
+                dlg = DataConfigDialog(ch_names, detected_at=self.detected_at_ms, is_tof=True, parent=self)
                 if dlg.exec_():
                     selected_names = set(dlg.result_channels)
                     channels = [ch for ch in channels if ch.name in selected_names]
@@ -6420,8 +6447,6 @@ class ioliteOptimiser(QWidget):
             
             # --- End Filter Logic ---
             
-            ref_ch = channels[0]
-            time_data = ref_ch.time()
             data_dict = {'Time': time_data}
             
             local_metadata = {}
@@ -6440,10 +6465,19 @@ class ioliteOptimiser(QWidget):
                 
                 # Only load data if lengths match (crucial check)
                 ch_data = ch.data()
-                if len(ch_data) == len(time_data):
-                    data_dict[ch.name] = ch_data
+                if mask is not None:
+                    if len(ch_data) == len(mask):
+                        data_dict[ch.name] = ch_data[mask]
+                else:
+                    if len(ch_data) == len(time_data):
+                        data_dict[ch.name] = ch_data
             
             self.show_meta = {'Element': has_el, 'Mass': has_mass}
+            
+            # Also log file name being loaded for visibility
+            if target_file is not None:
+                IoLog.information(f"iolite Optimiser: Loaded {len(data_dict) - 1} channels from file: {target_file.fileName()}")
+                
             return pd.DataFrame(data_dict), local_metadata
         except Exception as e:
             IoLog.error(f"iolite Optimiser: Input Error: {e}")
