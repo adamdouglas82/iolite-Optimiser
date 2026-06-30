@@ -133,7 +133,9 @@ ICP_SPECS = {
     },
     "Nu Instruments": {
         "Vitesse": {"type": "TOF", "min_dwell": 0.1, "prec": 0.001},
+        "Sapphire": {"type": "Multi-Collector", "min_dwell": 0.0, "prec": 0.001, "allowed_dwells": [100, 200, 500, 1000, 2000, 3000]},
     },
+
     "Custom": {
         "Custom Model": {"type": "Quadrupole", "min_dwell": 0.1, "prec": 0.1}
     }
@@ -541,30 +543,27 @@ class Logic:
             
             start_time = background_s
             
-            # Pre-interpolate the composite pulse shape once to the simulation resolution (dt_s)
-            comp_t_shifted = comp_t - comp_t.min()
-            pulse_duration = comp_t_shifted.max()
-            pulse_grid_t = np.arange(0, pulse_duration + dt_s, dt_s)
-            pulse_grid_y = np.interp(pulse_grid_t, comp_t_shifted, comp_y, left=0, right=0)
-            
-            n_pulse_samples = len(pulse_grid_y)
             n_total_samples = len(y_theoretical)
             
             for i in range(n_pulses):
                 t_pulse = start_time + i * pulse_period_s
                 
-                # Align the left edge of the pulse
-                idx_start = int((t_pulse + comp_t.min()) / dt_s)
-                idx_end = idx_start + n_pulse_samples
+                # Find the grid indices in t_axis that span the pulse duration
+                t_start_abs = t_pulse + comp_t.min()
+                t_end_abs = t_pulse + comp_t.max()
+                
+                idx_start = np.searchsorted(t_axis, t_start_abs)
+                idx_end = np.searchsorted(t_axis, t_end_abs, side='right')
                 
                 if idx_start >= n_total_samples: break
-                if idx_start < 0: continue
-                
                 if idx_end > n_total_samples:
-                    valid_len = n_total_samples - idx_start
-                    y_theoretical[idx_start:n_total_samples] += pulse_grid_y[:valid_len]
-                else:
-                    y_theoretical[idx_start:idx_end] += pulse_grid_y
+                    idx_end = n_total_samples
+                    
+                if idx_end > idx_start:
+                    t_segment = t_axis[idx_start:idx_end]
+                    # Interpolate the pulse shape directly onto the exact grid points of this segment
+                    y_segment = np.interp(t_segment, comp_t + t_pulse, comp_y, left=0, right=0)
+                    y_theoretical[idx_start:idx_end] += y_segment
 
             # 4. Integrate (Measured Signal) for EACH Channel
             channel_results = {}
@@ -1743,6 +1742,8 @@ class ioliteOptimiser(QWidget):
         self.channel_metadata = {} # {"Name": {"Element": "Pb", "Mass": "208"}}
         self.show_meta = {'Element': False, 'Mass': False}
         self.col_map = {} # Mapping of header names to current indices
+        self.active_washout_level = 0.01 # Default to 1% washout
+        self._last_simulated_params = None # Cache of last simulation run parameters
         
         # Plot Persistence (Optimisation Tab Only)
         self._opt_palette_indices = None
@@ -1978,26 +1979,77 @@ class ioliteOptimiser(QWidget):
         
     def _on_tab_changed(self, index):
         if index == 2:
-            if hasattr(self, 'last_sync') and self.last_sync:
-                rr = self.last_sync.get('rr_actual', 1.0)
-                at_ms = self.last_sync.get('at_actual_s', 0.1) * 1000.0
-                pulses = self.last_sync.get('actual_pulses', 1.0)
-                
-                if hasattr(self, 'grp_pulse_override') and not self.grp_pulse_override.isChecked():
-                    self._block_signals(self.spin_pulse_rr, True)
-                    self._block_signals(self.spin_pulse_at, True)
-                    self._block_signals(self.spin_pulse_count, True)
-                    
-                    self.spin_pulse_rr.setValue(rr)
-                    self.spin_pulse_at.setValue(at_ms)
-                    self.spin_pulse_count.setValue(pulses)
-                    
-                    self._block_signals(self.spin_pulse_rr, False)
-                    self._block_signals(self.spin_pulse_at, False)
-                    self._block_signals(self.spin_pulse_count, False)
+            # 1. Determine target values (default to current values of spinboxes)
+            target_rr = self.spin_pulse_rr.value
+            target_at_ms = self.spin_pulse_at.value
+            target_pulses = self.spin_pulse_count.value
+            target_washout = self.spin_pulse_washout.value
             
-            # Auto-run simulation when switching to this tab
-            self.pulse_debounce_timer.start()
+            is_override = False
+            if hasattr(self, 'grp_pulse_override') and self.grp_pulse_override.isChecked():
+                is_override = True
+                
+            # If not in override, pull from last_sync (Optimiser Tab results)
+            if hasattr(self, 'last_sync') and self.last_sync:
+                if not is_override:
+                    target_rr = self.last_sync.get('rr_actual', target_rr)
+                    target_at_ms = self.last_sync.get('at_actual_s', 0.1) * 1000.0
+                    target_pulses = self.last_sync.get('actual_pulses', target_pulses)
+                    target_washout = self.spin_wash.value
+            
+            target_bg_s = self.spin_pulse_bg.value
+            target_sig_s = self.spin_pulse_sig.value
+            try:
+                target_iso = self._get(self.cmb_spr_iso, 'currentText')
+            except:
+                target_iso = None
+            
+            # 2. Check if anything has changed since the last run
+            changed = False
+            last_p = getattr(self, '_last_simulated_params', None)
+            if last_p is None:
+                changed = True
+            else:
+                def is_diff(k, val):
+                    last_val = last_p.get(k)
+                    if last_val is None or val is None:
+                        return last_val != val
+                    if isinstance(val, str) or isinstance(last_val, str) or isinstance(val, bool) or isinstance(last_val, bool):
+                        return last_val != val
+                    # Numerical comparison with tolerance
+                    try:
+                        return abs(float(last_val) - float(val)) > 1e-5
+                    except Exception:
+                        return last_val != val
+
+                if (is_diff('rr', target_rr) or
+                    is_diff('at_ms', target_at_ms) or
+                    is_diff('pulses', target_pulses) or
+                    is_diff('washout', target_washout) or
+                    is_diff('bg_s', target_bg_s) or
+                    is_diff('sig_s', target_sig_s) or
+                    is_diff('iso', target_iso) or
+                    is_diff('is_override', is_override)):
+                    changed = True
+            
+            # 3. If changed (or first time), update UI and trigger recalculation
+            if changed:
+                self._block_signals(self.spin_pulse_rr, True)
+                self._block_signals(self.spin_pulse_at, True)
+                self._block_signals(self.spin_pulse_count, True)
+                self._block_signals(self.spin_pulse_washout, True)
+                
+                self.spin_pulse_rr.setValue(target_rr)
+                self.spin_pulse_at.setValue(target_at_ms)
+                self.spin_pulse_count.setValue(target_pulses)
+                self.spin_pulse_washout.setValue(target_washout)
+                
+                self._block_signals(self.spin_pulse_rr, False)
+                self._block_signals(self.spin_pulse_at, False)
+                self._block_signals(self.spin_pulse_count, False)
+                self._block_signals(self.spin_pulse_washout, False)
+                
+                self.pulse_debounce_timer.start()
         
     def init_spr_tab(self):
         main_layout = QHBoxLayout()
@@ -3291,6 +3343,10 @@ class ioliteOptimiser(QWidget):
             '1comp': getattr(self, '_last_spr_fw1_comp_ms', 0)
         }
         val_ms = mapping.get(mode, 0)
+        if '10' in mode:
+            self.active_washout_level = 0.1
+        else:
+            self.active_washout_level = 0.01
         self.spin_wash.setValue(val_ms)
         self.tabs.setCurrentIndex(1) # Switch back to Optimiser
         IoLog.information(f"iolite Optimiser: Applied {mode} washout value: {val_ms:.2f} ms")
@@ -3531,6 +3587,7 @@ class ioliteOptimiser(QWidget):
             return
             
         val_ms = self._max_spr_winners.get(mode, 0)
+        self.active_washout_level = 0.01
         self.spin_wash.setValue(val_ms)
         self.tabs.setCurrentIndex(1) # Switch back to Optimiser
         IoLog.information(f"iolite Optimiser: Applied Max Channel ({mode}) washout value: {val_ms:.2f} ms")
@@ -7279,6 +7336,12 @@ class ioliteOptimiser(QWidget):
         self.spin_pulse_count.setDecimals(3)
         form_overrides.addRow("Pulses / Acq:", self.spin_pulse_count)
         
+        self.spin_pulse_washout = QDoubleSpinBox()
+        self.spin_pulse_washout.setRange(0.01, 50000.0)
+        self.spin_pulse_washout.setDecimals(2)
+        self.spin_pulse_washout.setSuffix(" ms")
+        form_overrides.addRow("Washout:", self.spin_pulse_washout)
+        
         # Connect signals for auto-calc and debounce timer
         self.spin_pulse_bg.valueChanged.connect(lambda: self.pulse_debounce_timer.start())
         self.spin_pulse_sig.valueChanged.connect(lambda: self.pulse_debounce_timer.start())
@@ -7286,6 +7349,7 @@ class ioliteOptimiser(QWidget):
         self.spin_pulse_rr.valueChanged.connect(self._calc_pulse_params_from_rr)
         self.spin_pulse_at.valueChanged.connect(self._calc_pulse_params_from_at)
         self.spin_pulse_count.valueChanged.connect(self._calc_pulse_params_from_count)
+        self.spin_pulse_washout.valueChanged.connect(lambda: self.pulse_debounce_timer.start())
         
         self.spin_pulse_rr.valueChanged.connect(lambda: self.pulse_debounce_timer.start())
         self.spin_pulse_at.valueChanged.connect(lambda: self.pulse_debounce_timer.start())
@@ -7390,14 +7454,17 @@ class ioliteOptimiser(QWidget):
         self.spin_pulse_rr.blockSignals(True)
         self.spin_pulse_at.blockSignals(True)
         self.spin_pulse_count.blockSignals(True)
+        self.spin_pulse_washout.blockSignals(True)
         
         self.spin_pulse_rr.setValue(rr)
         self.spin_pulse_at.setValue(at_ms)
         self.spin_pulse_count.setValue(pulses)
+        self.spin_pulse_washout.setValue(self.spin_wash.value())
         
         self.spin_pulse_rr.blockSignals(False)
         self.spin_pulse_at.blockSignals(False)
         self.spin_pulse_count.blockSignals(False)
+        self.spin_pulse_washout.blockSignals(False)
         
         # Trigger simulation refresh
         self.pulse_debounce_timer.start()
@@ -7485,6 +7552,7 @@ class ioliteOptimiser(QWidget):
             if hasattr(self, 'optimised_results') and self.optimised_results:
                 # Use optimized order
                 # Overhead is at the end of the cycle, so offsets are just cumulative dwells
+                is_simultaneous = (self.icp_tech in ["Multi-Collector", "TOF"])
                 current_offset_s = 0.0
                 
                 for res in self.optimised_results:
@@ -7513,11 +7581,12 @@ class ioliteOptimiser(QWidget):
                     channel_specs.append({
                         'name': ch_name,
                         'dwell': dwell_s,
-                        'offset': current_offset_s,
+                        'offset': 0.0 if is_simultaneous else current_offset_s,
                         'scale': scale_val
                     })
                     
-                    current_offset_s += dwell_s
+                    if not is_simultaneous:
+                        current_offset_s += dwell_s
                     
             else:
                 # Fallback: Simultaneous or Equal Sequential
@@ -7542,12 +7611,48 @@ class ioliteOptimiser(QWidget):
             composite_df = Logic.generate_composite_peak(self.spr_df, iso, filtered_df)
             
             if composite_df is not None:
+                # --- Washout Stretching / Compression Override ---
+                target_washout = self.spin_pulse_washout.value
+                lvl = getattr(self, 'active_washout_level', 0.01)
+                comp_t = composite_df['Relative Time (s)'].values
+                comp_y = composite_df['Normalised Intensity'].values
+                above = np.where(comp_y >= lvl)[0]
+                if len(above) >= 2:
+                    orig_width_ms = (comp_t[above[-1]] - comp_t[above[0]]) * 1000.0
+                else:
+                    orig_width_ms = (comp_t.max() - comp_t.min()) * 1000.0
+                
+                if orig_width_ms > 0:
+                    scale_factor = target_washout / orig_width_ms
+                    if scale_factor > 0:
+                        composite_df = composite_df.copy()
+                        composite_df['Relative Time (s)'] = composite_df['Relative Time (s)'] * scale_factor
+                        IoLog.information(f"iolite Optimiser: Scaling composite peak by {scale_factor:.4f} (Original {lvl*100}% width: {orig_width_ms:.2f} ms, Target: {target_washout:.2f} ms)")
+            
+            if composite_df is not None:
                 try:
                     IoLog.information(f"Calling Logic.generate_pulse_train_v3 for {iso}...")
                     
+                    # Calculate dt from the composite dataframe (scaled SPR resolution)
+                    comp_t = composite_df['Relative Time (s)'].values
+                    dt_scaled = np.median(np.diff(comp_t)) if len(comp_t) > 1 else 1e-3
+                    
+                    # Ensure dt_s is fine enough to:
+                    # 1. Resolve the shape of the peak itself without aliasing (at least 80 steps per peak duration)
+                    # 2. Resolve the minimum active dwell (at least 10 steps per dwell)
+                    pulse_duration = comp_t.max() - comp_t.min() if len(comp_t) > 0 else 0.1
+                    active_dwells = [spec['dwell'] for spec in channel_specs if spec['dwell'] > 0]
+                    min_dwell = min(active_dwells) if active_dwells else 0.01
+                    dt_s_calc = min(dt_scaled, min_dwell / 10.0, pulse_duration / 80.0)
+                    
+                    # Also enforce a reasonable range: not finer than 1e-5 (original default) and not coarser than 0.05
+                    dt_s_calc = np.clip(dt_s_calc, 1e-5, 0.05)
+                    
+                    IoLog.information(f"iolite Optimiser: Calculated simulator step dt_s = {dt_s_calc:.6f} s (composite dt = {dt_scaled:.6f} s, pulse duration = {pulse_duration:.6f} s, min dwell = {min_dwell:.6f} s)")
+                    
                     # Use v3
                     theo_df, channel_results = Logic.generate_pulse_train_v3(
-                        composite_df, rr, pulses, at_s, channel_specs, background_s=bg_s, signal_s=sig_s
+                        composite_df, rr, pulses, at_s, channel_specs, background_s=bg_s, signal_s=sig_s, dt_s=dt_s_calc
                     )
                     
                     if theo_df is not None and channel_results:
@@ -7568,6 +7673,22 @@ class ioliteOptimiser(QWidget):
             
             # 3. Plot
             self.update_pulse_plot()
+            
+            # Store parameters of successful run
+            is_override_run = False
+            if hasattr(self, 'grp_pulse_override') and self.grp_pulse_override.isChecked():
+                is_override_run = True
+
+            self._last_simulated_params = {
+                'rr': rr,
+                'at_ms': at_ms,
+                'pulses': pulses,
+                'bg_s': bg_s,
+                'sig_s': sig_s,
+                'iso': iso,
+                'washout': target_washout,
+                'is_override': is_override_run
+            }
             
         except Exception as e:
             IoLog.error(f"iolite Optimiser: run_pulse_simulation CRASHED: {e}")
@@ -7646,7 +7767,9 @@ class ioliteOptimiser(QWidget):
                 y_theo = (y_theo / own_theo_max) * global_max_meas
 
             # Plot Theoretical once (Faint background)
-            ax.plot(t_theo, y_theo, label="Theoretical (Pulse Stream)", color='gray', alpha=0.3, lw=1)
+            line_theo = ax.plot(t_theo, y_theo, label="Theoretical (Pulse Stream)", color='gray', alpha=0.3, lw=1)[0]
+            if hasattr(self, 'pulse_hidden_channels') and "Theoretical (Pulse Stream)" in self.pulse_hidden_channels:
+                line_theo.set_visible(False)
             
             # 3. Plot Measured for each channel
 
@@ -7671,7 +7794,9 @@ class ioliteOptimiser(QWidget):
                 # Plot Measured (Connected Lines with Markers)
                 # Now that m_times are aligned to cycle, we can just plot them directly.
                 
-                ax.plot(t_meas, y_meas, label=f"{iso}", color=color, marker='o', markersize=4, lw=2)
+                line_meas = ax.plot(t_meas, y_meas, label=f"{iso}", color=color, marker='o', markersize=4, lw=2)[0]
+                if hasattr(self, 'pulse_hidden_channels') and iso in self.pulse_hidden_channels:
+                    line_meas.set_visible(False)
             
             ax.set_xlabel("Time (s)", color=fg_color)
             if not show_bg:
@@ -7734,6 +7859,8 @@ class ioliteOptimiser(QWidget):
             for legline, handle in zip(leg.get_lines(), handles):
                 legline.set_picker(5) # 5 pts tolerance
                 self.pulse_legend_map[legline] = handle
+                if not handle.get_visible():
+                    legline.set_alpha(0.2)
             
             for text in leg.get_texts():
                 text.set_color(fg_color)
@@ -7866,6 +7993,16 @@ class ioliteOptimiser(QWidget):
             
             # Dim the legend line to indicate hidden state
             legline.set_alpha(1.0 if vis else 0.2)
+            
+            # Track hidden state by label
+            label = origline.get_label()
+            if not hasattr(self, 'pulse_hidden_channels'):
+                self.pulse_hidden_channels = set()
+            if vis:
+                self.pulse_hidden_channels.discard(label)
+            else:
+                self.pulse_hidden_channels.add(label)
+                
             self.pulse_canvas.draw()
 
     def _on_pulse_rescale_toggled(self, checked):
