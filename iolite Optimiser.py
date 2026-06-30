@@ -75,31 +75,29 @@ except Exception as e:
 
 
 # iolite-specific imports (PythonQt)
+from iolite.QtGui import (QAction, QSizePolicy, QWidget, QLabel, QDoubleSpinBox, QSpinBox, QCheckBox, 
+                          QComboBox, QGridLayout, QHBoxLayout, QVBoxLayout, QGroupBox, QFormLayout, 
+                          QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QMenu, 
+                          QColorDialog, QDialog, QPushButton, QScrollArea, QSplitter, QFrame, 
+                          QLineEdit, QTabWidget, QStackedWidget, QApplication, QPalette, QColor,
+                          QListWidget, QListWidgetItem, QTextEdit, QInputDialog, QMessageBox)
+from iolite.QtCore import Qt, QTimer, QSize, QEvent, QUrl
+
 try:
-    from iolite.QtGui import (QAction, QSizePolicy, QWidget, QLabel, QDoubleSpinBox, QSpinBox, QCheckBox, 
-                              QComboBox, QGridLayout, QHBoxLayout, QVBoxLayout, QGroupBox, QFormLayout, 
-                              QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QMenu, 
-                              QColorDialog, QDialog, QPushButton, QScrollArea, QSplitter, QFrame, 
-                              QLineEdit, QTabWidget, QStackedWidget, QApplication, QPalette, QColor,
-                              QListWidget, QListWidgetItem, QTextEdit, QInputDialog, QMessageBox)
-    from iolite.QtCore import Qt, QTimer, QSize, QEvent, QUrl
-    from iolite import data, IoLog
-except ImportError:
-    # Fallback for non-iolite environments (VSCode)
-    try:
-        from PyQt5.QtWidgets import (QAction, QSizePolicy, QWidget, QLabel, QDoubleSpinBox, QSpinBox, QCheckBox, 
-                                     QComboBox, QGridLayout, QHBoxLayout, QVBoxLayout, QGroupBox, QFormLayout, 
-                                     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QMenu, 
-                                     QColorDialog, QDialog, QPushButton, QScrollArea, QSplitter, QFrame, 
-                                     QLineEdit, QTabWidget, QStackedWidget, QApplication,
-                                     QListWidget, QListWidgetItem, QTextEdit, QInputDialog, QMessageBox)
-        from PyQt5.QtCore import Qt, QTimer, QSize, QEvent, QUrl
-        from PyQt5.QtGui import QPalette, QColor
-    except ImportError:
-        pass
+    data
+except NameError:
+    from iolite import data
+
+try:
+    IoLog
+except NameError:
+    from iolite import IoLog
+
+# Backward-compatible alias for trapezoidal integration (NumPy 1.x vs 2.x)
+trapz = getattr(np, 'trapezoid', getattr(np, 'trapz', None))
 
 # --- FEATURE ENABLE ---
-SHOW_PULSE_TRAIN_SIMULATOR = False  # Currently Beta
+SHOW_PULSE_TRAIN_SIMULATOR = True  # Currently Beta
 
 # --- EMBEDDED CONSTANTS ---
 VERSION = "dev"
@@ -208,6 +206,49 @@ PLOT_COLORS = [
     "#17becf", "#9edae5"
 ]
 
+def get_settings_dir():
+    try:
+        home = os.path.expanduser("~")
+        
+        # Determine the official iolite 4.11 AppData path
+        if os.name == 'nt' or 'LOCALAPPDATA' in os.environ:
+            # Windows: AppData/Local/iolite-software/iolite4/iolite Optimiser
+            app_data = os.environ.get('LOCALAPPDATA', os.path.join(home, 'AppData', 'Local'))
+            new_dir = os.path.join(app_data, 'iolite-software', 'iolite4', 'iolite Optimiser')
+        else:
+            # macOS: Library/Application Support/iolite-software/iolite4/iolite Optimiser
+            new_dir = os.path.join(home, 'Library', 'Application Support', 'iolite-software', 'iolite4', 'iolite Optimiser')
+
+        # Setup the old paths for migration checks
+        old_dir = os.path.join(home, "Documents", "iolite", "iolite Optimiser")
+        old_alt_dir = os.path.join(home, "OneDrive", "Documents", "iolite", "iolite Optimiser")
+
+        # Create the new directory if it doesn't exist
+        os.makedirs(new_dir, exist_ok=True)
+
+        # Migrate files if needed
+        for filename in ["iolite Optimiser Settings.json", "iolite Optimiser Channel Presets.json"]:
+            new_file = os.path.join(new_dir, filename)
+            if not os.path.exists(new_file):
+                for src_dir in [old_dir, old_alt_dir]:
+                    src_file = os.path.join(src_dir, filename)
+                    if os.path.exists(src_file):
+                        try:
+                            import shutil
+                            shutil.copy2(src_file, new_file)
+                            break
+                        except Exception:
+                            pass
+        return new_dir
+    except Exception:
+        try:
+            home = os.path.expanduser("~")
+            fallback = os.path.join(home, "Documents", "iolite", "iolite Optimiser")
+            os.makedirs(fallback, exist_ok=True)
+            return fallback
+        except Exception:
+            return ""
+
 # --- EMBEDDED LOGIC ---
 class Logic:
     @staticmethod
@@ -282,9 +323,9 @@ class Logic:
             idx_end_001 = min(len(time_proc), int(np.ceil(right_ips_001[i])))
             if idx_end_001 > idx_start_001:
                 if is_cps:
-                    area_001 = np.trapz(y_proc[idx_start_001:idx_end_001], x=time_proc[idx_start_001:idx_end_001])
-                    area_01 = np.trapz(y_proc[max(0, int(np.floor(left_ips_01[i]))):min(len(time_proc), int(np.ceil(right_ips_01[i])))], 
-                                       x=time_proc[max(0, int(np.floor(left_ips_01[i]))):min(len(time_proc), int(np.ceil(right_ips_01[i])))])
+                    area_001 = trapz(y_proc[idx_start_001:idx_end_001], x=time_proc[idx_start_001:idx_end_001])
+                    area_01 = trapz(y_proc[max(0, int(np.floor(left_ips_01[i]))):min(len(time_proc), int(np.ceil(right_ips_01[i])))], 
+                                    x=time_proc[max(0, int(np.floor(left_ips_01[i]))):min(len(time_proc), int(np.ceil(right_ips_01[i])))])
                 else:
                     area_001 = np.sum(y_proc[idx_start_001:idx_end_001])
                     area_01 = np.sum(y_proc[max(0, int(np.floor(left_ips_01[i]))):min(len(time_proc), int(np.ceil(right_ips_01[i])))])
@@ -1546,21 +1587,7 @@ class DataConfigDialog(QDialog):
                 self.cmb_preset.blockSignals(False)
     
     def _get_preset_file(self):
-        import os
-        home = os.path.expanduser("~")
-        # Define the base directory (matches main class logic)
-        base_dir = os.path.join(home, "Documents", "iolite", "iolite Optimiser")
-        if not os.path.exists(base_dir):
-            alt_path = os.path.join(home, "OneDrive", "Documents", "iolite", "iolite Optimiser")
-            if os.path.exists(alt_path):
-                base_dir = alt_path
-        
-        # Ensure directory exists if we're trying to save
-        if not os.path.exists(base_dir):
-            try:
-                os.makedirs(base_dir)
-            except: pass
-            
+        base_dir = get_settings_dir()
         return os.path.join(base_dir, 'iolite Optimiser Channel Presets.json')
     
     def _load_presets(self):
@@ -1794,17 +1821,7 @@ class ioliteOptimiser(QWidget):
         self.max_speed = 20000
         
         try:
-            home = os.path.expanduser("~")
-            ol_path = os.path.join(home, "Documents", "iolite", "iolite Optimiser")
-            if not os.path.exists(ol_path):
-                 # Try OneDrive fallback
-                 alt_path = os.path.join(home, "OneDrive", "Documents", "iolite", "iolite Optimiser")
-                 if os.path.exists(os.path.join(home, "OneDrive", "Documents", "iolite")):
-                     if not os.path.exists(alt_path): os.makedirs(alt_path)
-                     ol_path = alt_path
-                 else:
-                     os.makedirs(ol_path)
-
+            ol_path = get_settings_dir()
             self.settings_json_path = os.path.join(ol_path, "iolite Optimiser Settings.json")
             self.persistent_settings = self.load_persistent_settings()
         except Exception as e:
@@ -3050,8 +3067,9 @@ class ioliteOptimiser(QWidget):
         self.spr_legend_frame = leg.get_frame()
         
         self.spr_map_legend_to_line = {}
-        # Use legendHandles to ensure we get all markers/lines correctly
-        for legline, legtext in zip(leg.legendHandles, leg.get_texts()):
+        # Backward-compatible access to legend handles (legend_handles in Matplotlib >= 3.7)
+        leg_handles = getattr(leg, 'legend_handles', getattr(leg, 'legendHandles', []))
+        for legline, legtext in zip(leg_handles, leg.get_texts()):
             txt = legtext.get_text()
             legline.set_alpha(1.0) # Ensure fully visible initially
             legline.set_picker(5)
@@ -3975,7 +3993,7 @@ class ioliteOptimiser(QWidget):
         self.chk_avoid_gaps = QCheckBox("Avoid Gaps")
         self.chk_avoid_gaps.setToolTip("Checked: Always Overlap (Increase Rep-Rate). Unchecked: Allow Gaps.")
         self.chk_avoid_gaps.setChecked(self.persistent_settings.get('avoid_gaps', False)) # Default Unchecked
-        self.chk_avoid_gaps.stateChanged.connect(self._on_ui_change)
+        self.chk_avoid_gaps.toggled.connect(self._on_ui_change)
         self.grid_qual.addWidget(self.chk_avoid_gaps, 4, 2, 1, 2)
         l_settings.addWidget(grp_qual)
 
@@ -4022,7 +4040,8 @@ class ioliteOptimiser(QWidget):
         grid_sync.addWidget(self.lbl_opt_at, 0, 5)
 
         # Row 1: (Empty Left), Speed, Overhead
-        grid_sync.addWidget(QLabel("Speed:"), 1, 2)
+        self.lbl_opt_speed_title = QLabel("Speed:")
+        grid_sync.addWidget(self.lbl_opt_speed_title, 1, 2)
         self.lbl_opt_speed = QLabel("- µm s⁻¹")
         grid_sync.addWidget(self.lbl_opt_speed, 1, 3)
 
@@ -4035,7 +4054,8 @@ class ioliteOptimiser(QWidget):
         self.lbl_est_time_hms = QLabel("-")
         grid_sync.addWidget(self.lbl_est_time_hms, 2, 1)
 
-        grid_sync.addWidget(QLabel("Overlap:"), 2, 2)
+        self.lbl_opt_overlap_title = QLabel("Overlap:")
+        grid_sync.addWidget(self.lbl_opt_overlap_title, 2, 2)
         self.lbl_opt_overlap = QLabel("- µm")
         grid_sync.addWidget(self.lbl_opt_overlap, 2, 3)
 
@@ -4047,7 +4067,8 @@ class ioliteOptimiser(QWidget):
         self.lbl_est_time_sec = QLabel("-")
         grid_sync.addWidget(self.lbl_est_time_sec, 3, 1)
 
-        grid_sync.addWidget(QLabel("Dosage:"), 3, 2)
+        self.lbl_opt_dosage_title = QLabel("Dosage:")
+        grid_sync.addWidget(self.lbl_opt_dosage_title, 3, 2)
         self.lbl_opt_pulses = QLabel("- Pulses")
         grid_sync.addWidget(self.lbl_opt_pulses, 3, 3)
 
@@ -4774,6 +4795,18 @@ class ioliteOptimiser(QWidget):
             if hasattr(self, 'spin_width'):
                 self.grid_qual.addWidget(self.spin_width, 2, 3)
                 self.spin_width.setVisible(True)
+
+        # 3. Dynamic visibility for Optimised Settings (Results Summary)
+        # Hide Speed, Overlap, and Dosage fields in Spot mode
+        show_scan_settings = not is_spot
+        if hasattr(self, 'lbl_opt_speed_title'): self.lbl_opt_speed_title.setVisible(show_scan_settings)
+        if hasattr(self, 'lbl_opt_speed'): self.lbl_opt_speed.setVisible(show_scan_settings)
+        
+        if hasattr(self, 'lbl_opt_overlap_title'): self.lbl_opt_overlap_title.setVisible(show_scan_settings)
+        if hasattr(self, 'lbl_opt_overlap'): self.lbl_opt_overlap.setVisible(show_scan_settings)
+        
+        if hasattr(self, 'lbl_opt_dosage_title'): self.lbl_opt_dosage_title.setVisible(show_scan_settings)
+        if hasattr(self, 'lbl_opt_pulses'): self.lbl_opt_pulses.setVisible(show_scan_settings)
 
 
 
@@ -7064,19 +7097,38 @@ class ioliteOptimiser(QWidget):
                 # Mode (Dropdown) - Reuse existing if possible
                 current_status = self.isotope_configs.get(iso_name, {}).get("status", "Auto")
                 
+                # Determine allowed mode items based on hardware technology
+                allowed_items = ["Auto", "Even", "Set to Min", "Exclude", "Custom"]
+                tech = getattr(self, 'icp_tech', 'Quadrupole')
+                if tech == "Quadrupole":
+                    allowed_items.remove("Exclude")
+                    if current_status == "Exclude":
+                        current_status = "Auto"
+                        self.isotope_configs.setdefault(iso_name, {})["status"] = "Auto"
+                elif tech in ["TOF", "Multi-Collector"]:
+                    allowed_items.remove("Set to Min")
+                    if current_status == "Set to Min":
+                        current_status = "Auto"
+                        self.isotope_configs.setdefault(iso_name, {})["status"] = "Auto"
+
                 combo = self.table.cellWidget(i, self.col_map['Mode'])
                 if not combo or rebuild_widgets:
                     combo = QComboBox()
-                    # Centre text in combo if possible
-                    # Note: Some versions of Qt require different approaches, but standard items are always centered now
-                    combo.addItems(["Auto", "Even", "Set to Min", "Exclude", "Custom"])
+                    combo.addItems(allowed_items)
                     combo.setCurrentText(current_status)
                     combo.setProperty("iso_name", str(iso_name))
                     combo.activated.connect(lambda idx, n=iso_name, c=combo: self._on_mode_changed(n, c.itemText(idx)))
                     self.table.setCellWidget(i, self.col_map['Mode'], combo)
                 else:
-                    # Update existing combo without recreating
-                    if self._get(combo, 'currentText') != current_status:
+                    # Check if the combo items need to be refreshed
+                    existing_items = [combo.itemText(j) for j in range(combo.count)]
+                    if existing_items != allowed_items:
+                        combo.blockSignals(True)
+                        combo.clear()
+                        combo.addItems(allowed_items)
+                        combo.setCurrentText(current_status)
+                        combo.blockSignals(False)
+                    elif self._get(combo, 'currentText') != current_status:
                         combo.blockSignals(True)
                         combo.setCurrentText(current_status)
                         combo.blockSignals(False)
