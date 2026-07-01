@@ -7733,12 +7733,10 @@ class ioliteOptimiser(QWidget):
                     pulse_duration = comp_t.max() - comp_t.min() if len(comp_t) > 0 else 0.1
                     active_dwells = [spec['dwell'] for spec in channel_specs if spec['dwell'] > 0]
                     min_dwell = min(active_dwells) if active_dwells else 0.01
-                    dt_s_calc = min(dt_scaled, min_dwell / 10.0, pulse_duration / 80.0)
+                    # Lock to a fine resolution of 1e-5 s (10 µs) for maximum integration accuracy
+                    dt_s_calc = 1e-5
                     
-                    # Also enforce a reasonable range: not finer than 1e-5 (original default) and not coarser than 0.05
-                    dt_s_calc = np.clip(dt_s_calc, 1e-5, 0.05)
-                    
-                    IoLog.information(f"iolite Optimiser: Calculated simulator step dt_s = {dt_s_calc:.6f} s (composite dt = {dt_scaled:.6f} s, pulse duration = {pulse_duration:.6f} s, min dwell = {min_dwell:.6f} s)")
+                    IoLog.information(f"iolite Optimiser: Using high-resolution simulator step dt_s = {dt_s_calc:.6f} s")
                     
                     # Use v3
                     theo_df, channel_results = Logic.generate_pulse_train_v3(
