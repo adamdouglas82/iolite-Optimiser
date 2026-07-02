@@ -87,7 +87,8 @@ from iolite.QtGui import (QAction, QSizePolicy, QWidget, QLabel, QDoubleSpinBox,
                           QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QMenu, 
                           QColorDialog, QDialog, QPushButton, QScrollArea, QSplitter, QFrame, 
                           QLineEdit, QTabWidget, QStackedWidget, QApplication, QPalette, QColor,
-                          QListWidget, QListWidgetItem, QTextEdit, QInputDialog, QMessageBox)
+                          QListWidget, QListWidgetItem, QTextEdit, QInputDialog, QMessageBox,
+                          QFileDialog)
 from iolite.QtCore import Qt, QTimer, QSize, QEvent, QUrl
 
 try:
@@ -2374,9 +2375,9 @@ class ioliteOptimiser(QWidget):
         
         # 0. Reload Button (Fixed at Top)
         h_ctrl = QHBoxLayout()
-        self.btn_spr_run = QPushButton("Reload Data from iolite")
+        self.btn_spr_run = QPushButton("Import SPR File")
         self.btn_spr_run.setFixedHeight(30)
-        self.btn_spr_run.clicked.connect(lambda: self.refresh_data(tab="spr"))
+        self.btn_spr_run.clicked.connect(lambda: self.import_and_unload_data(tab="spr"))
         h_ctrl.addWidget(self.btn_spr_run)
         left_layout.addLayout(h_ctrl)
 
@@ -3914,9 +3915,9 @@ class ioliteOptimiser(QWidget):
         
         # 0. Data Selection & Settings (Fixed at Top)
         h_ctrl = QHBoxLayout()
-        self.btn_run = QPushButton("Reload Data from iolite")
+        self.btn_run = QPushButton("Import Optimisation File")
         self.btn_run.setFixedHeight(30)
-        self.btn_run.clicked.connect(lambda: self.refresh_data(tab="opt"))
+        self.btn_run.clicked.connect(lambda: self.import_and_unload_data(tab="opt"))
         
         self.btn_settings = QPushButton("Settings")
         self.btn_settings.setFixedHeight(30)
@@ -5576,9 +5577,32 @@ class ioliteOptimiser(QWidget):
             
         return [anchor_hex] + pool
 
+    def import_and_unload_data(self, tab):
+        caption = "Import SPR File" if tab == "spr" else "Import Optimisation File"
+        file_path = QFileDialog.getOpenFileName(self, caption, "", "Raw data (*.xlsx *.h5 *.io4 *.zip *.prn *.info *.lax *.FIN2 *.REP *.csv *.NC *.CDF *.xml *.vit);;iolite 3 experiment (*.pxp);;All files (*)")
+        if not file_path:
+            return
+        
+        norm_file_path = os.path.normpath(file_path)
+        
+        try:
+            res = data.importData(norm_file_path)
+            if res:
+                self.refresh_data(tab=tab, file_path=norm_file_path)
+                try:
+                    data.unloadFile(norm_file_path)
+                except Exception as ue:
+                    IoLog.warning(f"iolite Optimiser: Failed to unload file: {ue}")
+            else:
+                IoLog.warning(f"iolite Optimiser: Import returned False or was cancelled for {norm_file_path}")
+        except Exception as e:
+            msg = f"Failed to import/load file: {e}"
+            print(msg)
+            print(traceback.format_exc())
+            IoLog.error(f"iolite Optimiser: {msg}")
+            QMessageBox.critical(self, "Import Error", msg)
 
-
-    def refresh_data(self, tab=None):
+    def refresh_data(self, tab=None, file_path=None):
         # Do NOT force tab index if None. None means "Refresh All".
 
         try:
@@ -5588,7 +5612,7 @@ class ioliteOptimiser(QWidget):
             
             # --- SPR TAB DATA ---
             if tab == "spr" or tab is None:
-                new_df_spr, new_meta_spr = self.get_input_dataframe(tab="spr")
+                new_df_spr, new_meta_spr = self.get_input_dataframe(tab="spr", file_path=file_path)
                 if new_df_spr is not None:
                     # Fully clear previous SPR state to prevent data pollution
                     if hasattr(self, 'spr_all_raw_results'): self.spr_all_raw_results.clear()
@@ -5616,7 +5640,7 @@ class ioliteOptimiser(QWidget):
 
             # --- OPTIMISER TAB DATA ---
             if tab == "opt" or tab is None:
-                new_df_opt, new_meta_opt = self.get_input_dataframe(tab="opt")
+                new_df_opt, new_meta_opt = self.get_input_dataframe(tab="opt", file_path=file_path)
                 if new_df_opt is not None:
                     self.opt_df = new_df_opt
                     self.opt_metadata = new_meta_opt # Store specifically for Optimiser
@@ -6825,23 +6849,27 @@ class ioliteOptimiser(QWidget):
             print(traceback.format_exc())
             self.lbl_result.setText(msg)
 
-    def get_input_dataframe(self, tab=None):
+    def get_input_dataframe(self, tab=None, file_path=None):
         try:
             # 1. Check loaded files in iolite session
             files = data.importedFiles()
             target_file = None
             
-            if len(files) == 1:
-                target_file = files[0]
-            elif len(files) > 1:
-                if tab is not None:
-                    keyword = "spr" if tab == "spr" else "opt"
-                    for f in files:
-                        if keyword in f.fileName().lower():
+            if file_path:
+                norm_target = os.path.normpath(file_path).lower()
+                for f in files:
+                    try:
+                        f_path = os.path.normpath(f.filePath()).lower()
+                        f_name = os.path.normpath(f.fileName()).lower()
+                        target_name = os.path.normpath(os.path.basename(file_path)).lower()
+                        if f_path == norm_target or f_name == target_name:
                             target_file = f
                             break
-                if not target_file:
-                    target_file = files[0]
+                    except Exception:
+                        pass
+
+            if not target_file and files:
+                target_file = files[0]
             
             # 2. Get channels corresponding to target file
             if target_file is not None:
