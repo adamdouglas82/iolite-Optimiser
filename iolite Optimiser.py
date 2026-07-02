@@ -1755,9 +1755,9 @@ class DataConfigDialog(QDialog):
             h_dwell = QHBoxLayout()
             h_dwell.addWidget(QLabel("Global Dwell Time (ms):"))
             self.spin_dwell = QDoubleSpinBox()
+            self.spin_dwell.setDecimals(3)
             self.spin_dwell.setRange(0.001, 10000)
             self.spin_dwell.setValue(detected_at if detected_at else 10.0)
-            self.spin_dwell.setDecimals(3)
             h_dwell.addWidget(self.spin_dwell)
             h_dwell.addStretch()
             layout.addLayout(h_dwell)
@@ -1782,9 +1782,9 @@ class DataConfigDialog(QDialog):
             l_global.setContentsMargins(0,0,0,0)
             l_global.addWidget(QLabel("Global Dwell Time (ms):"))
             self.spin_dwell = QDoubleSpinBox()
+            self.spin_dwell.setDecimals(3)
             self.spin_dwell.setRange(0.001, 10000)
             self.spin_dwell.setValue(detected_at if detected_at else 10.0)
-            self.spin_dwell.setDecimals(3)
             l_global.addWidget(self.spin_dwell)
             l_global.addStretch()
             self.stack.addWidget(self.page_global) # Index 0
@@ -1804,9 +1804,9 @@ class DataConfigDialog(QDialog):
             for i, ch_name in enumerate(channels):
                 self.table.setItem(i, 0, QTableWidgetItem(ch_name))
                 sp = QDoubleSpinBox()
+                sp.setDecimals(3)
                 sp.setRange(0.001, 10000)
                 sp.setValue(detected_at if detected_at else 10.0)
-                sp.setDecimals(3)
                 self.table.setCellWidget(i, 1, sp)
                 self.spin_map[ch_name] = sp
                 
