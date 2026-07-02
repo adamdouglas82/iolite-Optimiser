@@ -281,7 +281,7 @@ class Logic:
         if abs(T - round(T)) < 1e-9:
             return 0.0
             
-        A_min = ((T - T_floor) ** 2 - T_floor) / 2.0
+        A_min = ((T - T_floor) ** 2 + T_floor) / 2.0
         A_max = (T_ceil - (T_ceil - T) ** 2) / 2.0
         
         if A_max <= 0:
@@ -290,25 +290,28 @@ class Logic:
         # Peak-to-peak ripple percentage
         ripple_pct = (100.0 / (f * W_s)) * (abs(A_max - A_min) / A_max)
         
-        # Convert peak-to-peak ripple to RMS standard deviation (divide by 2*sqrt(2) ~ 2.8284)
-        rsd = ripple_pct / 2.8284
-        return rsd
+        # Convert peak-to-peak ripple of a triangular wave to statistical RSD (standard deviation)
+        # For a triangular wave, std_dev = peak_to_peak / sqrt(12)
+        statistical_rsd = ripple_pct / math.sqrt(12.0)
+        return statistical_rsd
 
     @staticmethod
     def get_lockwood_min_dwell(f, W_ms, target_rsd=5.0):
         """
-        Sweeps dwell times from 0.1 ms to 100.0 ms to find the minimum dwell time 
-        that achieves a predicted Lockwood aliasing RSD below the target_rsd.
+        Sweeps cycle times starting from the washout time (W_ms) upwards
+        to find the minimum time that achieves a predicted Lockwood aliasing RSD below the target_rsd.
         """
         if f <= 0 or W_ms <= 0:
             return 2.0  # Fallback to standard 2.0 ms
             
-        # Sweep from 0.1 ms to 100.0 ms in steps of 0.1 ms
-        for dt_ms in [x * 0.1 for x in range(1, 1000)]:
+        # Sweep from W_ms upwards in steps of 0.1 ms up to W_ms + 100 ms
+        start_steps = int(round(W_ms * 10))
+        for steps in range(start_steps, start_steps + 1000):
+            dt_ms = steps / 10.0
             rsd = Logic.calculate_lockwood_rsd(f, W_ms, dt_ms)
             if rsd <= target_rsd:
                 return dt_ms
-        return 10.0  # Safe fallback if never reached
+        return W_ms  # Safe fallback if never reached
 
     @staticmethod
     def analyse_washout_peaks(df, isotope, prominence_threshold=100.0, min_distance=1, is_cps=True, wlen=None, apply_smoothing=False, smooth_window=5, bg_sub=False, bg_start_s=2.0, bg_end_s=8.0):
@@ -842,12 +845,18 @@ class Logic:
         is_mc = inputs['icp_technology'] == "Multi-Collector"
         valid_times_s = [d/1000.0 for d in (inputs.get('allowed_dwells') or [])]
         p_s = inputs['precision_ms'] / 1000.0
+        strategy = inputs.get('sync_strategy', 'Adaptive Integer Sync (Auto)')
+        is_oversampling = "Oversampling" in strategy
 
         at_from_washout = fw_s
-        rr_ideal = n_val / fw_s if fw_s > 0 else rr_max
-        at_from_rr = n_val / rr_max if rr_ideal > rr_max else at_from_washout
-        ss_ideal = (bs * rr_ideal) / n_dose if n_dose > 0 else 0
-        at_from_ss = (bs * n_val) / (ss_max * n_dose) if (n_dose > 0 and ss_ideal > ss_max) else at_from_washout
+        if is_oversampling:
+            at_from_rr = at_from_washout
+            at_from_ss = at_from_washout
+        else:
+            rr_ideal = n_val / fw_s if fw_s > 0 else rr_max
+            at_from_rr = n_val / rr_max if rr_ideal > rr_max else at_from_washout
+            ss_ideal = (bs * rr_ideal) / n_dose if n_dose > 0 else 0
+            at_from_ss = (bs * n_val) / (ss_max * n_dose) if (n_dose > 0 and ss_ideal > ss_max) else at_from_washout
 
         min_duty = inputs.get('min_duty_cycle', 0)
         overhead_s = inputs.get('overhead_ms', 0) / 1000.0
@@ -908,13 +917,12 @@ class Logic:
         rr_prec = inputs.get('rr_prec_hz', 1.0)
         if rr_prec <= 0: rr_prec = 1.0
         allowed_rr = inputs.get('allowed_rr', None)
-        strategy = inputs.get('sync_strategy', 'Synchronised (Auto)')
+        strategy = inputs.get('sync_strategy', 'Adaptive Integer Sync (Auto)')
         
-        # Apply Lockwood Eqn (3) threshold for Oversampling and Combined modes
+        # Apply Lockwood Eqn (3) threshold for Oversampling and Combined modes via dynamic sweep
         if "Oversampling" in strategy or "Combined" in strategy:
             target_rsd = inputs.get('target_rsd', 5.0)
             washout_ms = inputs.get('washout_ms', 30.0)
-            f_min = 35355.339 / (washout_ms * target_rsd) if (washout_ms * target_rsd) > 0 else 10.0
             
             # Speed and hardware limits
             max_speed = inputs.get('max_speed_um_s', 0.0)
@@ -925,29 +933,95 @@ class Logic:
                 rr_speed_limit = (max_speed * dosage) / spot_size
                 max_allowed_rr = min(max_allowed_rr, rr_speed_limit)
                 
+            # Determine active channel dwell times (in ms)
+            active_dwells = inputs.get('active_dwells_ms', [])
+            if not active_dwells:
+                if is_mc:
+                    active_dwells = [(at_actual_s - overhead_s) * 1000.0]
+                else:
+                    active_dwells = [inputs.get('min_dwell_ms', 2.0)]
+            
+            # Dynamic sweep over candidate repetition rates f to find the minimum f satisfying target RSD.
+            # Require at least 2.0 pulses per washout (f * W_s >= 2.0) to ensure a stable steady state (overlapping pulses).
+            f_min = max_allowed_rr
+            min_oversampling_f = 2.0 / (washout_ms / 1000.0) if washout_ms > 0 else 1.0
+            sweep_start = max(1.0, min_oversampling_f)
+            sweep_end = max_allowed_rr
+            step = rr_prec
+            if step <= 0:
+                step = 1.0
+                
+            curr_f = sweep_start
+            found = False
+            while curr_f <= sweep_end + 1e-9:
+                all_satisfy = True
+                for dt_ms in active_dwells:
+                    if dt_ms <= 0:
+                        continue
+                    rsd = Logic.calculate_lockwood_rsd(curr_f, washout_ms, dt_ms)
+                    if rsd > target_rsd:
+                        all_satisfy = False
+                        break
+                if all_satisfy:
+                    f_min = curr_f
+                    found = True
+                    break
+                curr_f += step
+                
+            if not found:
+                f_min = max_allowed_rr
+                
             rr_theoretical = max(rr_theoretical, f_min)
             rr_theoretical = min(rr_theoretical, max_allowed_rr)
 
-        if strategy == "Oversampling":
-            # Oversampling: Bypasses pulse-matching cycle snapping, only rounds to instrument precision
-            at_actual_s = round(at_needed / p_s) * p_s
-            prec_decimals = max(0, int(round(-math.log10(p_s)))) if p_s > 0 else 3
-            at_actual_s = round(at_actual_s, prec_decimals)
-            
-            # Rep rate is driven to rr_theoretical (which has been raised to f_min)
-            if allowed_rr:
-                valid = [r for r in allowed_rr if r <= rr_theoretical + 1e-9]
-                rr_actual = max(valid) if valid else min(allowed_rr)
+        if "Oversampling" in strategy:
+            # Oversampling: Bypasses pulse‑matching cycle snapping.
+            # Respect allowed hardware integration times for Multi-Collector / TOF systems, otherwise snap to precision.
+            if is_mc or inputs['icp_technology'] == "TOF":
+                at_actual_s = Logic.get_best_integration_time(at_needed, overhead_s, valid_times_s, p_s, inputs['icp_technology'])
             else:
-                rr_actual = math.floor(rr_theoretical / rr_prec + 1e-9) * rr_prec
+                at_actual_s = round(at_needed / p_s) * p_s
+                prec_decimals = max(0, int(round(-math.log10(p_s)))) if p_s > 0 else 3
+                at_actual_s = round(at_actual_s, prec_decimals)
+            # In oversampling mode, the repetition rate is driven solely by the minimum
+            # steady‑state frequency calculated from washout and target RSD (f_min).
+            # Ignore n_val (pulses per acquisition) so the result is independent of the UI value.
+            rr_theoretical = f_min
+            if allowed_rr:
+                valid = [r for r in allowed_rr if r >= rr_theoretical - 1e-9]
+                rr_actual = min(valid) if valid else max(allowed_rr)
+            else:
+                rr_actual = math.ceil(rr_theoretical / rr_prec - 1e-9) * rr_prec
                 
             if rr_actual <= 1e-9: rr_actual = rr_prec
             optimised_n = rr_actual * at_actual_s
         elif is_mc:
             # MC: Time-Driven
-            if avoid_gaps: rr_actual = math.ceil(rr_theoretical / rr_prec - 1e-9) * rr_prec
-            else: rr_actual = math.floor(rr_theoretical / rr_prec + 1e-9) * rr_prec
-            optimised_n = n_val
+            if "Combined" in strategy:
+                # Find the smallest F >= rr_theoretical (which is f_min) such that F is a multiple of rr_prec
+                # and F * at_actual_s is an integer (within 1e-9 tolerance)
+                start_f = math.ceil(rr_theoretical / rr_prec - 1e-9) * rr_prec
+                curr_f = start_f
+                found_sync = False
+                max_allowed_rr = inputs.get('max_rr_hz', 10000.0)
+                while curr_f <= max_allowed_rr + 1e-9:
+                    pulses = curr_f * at_actual_s
+                    if abs(pulses - round(pulses)) < 1e-9:
+                        rr_actual = curr_f
+                        found_sync = True
+                        break
+                    curr_f += rr_prec
+                if not found_sync:
+                    rr_actual = start_f
+            elif avoid_gaps: 
+                rr_actual = math.ceil(rr_theoretical / rr_prec - 1e-9) * rr_prec
+            else: 
+                rr_actual = math.floor(rr_theoretical / rr_prec + 1e-9) * rr_prec
+            
+            if "Oversampling" in strategy or "Combined" in strategy:
+                optimised_n = rr_actual * at_actual_s
+            else:
+                optimised_n = n_val
         else:
             # Standard: Pulse-Driven. Re-calculate AT to match an integer RR if not avoid_gaps.
             if allowed_rr:
@@ -1003,6 +1077,110 @@ class Logic:
             else:
                 rr_actual = rr_rounded
 
+        # --- AUTO-SYNC SWEEP LOGIC ---
+        strategy = inputs.get('sync_strategy', 'Adaptive Integer Sync (Auto)')
+        if "Auto" in strategy and not is_mc:
+            F_raw = rr_actual
+            AT_raw_s = at_actual_s
+            
+            # Hardware resolution constants (always needed)
+            at_hw_min_ms = inputs['min_dwell_ms'] + (overhead_s * 1000.0)
+            at_res_ms    = inputs.get('min_dwell_ms', 0.1)
+            washout_ms   = inputs.get('washout_ms', 30.0)
+            allowed_rr   = inputs.get('allowed_rr', None)
+
+            rr_prec_int  = max(1, int(round(rr_prec)))
+
+            # Fractional pulse count before any sync adjustment
+            pulses_raw = F_raw * AT_raw_s
+
+            best_pair = None
+            min_diff_score = float('inf')
+
+            # User's original target pulse count (from the UI spinner)
+            n_val_sweep  = int(round(inputs.get('pulses_per_pixel', round(pulses_raw))))
+            prefer_exact = inputs.get('prefer_exact_pulses', False)
+
+            f_min_combined = f_min if 'f_min' in locals() else 10.0
+
+            def _try_candidate(F, n):
+                nonlocal best_pair, min_diff_score
+                if n < 1:
+                    return
+                AT_exact_ms = n * 1000.0 / F
+                # Snap to hardware resolution
+                AT_hw_ms = round(AT_exact_ms / at_res_ms) * at_res_ms
+                # Must satisfy both hardware minimum and washout time
+                if AT_hw_ms < max(at_hw_min_ms, washout_ms):
+                    return
+                # Reject if hardware rounding breaks integer sync
+                pulses_check = F * AT_hw_ms / 1000.0
+                if abs(pulses_check - round(pulses_check)) > 1e-6:
+                    return
+                AT_s    = AT_hw_ms / 1000.0
+                if "Combined" in strategy:
+                    # In Combined mode, we want the lowest frequency >= f_min_combined that achieves sync
+                    # and keeps the acquisition time AT close to AT_raw_s.
+                    # We avoid using F_raw (which is based on the hidden default target pulse count of 10).
+                    score = (F - f_min_combined) / max(f_min_combined, 1.0) + abs(AT_s - AT_raw_s) / max(AT_raw_s, 1e-9)
+                else:
+                    diff_F  = abs(F - F_raw) / max(F_raw, 1.0)
+                    diff_AT = abs(AT_s - AT_raw_s) / max(AT_raw_s, 1e-9)
+                    pulse_penalty = (0.0 if (not prefer_exact or n == n_val_sweep)
+                                     else 1.0 + abs(n - n_val_sweep))
+                    score = diff_F + diff_AT + pulse_penalty
+                if score < min_diff_score:
+                    min_diff_score = score
+                    best_pair = (F, AT_s)
+
+            if "Combined" in strategy:
+                # ── COMBINED (AUTO) ──────────────────────────────────────────
+                # 1. Use the dynamically calculated oversampling f_min
+                f_min_combined = f_min
+                at_min_ms = max(at_hw_min_ms, washout_ms)
+
+                # 2. Candidate rep‑rates at or above the oversampling minimum
+                if allowed_rr:
+                    rr_candidates = sorted(r for r in allowed_rr
+                                           if r >= f_min_combined)
+                else:
+                    rr_start = max(1, int(math.ceil(f_min_combined / rr_prec_int)) * rr_prec_int)
+                    rr_candidates = list(range(rr_start, int(rr_max) + 1, rr_prec_int))
+                if not rr_candidates:
+                    rr_candidates = [max(1, int(math.ceil(f_min_combined)))]
+
+                # 3. For each rep‑rate, try n_min and n_min+1 above the floor
+                for F in rr_candidates:
+                    n_min = int(math.ceil(F * at_min_ms / 1000.0))
+                    _try_candidate(F, n_min)
+                    _try_candidate(F, n_min + 1)
+
+            else:
+                # Search the entire operational range of the laser (1 to rr_max)
+                if allowed_rr:
+                    rr_candidates = sorted(allowed_rr)
+                else:
+                    rr_candidates = list(range(rr_prec_int, int(rr_max) + 1, rr_prec_int))
+                if not rr_candidates:
+                    rr_candidates = [1]
+
+                for F in rr_candidates:
+                    # Ideal (fractional) pulse count for this rep-rate at the original AT
+                    n_ideal = F * AT_raw_s
+                    n_lo = max(1, int(math.floor(n_ideal)))
+                    n_hi = n_lo + 1
+                    _try_candidate(F, n_lo)
+                    _try_candidate(F, n_hi)
+                    # When prefer_exact is on, also explicitly try the user's
+                    # target pulse count
+                    if prefer_exact and n_val_sweep not in (n_lo, n_hi):
+                        _try_candidate(F, n_val_sweep)
+
+            if best_pair is not None:
+                rr_actual = best_pair[0]
+                at_actual_s = best_pair[1]
+                optimised_n = rr_actual * at_actual_s
+
         # Derived parameters (CALCULATED LAST)
         actual_pulses = rr_actual * at_actual_s
         speed = (bs * rr_actual) / n_dose if n_dose > 0 else 0
@@ -1012,7 +1190,7 @@ class Logic:
         # Consistent dwell budget calculation (Net measurement time)
         # For MC/TOF: This is the individual integration time.
         # For Quad/Sector: This is the total time for all dwells.
-        dwell_budget_s = at_actual_s - overhead_s
+        dwell_budget_s = max(0.0, at_actual_s - overhead_s)
 
         # Sync error and warning (moved from calculate_laser_sync)
         n_target = inputs['pulses_per_pixel']
@@ -1058,7 +1236,7 @@ class Logic:
         if 'override_at_s' in config and 'override_rr' in config:
             res['rr_actual'] = config['override_rr']
             res['at_actual_s'] = config['override_at_s']
-            res['dwell_budget_s'] = config['override_at_s'] - (config['overhead_ms'] / 1000.0)
+            res['dwell_budget_s'] = max(0.0, config['override_at_s'] - (config['overhead_ms'] / 1000.0))
             res['optimised_n'] = res['rr_actual'] * res['at_actual_s']
             res['n_dose'] = config['dosage'] if not config.get('sync_dosage', True) else res['optimised_n']
             res['speed'] = (spot_size * res['rr_actual']) / res['n_dose'] if res['n_dose'] > 0 else 0.0
@@ -1150,7 +1328,7 @@ class Logic:
 
                 failures = []
                 for idx in valid_indices:
-                    res_snr = processed_iso[idx]['base_snr'] * math.sqrt(processed_iso[idx]['final_dt'] / processed_iso[idx]['baseline_dt_s']) if processed_iso[idx]['baseline_dt_s'] > 0 else 0
+                    res_snr = processed_iso[idx]['base_snr'] * math.sqrt(max(0.0, processed_iso[idx]['final_dt']) / processed_iso[idx]['baseline_dt_s']) if processed_iso[idx]['baseline_dt_s'] > 0 else 0
                     if res_snr < snr_threshold: failures.append((idx, res_snr))
                 
                 if not failures: break
@@ -1177,14 +1355,14 @@ class Logic:
                 candidates = [i for i, x in enumerate(processed_iso) if x['is_optimisable'] and x['status'] not in ["Exclude", "Custom", "Set to Min"]]
                 if candidates:
                     # Sort by current Sigma Separation (give to the worst performers first)
-                    candidates.sort(key=lambda i: processed_iso[i]['base_snr'] * math.sqrt(processed_iso[i]['snapped_dt'] / processed_iso[i]['baseline_dt_s']) if processed_iso[i]['baseline_dt_s'] > 0 else 0)
+                    candidates.sort(key=lambda i: processed_iso[i]['base_snr'] * math.sqrt(max(0.0, processed_iso[i]['snapped_dt']) / processed_iso[i]['baseline_dt_s']) if processed_iso[i]['baseline_dt_s'] > 0 else 0)
                     num_steps = int(round(drift / precision_s))
                     for idx in range(num_steps):
                         processed_iso[candidates[idx % len(candidates)]]['snapped_dt'] += precision_s
 
         separations = []; output_rows = []
         for iso in processed_iso:
-            sep = iso['base_snr'] * math.sqrt(iso['snapped_dt'] / iso['baseline_dt_s']) if iso['baseline_dt_s'] > 0 else 0
+            sep = iso['base_snr'] * math.sqrt(max(0.0, iso['snapped_dt']) / iso['baseline_dt_s']) if iso['baseline_dt_s'] > 0 else 0
             if iso['status'] not in ["Exclude", "Set to Min", "Custom"]: separations.append(sep)
             val_ms = round(iso['snapped_dt'] * 1000.0, decimals)
             output_rows.append({"Isotope": iso['name'], "Final Dwell (ms)": val_ms if decimals > 0 else int(val_ms),
@@ -1910,6 +2088,12 @@ class ioliteOptimiser(QWidget):
         self.pulse_debounce_timer.setSingleShot(True)
         self.pulse_debounce_timer.setInterval(500)
         self.pulse_debounce_timer.timeout.connect(self.run_pulse_simulation)
+
+        # Debounce timer for saving persistent settings
+        self.save_timer = QTimer()
+        self.save_timer.setSingleShot(True)
+        self.save_timer.setInterval(1000)
+        self.save_timer.timeout.connect(self.save_persistent_settings)
 
         # Initialize hardware state
         self.icp_tech = "Quadrupole"
@@ -3757,21 +3941,29 @@ class ioliteOptimiser(QWidget):
         self.grp_hw_summary = QGroupBox("")
         v_hw_sum = QVBoxLayout()
         v_hw_sum.setSpacing(0)
-        v_hw_sum.setContentsMargins(5, 2, 5, 2)
+        v_hw_sum.setContentsMargins(2, 2, 2, 2)
         
         lbl_hw_title = QLabel("Hardware Configuration")
         lbl_hw_title.setStyleSheet("font-weight: bold; font-size: 10pt; padding: 0px; margin: 0px;")
         lbl_hw_title.setAlignment(Qt.AlignCenter)
         v_hw_sum.addWidget(lbl_hw_title)
         
-        l_hw_sum = QVBoxLayout()
-        l_hw_sum.setContentsMargins(5, 0, 5, 0)
-        l_hw_sum.setSpacing(0)
-        self.lbl_hw_sum = QLabel("Initializing hardware...")
-        self.lbl_hw_sum.setWordWrap(False)
-        self.lbl_hw_sum.setStyleSheet("")
-        l_hw_sum.addWidget(self.lbl_hw_sum)
-        v_hw_sum.addLayout(l_hw_sum)
+        h_hw_cols = QHBoxLayout()
+        h_hw_cols.setContentsMargins(2, 2, 2, 2)
+        h_hw_cols.setSpacing(15)
+        
+        self.lbl_icp_sum = QLabel("Initializing ICP...")
+        self.lbl_icp_sum.setWordWrap(True)
+        self.lbl_icp_sum.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        
+        self.lbl_las_sum = QLabel("Initializing Laser...")
+        self.lbl_las_sum.setWordWrap(True)
+        self.lbl_las_sum.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        
+        h_hw_cols.addWidget(self.lbl_las_sum, 1, Qt.AlignHCenter)
+        h_hw_cols.addWidget(self.lbl_icp_sum, 1, Qt.AlignHCenter)
+        
+        v_hw_sum.addLayout(h_hw_cols)
         self.grp_hw_summary.setLayout(v_hw_sum)
         l_settings.addWidget(self.grp_hw_summary)
 
@@ -4011,7 +4203,7 @@ class ioliteOptimiser(QWidget):
         grp_input = QGroupBox("")
         v_input = QVBoxLayout()
         v_input.setSpacing(0)
-        v_input.setContentsMargins(5, 2, 5, 2)
+        v_input.setContentsMargins(2, 2, 2, 2)
         
         lbl_in_title = QLabel("Input Parameters")
         lbl_in_title.setStyleSheet("font-weight: bold; font-size: 10pt; padding: 0px; margin: 0px;")
@@ -4019,11 +4211,11 @@ class ioliteOptimiser(QWidget):
         v_input.addWidget(lbl_in_title)
         
         grid_input = QGridLayout()
-        grid_input.setContentsMargins(5, 5, 5, 5)
+        grid_input.setContentsMargins(2, 2, 2, 2)
         grid_input.setSpacing(5)
 
-        lbl_w_in = 140
-        spin_w_in = 80
+        lbl_w_in = 125
+        spin_w_in = 70
 
         # Row 0
         lbl_spot = QLabel("Initial Spot Size (µm):"); lbl_spot.setFixedWidth(lbl_w_in)
@@ -4034,12 +4226,12 @@ class ioliteOptimiser(QWidget):
         grid_input.addWidget(self.spin_spot, 0, 1)
 
         lbl_wash = QLabel("Washout (ms):"); lbl_wash.setFixedWidth(lbl_w_in)
-        grid_input.addWidget(lbl_wash, 0, 2)
+        grid_input.addWidget(lbl_wash, 0, 3)
         self.spin_wash = QDoubleSpinBox()
         self.spin_wash.setRange(0.01, 50000); self.spin_wash.setDecimals(2)
         self.spin_wash.setValue(self.persistent_settings.get('washout', 500))
         self.spin_wash.setFixedWidth(spin_w_in)
-        grid_input.addWidget(self.spin_wash, 0, 3)
+        grid_input.addWidget(self.spin_wash, 0, 4)
 
         # Row 1
         lbl_init_rr = QLabel("Initial Rep-Rate (Hz):"); lbl_init_rr.setFixedWidth(lbl_w_in)
@@ -4050,12 +4242,15 @@ class ioliteOptimiser(QWidget):
         grid_input.addWidget(self.spin_init_rr, 1, 1)
 
         lbl_mode = QLabel("Mode:"); lbl_mode.setFixedWidth(lbl_w_in)
-        grid_input.addWidget(lbl_mode, 1, 2)
+        grid_input.addWidget(lbl_mode, 1, 3)
         self.cmb_mode = QComboBox()
         self.cmb_mode.addItems(["Spot", "Line", "Imaging"])
         self.cmb_mode.setCurrentText(self.persistent_settings.get('mode', 'Spot'))
         self.cmb_mode.setFixedWidth(spin_w_in)
-        grid_input.addWidget(self.cmb_mode, 1, 3)
+        grid_input.addWidget(self.cmb_mode, 1, 4)
+
+        # Let Column 2 act as the expanding center space between Column 1 and Column 3
+        grid_input.setColumnStretch(2, 1)
 
         v_input.addLayout(grid_input)
         grp_input.setLayout(v_input)
@@ -4065,7 +4260,7 @@ class ioliteOptimiser(QWidget):
         grp_qual = QGroupBox("")
         v_qual = QVBoxLayout()
         v_qual.setSpacing(0)
-        v_qual.setContentsMargins(5, 2, 5, 2)
+        v_qual.setContentsMargins(2, 2, 2, 2)
         
         lbl_qual_title = QLabel("Optimisation Parameters")
         lbl_qual_title.setStyleSheet("font-weight: bold; font-size: 10pt; padding: 0px; margin: 0px;")
@@ -4073,107 +4268,169 @@ class ioliteOptimiser(QWidget):
         v_qual.addWidget(lbl_qual_title)
         
         self.grid_qual = QGridLayout()
-        self.grid_qual.setContentsMargins(5, 5, 5, 5)
+        self.grid_qual.setContentsMargins(2, 2, 2, 2)
         self.grid_qual.setSpacing(5)
 
-        # Row 0: Pulses per Acq. Time and Dosage
-        self.lbl_pulses = QLabel("Pulses per Acq. Time:"); self.lbl_pulses.setFixedWidth(lbl_w_in)
-        self.grid_qual.addWidget(self.lbl_pulses, 0, 0)
-        self.spin_pulses = QDoubleSpinBox()
-        self.spin_pulses.setRange(1, 100); self.spin_pulses.setValue(self.persistent_settings.get('pulses', 5)); self.spin_pulses.setDecimals(1)
-        self.spin_pulses.setFixedWidth(spin_w_in)
-        self.grid_qual.addWidget(self.spin_pulses, 0, 1)
-
-        lbl_dosage = QLabel("Dosage (Shots/Area):"); lbl_dosage.setFixedWidth(lbl_w_in)
-        self.grid_qual.addWidget(lbl_dosage, 0, 2)
-        self.spin_dosage = QDoubleSpinBox()
-        self.spin_dosage.setRange(1, 100); self.spin_dosage.setValue(self.persistent_settings.get('dosage', self.persistent_settings.get('pulses', 5))); self.spin_dosage.setDecimals(1)
-        self.spin_dosage.setFixedWidth(spin_w_in)
-        self.grid_qual.addWidget(self.spin_dosage, 0, 3)
-
-        # Row 1: Target SNR and Minimum SNR
-        lbl_sigma = QLabel("Target SNR (Sigma):"); lbl_sigma.setFixedWidth(lbl_w_in)
-        self.grid_qual.addWidget(lbl_sigma, 1, 0)
-        self.spin_sigma = QDoubleSpinBox()
-        self.spin_sigma.setRange(0.1, 100000); self.spin_sigma.setValue(self.persistent_settings.get('target_sigma', 10)); self.spin_sigma.setDecimals(1)
-        self.spin_sigma.setFixedWidth(spin_w_in)
-        self.grid_qual.addWidget(self.spin_sigma, 1, 1)
-
-        lbl_snr = QLabel("Minimum SNR (Sigma):"); lbl_snr.setFixedWidth(lbl_w_in)
-        self.grid_qual.addWidget(lbl_snr, 1, 2)
-        self.spin_snr = QDoubleSpinBox()
-        self.spin_snr.setRange(0, 1000); self.spin_snr.setValue(self.persistent_settings.get('min_snr', 0)); self.spin_snr.setDecimals(1)
-        self.spin_snr.setFixedWidth(spin_w_in)
-        self.grid_qual.addWidget(self.spin_snr, 1, 3)
-
-        # Row 2: Image Height and Width / Shots
-        self.lbl_height = QLabel("Image Height (µm):"); self.lbl_height.setFixedWidth(lbl_w_in)
-        self.grid_qual.addWidget(self.lbl_height, 2, 0)
-        self.spin_height = QDoubleSpinBox()
-        self.spin_height.setRange(1, 1000000); self.spin_height.setValue(self.persistent_settings.get('img_height', 1000.0)); self.spin_height.setDecimals(0)
-        self.spin_height.setFixedWidth(spin_w_in)
-        self.grid_qual.addWidget(self.spin_height, 2, 1)
-
-        self.lbl_width = QLabel("Image Width (µm):"); self.lbl_width.setFixedWidth(lbl_w_in)
-        self.grid_qual.addWidget(self.lbl_width, 2, 2)
-        self.spin_width = QDoubleSpinBox()
-        self.spin_width.setRange(1, 1000000); self.spin_width.setValue(self.persistent_settings.get('img_width', 1000.0)); self.spin_width.setDecimals(0)
-        self.spin_width.setFixedWidth(spin_w_in)
-        self.grid_qual.addWidget(self.spin_width, 2, 3)
-        
-        # Shots (Overlapping Height in Layout, visibility toggled)
-        self.lbl_shots = QLabel("Number of Shots:"); self.lbl_shots.setFixedWidth(lbl_w_in)
-        # self.grid_qual.addWidget(self.lbl_shots, 2, 0) # Managed by mode update
-        self.spin_shots = QSpinBox()
-        self.spin_shots.setRange(1, 100000000); self.spin_shots.setValue(int(self.persistent_settings.get('shots', 100)))
-        self.spin_shots.setFixedWidth(spin_w_in)
-        # self.grid_qual.addWidget(self.spin_shots, 2, 1) # Managed by mode update
-
-        # Row 3: Duty Cycle and Sync Dosage Checkbox
-        lbl_duty = QLabel("Min Duty Cycle (%):"); lbl_duty.setFixedWidth(lbl_w_in)
-        self.grid_qual.addWidget(lbl_duty, 3, 0)
-        self.spin_duty = QDoubleSpinBox()
-        self.spin_duty.setRange(0, 100); self.spin_duty.setValue(self.persistent_settings.get('min_duty', 0)); self.spin_duty.setDecimals(1)
-        self.spin_duty.setFixedWidth(spin_w_in)
-        self.grid_qual.addWidget(self.spin_duty, 3, 1)
-
-        self.chk_sync_dosage = QCheckBox("Sync Dosage")
-        self.chk_sync_dosage.setToolTip("Synchronize Dosage with Pulses per Acq. Time")
-        self.chk_sync_dosage.setChecked(self.persistent_settings.get('sync_dosage', True))
-        self.grid_qual.addWidget(self.chk_sync_dosage, 3, 2, 1, 2)
-
-        # Row 4: Sync Strategy
+        # Row 0: Sync Strategy
         lbl_sync_strat = QLabel("Sync Strategy:", self)
         lbl_sync_strat.setFixedWidth(lbl_w_in)
-        self.grid_qual.addWidget(lbl_sync_strat, 4, 0)
+        self.grid_qual.addWidget(lbl_sync_strat, 0, 0)
         
         self.cmb_sync_strategy = QComboBox(self)
         self.cmb_sync_strategy.addItems([
-            "Synchronised (Auto)",
-            "Synchronised (Manual)",
-            "Oversampling",
-            "Combined (Auto)",
-            "Combined (Manual)"
+            "Adaptive Integer Sync (Auto)",
+            "Strict Pulse Target (Manual)",
+            "Oversampling (Time-Driven)",
+            "Combined Integer Sync (Auto)"
         ])
-        self.cmb_sync_strategy.setCurrentText(self.persistent_settings.get('sync_strategy', 'Synchronised (Auto)'))
+        self.cmb_sync_strategy.setToolTip(
+            "Select how the laser repetition rate and acquisition time are optimized:\n\n"
+            "• Adaptive Integer Sync (Auto): Automatically sweeps rep-rates and acquisition times "
+            "to guarantee a perfect integer pulse count sync (0% rounding error) close to your target.\n"
+            "• Strict Pulse Target (Manual): Directly calculates acquisition times for your exact pulse target. "
+            "Note: Hardware rounding may result in non-integer pulse counts (unsynchronized).\n"
+            "• Oversampling (Time-Driven): Focuses purely on meeting the washout-time and target RSD constraints "
+            "for steady-state oversampling, ignoring integer pulse snapping.\n"
+            "• Combined Integer Sync (Auto): Combines both behaviors. It sweeps rep-rates above the oversampling minimum "
+            "to find and guarantee a perfect integer pulse count sync."
+        )
+        saved_strat = self.persistent_settings.get('sync_strategy', 'Adaptive Integer Sync (Auto)')
+        mapping = {
+            "Synchronised (Auto)": "Adaptive Integer Sync (Auto)",
+            "Synchronised (Manual)": "Strict Pulse Target (Manual)",
+            "Oversampling": "Oversampling (Time-Driven)",
+            "Combined (Auto)": "Combined Integer Sync (Auto)",
+            "Combined (Manual)": "Strict Pulse Target (Manual)"
+        }
+        saved_strat = mapping.get(saved_strat, saved_strat)
+        self.cmb_sync_strategy.setCurrentText(saved_strat)
         self.cmb_sync_strategy.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.cmb_sync_strategy.currentTextChanged.connect(self._on_strategy_changed)
-        self.grid_qual.addWidget(self.cmb_sync_strategy, 4, 1, 1, 3)
+        self.grid_qual.addWidget(self.cmb_sync_strategy, 0, 1, 1, 4)
 
-        # Row 5: Scale Signal with Rep-Rate
+        # Row 1: Pulses per Acq. Time and Min Duty Cycle
+        self.lbl_pulses = QLabel("Sync Target (Pulses):"); self.lbl_pulses.setFixedWidth(lbl_w_in)
+        self.grid_qual.addWidget(self.lbl_pulses, 1, 0)
+        self.spin_pulses = QDoubleSpinBox()
+        self.spin_pulses.setRange(1, 100); self.spin_pulses.setValue(self.persistent_settings.get('pulses', 5)); self.spin_pulses.setDecimals(1)
+        self.spin_pulses.setFixedWidth(spin_w_in)
+        self.grid_qual.addWidget(self.spin_pulses, 1, 1)
+
+        # RSD Target (Oversampling Mode counterpart, placed in same grid cell)
+        self.lbl_rsd = QLabel("Sync Target (RSD %):"); self.lbl_rsd.setFixedWidth(lbl_w_in)
+        self.lbl_rsd.setToolTip("Target RSD % (relative standard deviation limit) for oversampling steady state")
+        self.lbl_rsd.setVisible(False)
+        self.grid_qual.addWidget(self.lbl_rsd, 1, 0)
+        
+        self.spin_rsd = QDoubleSpinBox()
+        self.spin_rsd.setRange(0.1, 20.0); self.spin_rsd.setValue(self.persistent_settings.get('target_rsd', 5.0)); self.spin_rsd.setDecimals(1)
+        self.spin_rsd.setFixedWidth(spin_w_in)
+        self.spin_rsd.setToolTip("Target RSD % (relative standard deviation limit) for oversampling steady state")
+        self.spin_rsd.setVisible(False)
+        self.spin_rsd.valueChanged.connect(self._on_ui_change)
+        self.grid_qual.addWidget(self.spin_rsd, 1, 1)
+
+        lbl_duty = QLabel("Min Duty Cycle (%):"); lbl_duty.setFixedWidth(lbl_w_in)
+        self.grid_qual.addWidget(lbl_duty, 1, 3)
+        self.spin_duty = QDoubleSpinBox()
+        self.spin_duty.setRange(0, 100); self.spin_duty.setValue(self.persistent_settings.get('min_duty', 0)); self.spin_duty.setDecimals(1)
+        self.spin_duty.setFixedWidth(spin_w_in)
+        self.grid_qual.addWidget(self.spin_duty, 1, 4)
+
+        # Row 2: Target SNR and Minimum SNR
+        lbl_sigma = QLabel("Target SNR (Sigma):"); lbl_sigma.setFixedWidth(lbl_w_in)
+        self.grid_qual.addWidget(lbl_sigma, 2, 0)
+        self.spin_sigma = QDoubleSpinBox()
+        self.spin_sigma.setRange(0.1, 100000); self.spin_sigma.setValue(self.persistent_settings.get('target_sigma', 10)); self.spin_sigma.setDecimals(1)
+        self.spin_sigma.setFixedWidth(spin_w_in)
+        self.grid_qual.addWidget(self.spin_sigma, 2, 1)
+
+        lbl_snr = QLabel("Minimum SNR (Sigma):"); lbl_snr.setFixedWidth(lbl_w_in)
+        self.grid_qual.addWidget(lbl_snr, 2, 3)
+        self.spin_snr = QDoubleSpinBox()
+        self.spin_snr.setRange(0, 1000); self.spin_snr.setValue(self.persistent_settings.get('min_snr', 0)); self.spin_snr.setDecimals(1)
+        self.spin_snr.setFixedWidth(spin_w_in)
+        self.grid_qual.addWidget(self.spin_snr, 2, 4)
+
+        # Row 3: Image Width and Height / Shots
+        self.lbl_width = QLabel("Image Width (µm):"); self.lbl_width.setFixedWidth(lbl_w_in)
+        self.grid_qual.addWidget(self.lbl_width, 3, 0)
+        self.spin_width = QDoubleSpinBox()
+        self.spin_width.setRange(1, 1000000); self.spin_width.setValue(self.persistent_settings.get('img_width', 1000.0)); self.spin_width.setDecimals(0)
+        self.spin_width.setFixedWidth(spin_w_in)
+        self.grid_qual.addWidget(self.spin_width, 3, 1)
+
+        # Line Length widget (Line Mode counterpart)
+        self.lbl_line_len = QLabel("Line Length (µm):"); self.lbl_line_len.setFixedWidth(lbl_w_in)
+        self.lbl_line_len.setVisible(False)
+        self.grid_qual.addWidget(self.lbl_line_len, 3, 0)
+        self.spin_line_len = QDoubleSpinBox()
+        self.spin_line_len.setRange(1, 1000000); self.spin_line_len.setValue(self.persistent_settings.get('line_length', 1000.0)); self.spin_line_len.setDecimals(0)
+        self.spin_line_len.setFixedWidth(spin_w_in)
+        self.spin_line_len.setVisible(False)
+        self.spin_line_len.valueChanged.connect(self._on_ui_change)
+        self.grid_qual.addWidget(self.spin_line_len, 3, 1)
+
+        self.lbl_height = QLabel("Image Height (µm):"); self.lbl_height.setFixedWidth(lbl_w_in)
+        self.grid_qual.addWidget(self.lbl_height, 3, 3)
+        self.spin_height = QDoubleSpinBox()
+        self.spin_height.setRange(1, 1000000); self.spin_height.setValue(self.persistent_settings.get('img_height', 1000.0)); self.spin_height.setDecimals(0)
+        self.spin_height.setFixedWidth(spin_w_in)
+        self.grid_qual.addWidget(self.spin_height, 3, 4)
+        
+        # Shots (Overlapping Height in Layout, visibility toggled)
+        self.lbl_shots = QLabel("Number of Shots:"); self.lbl_shots.setFixedWidth(lbl_w_in)
+        # self.grid_qual.addWidget(self.lbl_shots, 3, 0) # Managed by mode update
+        self.spin_shots = QSpinBox()
+        self.spin_shots.setRange(1, 100000000); self.spin_shots.setValue(int(self.persistent_settings.get('shots', 100)))
+        self.spin_shots.setFixedWidth(spin_w_in)
+        # self.grid_qual.addWidget(self.spin_shots, 3, 1) # Managed by mode update
+
+        # Row 4: Sync Dosage Checkbox and Dosage Input (UI elements commented out but preserved)
+        self.chk_sync_dosage = QCheckBox("Sync Dosage")
+        self.chk_sync_dosage.setToolTip("Synchronize Dosage with Pulses per Acq. Time")
+        self.chk_sync_dosage.setChecked(True) # Leave sync enabled by default in code
+        # self.grid_qual.addWidget(self.chk_sync_dosage, 4, 0, 1, 2)
+
+        lbl_dosage = QLabel("Dosage (Shots/Area):"); lbl_dosage.setFixedWidth(lbl_w_in)
+        # self.grid_qual.addWidget(lbl_dosage, 4, 2)
+        self.spin_dosage = QDoubleSpinBox()
+        self.spin_dosage.setRange(1, 100); self.spin_dosage.setValue(self.persistent_settings.get('dosage', self.persistent_settings.get('pulses', 5))); self.spin_dosage.setDecimals(1)
+        self.spin_dosage.setFixedWidth(spin_w_in)
+        # self.grid_qual.addWidget(self.spin_dosage, 4, 3)
+
+        # Row 5: Scale Signal with Rep-Rate and Avoid Gaps
         self.chk_scale = QCheckBox("Scale Signal with Rep-Rate", self)
-        self.chk_scale.setToolTip("Scale sensitivity based on Rep Rate ratio")
+        self.chk_scale.setToolTip("Scale sensitivity based on Optimised Rep-Rate vs the Initial Rep-Rate. An increase in Rep-Rate will generally increase sensitivity, provided there is enough material present.")
         self.chk_scale.setChecked(self.persistent_settings.get('scale_signal', False))
         self.grid_qual.addWidget(self.chk_scale, 5, 0, 1, 2)
-        
-        v_qual.addLayout(self.grid_qual)
-        grp_qual.setLayout(v_qual)
-        
+
         self.chk_avoid_gaps = QCheckBox("Avoid Gaps", self)
         self.chk_avoid_gaps.setToolTip("Checked: Always Overlap (Increase Rep-Rate). Unchecked: Allow Gaps.")
-        self.chk_avoid_gaps.setChecked(self.persistent_settings.get('avoid_gaps', False)) # Default Unchecked
+        self.chk_avoid_gaps.setChecked(self.persistent_settings.get('avoid_gaps', False))
         self.chk_avoid_gaps.toggled.connect(self._on_ui_change)
-        self.grid_qual.addWidget(self.chk_avoid_gaps, 5, 2, 1, 2)
+        self.grid_qual.addWidget(self.chk_avoid_gaps, 5, 3, 1, 2)
+
+        # Row 6: Prefer Exact Pulses per Acq
+        self.chk_prefer_exact_pulses = QCheckBox("Prefer Exact Pulses per Acq", self)
+        self.chk_prefer_exact_pulses.setToolTip(
+            "<b>Prefer Exact Pulses per Acq (Auto modes only)</b><br/>"
+            "When checked, the auto-sync search prioritises finding a rep-rate that delivers "
+            "exactly the requested number of pulses per acquisition cycle.<br/><br/>"
+            "<b>Trade-off:</b> This may require a larger change in rep-rate and a longer "
+            "acquisition time compared to the closest achievable integer sync, which can "
+            "reduce throughput or increase overlap."
+        )
+        self.chk_prefer_exact_pulses.setChecked(
+            self.persistent_settings.get('prefer_exact_pulses', False))
+        self.chk_prefer_exact_pulses.toggled.connect(self._on_ui_change)
+        self.grid_qual.addWidget(self.chk_prefer_exact_pulses, 5, 3, 1, 2)
+
+        # Let Column 2 act as the expanding center space between Column 1 and Column 3
+        self.grid_qual.setColumnStretch(2, 1)
+
+        v_qual.addLayout(self.grid_qual)
+        grp_qual.setLayout(v_qual)
         l_settings.addWidget(grp_qual)
 
         # Optimised Settings (Moved from Results)
@@ -4181,7 +4438,7 @@ class ioliteOptimiser(QWidget):
         grp_sync.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         v_sync = QVBoxLayout()
         v_sync.setSpacing(0)
-        v_sync.setContentsMargins(5, 2, 5, 2)
+        v_sync.setContentsMargins(2, 2, 2, 2)
         
         lbl_sync_title = QLabel("Optimised Settings")
         lbl_sync_title.setStyleSheet("font-weight: bold; font-size: 10pt; padding: 0px; margin: 0px;")
@@ -4192,7 +4449,7 @@ class ioliteOptimiser(QWidget):
         # Column 1: Spot Size (Left)
         # Core Optimised Values (Unified Grid)
         grid_sync = QGridLayout()
-        grid_sync.setContentsMargins(5,5,5,5)
+        grid_sync.setContentsMargins(2, 2, 2, 2)
         grid_sync.setSpacing(5)
         grid_sync.setVerticalSpacing(1)
         
@@ -4218,7 +4475,11 @@ class ioliteOptimiser(QWidget):
         self.lbl_opt_at = QLabel("- ms")
         grid_sync.addWidget(self.lbl_opt_at, 0, 5)
 
-        # Row 1: (Empty Left), Speed, Overhead
+        # Row 1: Est. Time (hms), Speed, Overhead
+        grid_sync.addWidget(QLabel("Est. Time:"), 1, 0)
+        self.lbl_est_time_hms = QLabel("-")
+        grid_sync.addWidget(self.lbl_est_time_hms, 1, 1)
+
         self.lbl_opt_speed_title = QLabel("Speed:")
         grid_sync.addWidget(self.lbl_opt_speed_title, 1, 2)
         self.lbl_opt_speed = QLabel("- µm s⁻¹")
@@ -4228,10 +4489,9 @@ class ioliteOptimiser(QWidget):
         self.lbl_opt_overhead = QLabel("- ms")
         grid_sync.addWidget(self.lbl_opt_overhead, 1, 5)
 
-        # Row 2: Est Time HH:MM:SS, Overlap, Budget
-        grid_sync.addWidget(QLabel("Est. Time:"), 2, 0)
-        self.lbl_est_time_hms = QLabel("-")
-        grid_sync.addWidget(self.lbl_est_time_hms, 2, 1)
+        # Row 2: Est. Time (seconds), Overlap, Budget
+        self.lbl_est_time_sec = QLabel("-")
+        grid_sync.addWidget(self.lbl_est_time_sec, 2, 1)
 
         self.lbl_opt_overlap_title = QLabel("Overlap:")
         grid_sync.addWidget(self.lbl_opt_overlap_title, 2, 2)
@@ -4242,9 +4502,11 @@ class ioliteOptimiser(QWidget):
         self.lbl_opt_budget = QLabel("- ms")
         grid_sync.addWidget(self.lbl_opt_budget, 2, 5)
 
-        # Row 3: Est Time Seconds, Dosage, Duty Cycle
-        self.lbl_est_time_sec = QLabel("-")
-        grid_sync.addWidget(self.lbl_est_time_sec, 3, 1)
+        # Row 3: Est. Data Points / Pixels Per Sec, Dosage, Duty Cycle
+        self.lbl_est_datapoints_title = QLabel("Est. Data Points:")
+        grid_sync.addWidget(self.lbl_est_datapoints_title, 3, 0)
+        self.lbl_est_datapoints = QLabel("-")
+        grid_sync.addWidget(self.lbl_est_datapoints, 3, 1)
 
         self.lbl_opt_dosage_title = QLabel("Dosage:")
         grid_sync.addWidget(self.lbl_opt_dosage_title, 3, 2)
@@ -4255,7 +4517,13 @@ class ioliteOptimiser(QWidget):
         self.lbl_opt_duty = QLabel("- %")
         grid_sync.addWidget(self.lbl_opt_duty, 3, 5)
 
-        # Set stretch for all value columns
+        # Set stretch and minimum widths for all columns to prevent layout shifting when toggling modes/labels
+        grid_sync.setColumnMinimumWidth(0, 85)
+        grid_sync.setColumnMinimumWidth(1, 60)
+        grid_sync.setColumnMinimumWidth(2, 45)
+        grid_sync.setColumnMinimumWidth(3, 85)
+        grid_sync.setColumnMinimumWidth(4, 65)
+        grid_sync.setColumnMinimumWidth(5, 60)
         grid_sync.setColumnStretch(1, 1)
         grid_sync.setColumnStretch(3, 1)
         v_sync.addLayout(grid_sync)
@@ -4281,7 +4549,7 @@ class ioliteOptimiser(QWidget):
         
         # l_settings.addStretch() # Removed static stretch to allow result_scroll to manage space
         self.settings_scroll_area.setWidget(scroll_content)
-        self.settings_scroll_area.setFixedWidth(500)
+        self.settings_scroll_area.setFixedWidth(460)
         self.settings_scroll_area.setWidgetResizable(True)
         self.settings_scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff) # Main panel scrolling disabled
         left_layout.addWidget(self.settings_scroll_area)
@@ -4839,14 +5107,18 @@ class ioliteOptimiser(QWidget):
             self.lbl_laser_status.setText(f"{rr_info} | Max Speed: {self.max_speed} µm/s | Prec: {self.laser_rr_prec} Hz")
 
         # 2. Main Window Summary (HTML formatted)
-        if hasattr(self, 'lbl_hw_sum'):
+        if hasattr(self, 'lbl_icp_sum') and hasattr(self, 'lbl_las_sum'):
             icp_header = "<b style='font-size: 1.1em;'>ICP-MS</b>"
             icp_details = f"Manufacturer: <b>{icp_mfr}</b><br/>Model: <b>{icp_mod}</b><br/>Type: <b>{self.icp_tech}</b>"
-            icp_constraints = f"Allowed Dwell times: {', '.join(map(str, self.allowed_dwells))} ms" if self.allowed_dwells else f"Minimum Dwell Time: {self.min_dwell} ms | Precision: {self.precision} ms"
+            
+            if self.allowed_dwells:
+                icp_constraints = f"Allowed Dwell Times:<br/>{', '.join(map(str, self.allowed_dwells))} ms"
+            else:
+                icp_constraints = f"Minimum Dwell Time: {self.min_dwell} ms<br/>Dwell Precision: {self.precision} ms"
             
             if self.icp_tech == "TOF":
                 margin = self._get(self.spin_tof_margin, 'value') if hasattr(self, 'spin_tof_margin') else getattr(self, 'persistent_settings', {}).get('tof_margin', 10.0)
-                icp_constraints += f" | Margin: {margin:g} %"
+                icp_constraints += f"<br/>Washout Margin: {margin:g} %"
             
             icp_full = f"{icp_header}<br/>{icp_details}<br/><span style='font-size: 11px;'><b><i>{icp_constraints}</i></b></span>"
             
@@ -4856,41 +5128,28 @@ class ioliteOptimiser(QWidget):
             las_constraints = f"{rr_info}<br/>Rep-Rate Precision: {self.laser_rr_prec:g} Hz<br/>Max Stage Speed: {self.max_speed} µm s⁻¹"
             las_full = f"{las_header}<br/>{las_details}<br/><span style='font-size: 11px;'><b><i>{las_constraints}</i></b></span>"
             
-            self.lbl_hw_sum.setText(f"{icp_full}<br/><br/>{las_full}")
+            self.lbl_icp_sum.setText(icp_full)
+            self.lbl_las_sum.setText(las_full)
 
     def _on_strategy_changed(self, text):
         strategy = text
         is_oversampling_mode = "Oversampling" in strategy or "Combined" in strategy
         
-        # Check if we transitioned modes to prevent overriding the user's manual inputs
-        if not hasattr(self, '_last_strategy_was_oversampling'):
-            self._last_strategy_was_oversampling = False
+        # Toggle visibility of the two independent target inputs
+        if hasattr(self, 'lbl_pulses'): self.lbl_pulses.setVisible(not is_oversampling_mode)
+        if hasattr(self, 'spin_pulses'): self.spin_pulses.setVisible(not is_oversampling_mode)
+        if hasattr(self, 'lbl_rsd'): self.lbl_rsd.setVisible(is_oversampling_mode)
+        if hasattr(self, 'spin_rsd'): self.spin_rsd.setVisible(is_oversampling_mode)
             
-        if is_oversampling_mode != self._last_strategy_was_oversampling:
-            self._last_strategy_was_oversampling = is_oversampling_mode
-            self.spin_pulses.blockSignals(True)
-            if is_oversampling_mode:
-                # Cache standard pulses per acq
-                self._cached_standard_pulses = self._get(self.spin_pulses, 'value')
-                # Set up Target RSD configuration
-                self.lbl_pulses.setText("Target RSD (%):")
-                self.spin_pulses.setRange(0.1, 20.0)
-                # Load or set target RSD (default 5.0%)
-                target_rsd = getattr(self, '_cached_target_rsd', 5.0)
-                self.spin_pulses.setValue(target_rsd)
-            else:
-                # Cache target RSD
-                self._cached_target_rsd = self._get(self.spin_pulses, 'value')
-                # Restore Standard Pulses configuration
-                self.lbl_pulses.setText("Pulses per Acq. Time:")
-                self.spin_pulses.setRange(1.0, 100.0)
-                # Load or set standard pulses (default 10.0)
-                standard_pulses = getattr(self, '_cached_standard_pulses', 10.0)
-                self.spin_pulses.setValue(standard_pulses)
-            self.spin_pulses.blockSignals(False)
-            
-        if hasattr(self, 'table'):
-            self._on_ui_change()
+        # Update visibility of checkboxes based on active strategy
+        is_strict = (strategy == "Strict Pulse Target (Manual)")
+        is_adaptive = (strategy == "Adaptive Integer Sync (Auto)")
+        if hasattr(self, 'chk_avoid_gaps'):
+            self.chk_avoid_gaps.setVisible(is_strict)
+        if hasattr(self, 'chk_prefer_exact_pulses'):
+            self.chk_prefer_exact_pulses.setVisible(is_adaptive)
+
+        self._on_ui_change()
 
     def _on_pulses_changed(self, value):
         strategy = self._get(self.cmb_sync_strategy, 'currentText')
@@ -4935,12 +5194,10 @@ class ioliteOptimiser(QWidget):
         self._update_laser_status()
         
         # Update persistent settings (Debounced)
-        # REMOVED: Saving on every change is inefficient. 
-        # relying on closeEvent to save settings.
-        # if hasattr(self, 'save_timer'):
-        #    self.save_timer.start()
-        # else:
-        #    self.save_persistent_settings()
+        if hasattr(self, 'save_timer'):
+            self.save_timer.start()
+        else:
+            self.save_persistent_settings()
         
         # Trigger Optimization (Preserve Zoom for parameter tweaks)
         self.run_optimisation(refresh=False, preserve_zoom=True)
@@ -4972,45 +5229,45 @@ class ioliteOptimiser(QWidget):
         if hasattr(self, 'spin_height'): self.spin_height.setVisible(False); self.grid_qual.removeWidget(self.spin_height)
         if hasattr(self, 'lbl_width'): self.lbl_width.setVisible(False); self.grid_qual.removeWidget(self.lbl_width)
         if hasattr(self, 'spin_width'): self.spin_width.setVisible(False); self.grid_qual.removeWidget(self.spin_width)
+        if hasattr(self, 'lbl_line_len'): self.lbl_line_len.setVisible(False); self.grid_qual.removeWidget(self.lbl_line_len)
+        if hasattr(self, 'spin_line_len'): self.spin_line_len.setVisible(False); self.grid_qual.removeWidget(self.spin_line_len)
         if hasattr(self, 'lbl_shots'): self.lbl_shots.setVisible(False); self.grid_qual.removeWidget(self.lbl_shots)
         if hasattr(self, 'spin_shots'): self.spin_shots.setVisible(False); self.grid_qual.removeWidget(self.spin_shots)
         
         # 2. Re-populate based on Mode
         if is_spot:
-            # Spot: Shots at (2,0)
+            # Spot: Shots at (3,0)
             if hasattr(self, 'lbl_shots'): 
-                self.grid_qual.addWidget(self.lbl_shots, 2, 0)
+                self.grid_qual.addWidget(self.lbl_shots, 3, 0)
                 self.lbl_shots.setVisible(True)
             if hasattr(self, 'spin_shots'): 
-                self.grid_qual.addWidget(self.spin_shots, 2, 1)
+                self.grid_qual.addWidget(self.spin_shots, 3, 1)
                 self.spin_shots.setVisible(True)
                 
         elif is_line:
-            # Line: Length (Width) at (2,0)
-            if hasattr(self, 'lbl_width'):
-                self.lbl_width.setText("Line Length (µm):")
-                self.grid_qual.addWidget(self.lbl_width, 2, 0)
-                self.lbl_width.setVisible(True)
-            if hasattr(self, 'spin_width'):
-                self.grid_qual.addWidget(self.spin_width, 2, 1)
-                self.spin_width.setVisible(True)
+            # Line: Length at (3,0)
+            if hasattr(self, 'lbl_line_len'):
+                self.grid_qual.addWidget(self.lbl_line_len, 3, 0)
+                self.lbl_line_len.setVisible(True)
+            if hasattr(self, 'spin_line_len'):
+                self.grid_qual.addWidget(self.spin_line_len, 3, 1)
+                self.spin_line_len.setVisible(True)
                 
         else: # Imaging
-            # Imaging: Height at (2,0), Width at (2,2)
+            # Imaging: Width at (3,0), Height at (3,2)
+            if hasattr(self, 'lbl_width'):
+                self.grid_qual.addWidget(self.lbl_width, 3, 0)
+                self.lbl_width.setVisible(True)
+            if hasattr(self, 'spin_width'):
+                self.grid_qual.addWidget(self.spin_width, 3, 1)
+                self.spin_width.setVisible(True)
+                
             if hasattr(self, 'lbl_height'):
-                self.grid_qual.addWidget(self.lbl_height, 2, 0)
+                self.grid_qual.addWidget(self.lbl_height, 3, 3)
                 self.lbl_height.setVisible(True)
             if hasattr(self, 'spin_height'):
-                self.grid_qual.addWidget(self.spin_height, 2, 1)
+                self.grid_qual.addWidget(self.spin_height, 3, 4)
                 self.spin_height.setVisible(True)
-                
-            if hasattr(self, 'lbl_width'):
-                self.lbl_width.setText("Image Width (µm):")
-                self.grid_qual.addWidget(self.lbl_width, 2, 2)
-                self.lbl_width.setVisible(True) # FIXED: Was missing visible call
-            if hasattr(self, 'spin_width'):
-                self.grid_qual.addWidget(self.spin_width, 2, 3)
-                self.spin_width.setVisible(True)
 
         # 3. Dynamic visibility for Optimised Settings (Results Summary)
         # Hide Speed, Overlap, and Dosage fields in Spot mode
@@ -5198,6 +5455,7 @@ class ioliteOptimiser(QWidget):
                 'init_rr': self._get(self.spin_init_rr, 'value'),
                 'scale_signal': self._get(self.chk_scale, 'isChecked'),
                 'pulses': self._get(self.spin_pulses, 'value'),
+                'target_rsd': self._get(self.spin_rsd, 'value') if hasattr(self, 'spin_rsd') else 5.0,
                 'dosage': self._get(self.spin_dosage, 'value'),
                 'sync_dosage': self._get(self.chk_sync_dosage, 'isChecked'),
                 'target_sigma': self._get(self.spin_sigma, 'value'),
@@ -5230,7 +5488,10 @@ class ioliteOptimiser(QWidget):
                 
                 'img_height': self._get(self.spin_height, 'value'),
                 'img_width': self._get(self.spin_width, 'value'),
+                'line_length': self._get(self.spin_line_len, 'value') if hasattr(self, 'spin_line_len') else 1000.0,
                 'avoid_gaps': self._get(self.chk_avoid_gaps, 'isChecked'),
+                'prefer_exact_pulses': self._get(self.chk_prefer_exact_pulses, 'isChecked') if hasattr(self, 'chk_prefer_exact_pulses') else False,
+                'pulse_shape_pref': self._get(self.cmb_pulse_shape, 'currentText') if hasattr(self, 'cmb_pulse_shape') else 'Real Composite Peak',
                 
                 # New Persistence Keys
                 'theme': self._get(self.combo_theme, 'currentText'),
@@ -6619,7 +6880,11 @@ class ioliteOptimiser(QWidget):
                     slope = np.polyfit(np.arange(len(time_data)), time_data, 1)[0]
                 detected_at_val = slope * 1000.0
             
-            self.detected_at_ms = detected_at_val
+            if tab == "spr":
+                self.spr_detected_at_ms = detected_at_val
+            else:
+                self.detected_at_ms = detected_at_val
+                self.opt_detected_at_ms = detected_at_val
             
             # --- Channel Filtering for Vitesse/icpTOF ---
             ref_ch_0 = channels[0]
@@ -6637,7 +6902,8 @@ class ioliteOptimiser(QWidget):
                 ch_names = [ch.name for ch in channels]
                 
                 # Unified Dialog: Channel selection + Global dwell
-                dlg = DataConfigDialog(ch_names, detected_at=self.detected_at_ms, is_tof=True, parent=self)
+                det_at = self.spr_detected_at_ms if tab == "spr" else self.detected_at_ms
+                dlg = DataConfigDialog(ch_names, detected_at=det_at, is_tof=True, parent=self)
                 if dlg.exec_():
                     selected_names = set(dlg.result_channels)
                     channels = [ch for ch in channels if ch.name in selected_names]
@@ -6826,6 +7092,9 @@ class ioliteOptimiser(QWidget):
              self.lbl_opt_speed.setText("- µm s⁻¹")
              self.lbl_opt_at.setText("- ms")
              self.lbl_opt_pulses.setText("- Pulses")
+             self.lbl_est_time_hms.setText("-")
+             self.lbl_est_time_sec.setText("-")
+             self.lbl_est_datapoints.setText("-")
              if not silent:
                  IoLog.information("iolite Optimiser: UI Cleared (No Data)")
              QApplication.processEvents()
@@ -6854,14 +7123,8 @@ class ioliteOptimiser(QWidget):
                     margin_pct = self._get(self.spin_tof_margin, 'value')
                 base_washout = base_washout * (1.0 + (margin_pct / 100.0))
 
-            strategy = self._get(self.cmb_sync_strategy, 'currentText')
-            is_oversampling = "Oversampling" in strategy or "Combined" in strategy
-            if is_oversampling:
-                pulses_val = getattr(self, '_cached_standard_pulses', 10.0)
-                rsd_val = self._get(self.spin_pulses, 'value')
-            else:
-                pulses_val = self._get(self.spin_pulses, 'value')
-                rsd_val = getattr(self, '_cached_target_rsd', 5.0)
+            pulses_val = self._get(self.spin_pulses, 'value')
+            rsd_val = self._get(self.spin_rsd, 'value') if hasattr(self, 'spin_rsd') else 5.0
 
             c = {
                 'icp_mfr': mfr,
@@ -6883,7 +7146,9 @@ class ioliteOptimiser(QWidget):
                 'mode': self._get(self.cmb_mode, 'currentText'),
                 'img_height': self._get(self.spin_height, 'value') if hasattr(self, 'spin_height') else 1000.0,
                 'img_width': self._get(self.spin_width, 'value') if hasattr(self, 'spin_width') else 1000.0,
+                'line_length': self._get(self.spin_line_len, 'value') if hasattr(self, 'spin_line_len') else 1000.0,
                 'avoid_gaps': self._get(self.chk_avoid_gaps, 'isChecked') if hasattr(self, 'chk_avoid_gaps') else False,
+                'prefer_exact_pulses': self._get(self.chk_prefer_exact_pulses, 'isChecked') if hasattr(self, 'chk_prefer_exact_pulses') else False,
                 'lower_sigma_limit': self._get(self.spin_sigma, 'value'),
                 'min_duty_cycle': self._get(self.spin_duty, 'value') / 100.0 if self._get(self.spin_duty, 'value') else 0.0,
                 'snr_threshold': self._get(self.spin_snr, 'value'),
@@ -7026,7 +7291,20 @@ class ioliteOptimiser(QWidget):
 
             c['num_even'] = num_even
             c['fixed_costs_s'] = fixed_costs_s
-            
+
+            active_dwells_ms = []
+            for iso in isotope_data:
+                stat = iso.get('status', 'Auto')
+                if stat == "Exclude":
+                    continue
+                elif stat == "Custom":
+                    active_dwells_ms.append(iso.get('custom_time_s', min_dwell_s) * 1000.0)
+                elif stat == "Set to Min":
+                    active_dwells_ms.append(self.min_dwell)
+                else:
+                    active_dwells_ms.append(self.min_dwell)
+            c['active_dwells_ms'] = active_dwells_ms
+
             c['log_prefix'] = "Initial Sync"
             sync = Logic.calculate_constrained_at(c)
             
@@ -7078,7 +7356,6 @@ class ioliteOptimiser(QWidget):
                 self.spin_opt_spot.setValue(best_spot)
                 self.spin_opt_spot.blockSignals(False)
                 final_notes.append(f"Optimum Spot Size <b>{best_spot}</b> µm - Based on Minimum SNR of <b>{limiting_iso}</b>")
-            
             # 4. Step 2: Laser Sync for that spot size
             c['spot_size_um'] = best_spot
             
@@ -7091,6 +7368,10 @@ class ioliteOptimiser(QWidget):
                      max_opt_dwell = max([r.get('Final Dwell (ms)', 0) for r in df_res], default=0)
                      if max_opt_dwell > 0:
                          c['min_dwell_needed_ms'] = max_opt_dwell
+                
+                active_dwells = [r.get('Final Dwell (ms)', 0.0) for r in df_res if r.get('Status') != "Exclude"]
+                if active_dwells:
+                    c['active_dwells_ms'] = active_dwells
             
             # Reset 'pulses_per_pixel' to user input to ensure Error Calculation compares against Target
             c['pulses_per_pixel'] = pulses_val
@@ -7099,91 +7380,12 @@ class ioliteOptimiser(QWidget):
             sync = Logic.calculate_constrained_at(c)
             
             # --- AUTO-SYNC SWEEP LOGIC ---
-            strategy = c.get('sync_strategy', 'Synchronised (Auto)')
-            if "Auto" in strategy and self.icp_tech != "Multi-Collector":
-                F_raw = sync['rr_actual']
-                AT_raw_s = sync['at_actual_s']
-                overhead_s = getattr(self, 'detected_overhead_ms', 0.0) / 1000.0
-                
-                # Check if already a perfect integer (within 1e-9 tolerance)
-                pulses_raw = F_raw * AT_raw_s
-                if abs(pulses_raw - round(pulses_raw)) >= 1e-9:
-                    best_pair = None
-                    min_diff_score = float('inf')
-                    
-                    # Search range (+/- 15%)
-                    rr_min = max(1, int(round(F_raw * 0.85)))
-                    rr_max_limit = min(self.max_rr, int(round(F_raw * 1.15)))
-                    
-                    # Convert to ms for acq time bounds
-                    at_min_ms = max(self.min_dwell + getattr(self, 'detected_overhead_ms', 0.0), (AT_raw_s * 1000.0) * 0.85)
-                    at_max_ms = (AT_raw_s * 1000.0) * 1.15
-                    
-                    target_pulses = pulses_val
-                    p_s = self.precision / 1000.0  # instrument precision in seconds
-                    
-                    # Combined (Auto) steady state rep rate limit
-                    f_min_combined = 0.0
-                    if "Combined" in strategy:
-                        target_rsd = c.get('target_rsd', 5.0)
-                        washout_ms = c.get('washout_ms', 30.0)
-                        f_min_combined = 35355.339 / (washout_ms * target_rsd) if (washout_ms * target_rsd) > 0 else 0.0
-                    
-                    # Laser precision/allowed rates
-                    rr_prec = c.get('rr_prec_hz', 1.0)
-                    if rr_prec <= 0: rr_prec = 1.0
-                    allowed_rr = c.get('allowed_rr', None)
-                    
-                    # Compile list of candidate RRs (Hz)
-                    rr_candidates = []
-                    if allowed_rr:
-                        rr_candidates = [r for r in allowed_rr if rr_min <= r <= rr_max_limit]
-                    else:
-                        rr_candidates = [r for r in range(rr_min, rr_max_limit + 1) if r % rr_prec == 0]
-                    if not rr_candidates:
-                        rr_candidates = [int(F_raw)]
-                        
-                    # Compile list of candidate ATs (ms)
-                    start_steps = int(round(at_min_ms * 10))
-                    end_steps = int(round(at_max_ms * 10))
-                    
-                    # Sweep rep rates and acquisition times
-                    avoid_gaps = c.get('avoid_gaps', False)
-                    for F in rr_candidates:
-                        for steps in range(start_steps, end_steps + 1):
-                            AT_ms = steps / 10.0
-                            AT_s = AT_ms / 1000.0
-                            
-                            # Check if product is exactly an integer
-                            pulses_calc = F * AT_s
-                            if abs(pulses_calc - round(pulses_calc)) < 1e-9:
-                                # Combined mode: ensure frequency is above the oversampling minimum
-                                if "Combined" in strategy and F < f_min_combined:
-                                    continue
-                                
-                                # Avoid Gaps check: prioritize increase (never round down)
-                                if avoid_gaps and round(pulses_calc) < target_pulses:
-                                    continue
-                                
-                                # Calculate normalized difference score
-                                diff_F = abs(F - F_raw) / F_raw
-                                diff_AT = abs(AT_s - AT_raw_s) / AT_raw_s
-                                diff_pulses = abs(pulses_calc - target_pulses) / target_pulses
-                                
-                                # Combined score (pulses matching target is weighted 2.0x)
-                                score = diff_F + diff_AT + 2.0 * diff_pulses
-                                
-                                if score < min_diff_score:
-                                    min_diff_score = score
-                                    best_pair = (F, AT_s)
-                                    
-                    if best_pair is not None:
-                        # Apply overrides to c so calculate_sigma_for_spot uses them
-                        c['override_at_s'] = best_pair[1]
-                        c['override_rr'] = best_pair[0]
-                        
-                        # Re-run final pass of calculate_sigma_for_spot to update the table dwells!
-                        _, df_res, sync = Logic.calculate_sigma_for_spot(best_spot, c, isotope_data)
+            # Now natively handled by Logic.calculate_constrained_at(c)
+            c['override_at_s'] = sync['at_actual_s']
+            c['override_rr'] = sync['rr_actual']
+            
+            # Re-run final pass of calculate_sigma_for_spot to update the table dwells, speed, overlap, etc.!
+            _, df_res, sync = Logic.calculate_sigma_for_spot(best_spot, c, isotope_data)
             
             # STORE SYNC FOR PULSE TRAIN SIMULATOR
             self.last_sync = sync
@@ -7254,80 +7456,62 @@ class ioliteOptimiser(QWidget):
             pulses_per_cycle = F * AT_s
             is_perfect = abs(pulses_per_cycle - round(pulses_per_cycle)) < 1e-9
             
-            strategy = c.get('sync_strategy', 'Synchronised (Auto)')
+            strategy = c.get('sync_strategy', 'Adaptive Integer Sync (Auto)')
             is_oversampling_mode = "Oversampling" in strategy or "Combined" in strategy
             
             if is_oversampling_mode:
-                # Calculate predicted Lockwood RSD for all active channels using their actual dwells
                 target_rsd = c.get('target_rsd', 5.0)
                 washout_ms = c.get('washout_ms', 30.0)
                 
-                # Fetch actual dwells in ms from the result rows
-                limiting_iso = None
-                max_rsd = 0.0
+                # Retrieve active dwells (resolved or initial)
+                rsd_details = []
                 if df_res is not None:
-                    # Let's find the max RSD among active channels
-                    for row in df_res:
-                        iso_name = row['Isotope']
-                        # Find the status of this isotope
-                        iso_conf = self.isotope_configs.get(iso_name, {"status": "Auto"})
-                        if iso_conf['status'] == "Exclude":
-                            continue
-                        # Dwell time in ms
-                        dt_ms = row.get('Final Dwell (ms)', 0.0)
-                        if dt_ms > 0:
-                            rsd_val = Logic.calculate_lockwood_rsd(F, washout_ms, dt_ms)
-                            if rsd_val > max_rsd:
-                                max_rsd = rsd_val
-                                limiting_iso = iso_name
+                    for r in df_res:
+                        if r.get('Status') != "Exclude":
+                            iso_name = r.get('Isotope', 'Unknown')
+                            dt_val = r.get('Final Dwell (ms)', 0.0)
+                            if dt_val > 0:
+                                rsd_c = Logic.calculate_lockwood_rsd(F, washout_ms, dt_val)
+                                rsd_details.append((iso_name, dt_val, rsd_c))
+                
+                if not rsd_details:
+                    at_ms = sync['at_actual_s'] * 1000.0
+                    rsd_c = Logic.calculate_lockwood_rsd(F, washout_ms, at_ms)
+                    rsd_details.append(('Cycle Time', at_ms, rsd_c))
+                
+                worst_iso, worst_dwell, worst_rsd = max(rsd_details, key=lambda x: x[2])
                 
                 # If perfect sync is achieved (e.g. in Combined), show both status indicators!
                 if is_perfect:
-                    advisor_html += f"<span style='color: #4CAF50;'>🟢 Synchronised ({round(pulses_per_cycle)} pulses/cycle)</span><br>"
+                    advisor_html += f"<span style='color: #4CAF50;'>🟢 Synchronised ({round(pulses_per_cycle)} pulses per acq)</span><br>"
                 else:
                     advisor_html += f"<span style='color: #8BC34A;'>🟢 Oversampling Mode (No integer snapping required)</span><br>"
                 
-                if max_rsd > target_rsd:
-                    advisor_html += f"<span style='color: #FFC107;'>🟡 Unsynchronised (RSD of {limiting_iso} is {max_rsd:.1f}% - target is {target_rsd:.1f}%)</span><br>"
-                    # Suggest minimum dwell needed at the current F to satisfy the target RSD
+                overlap_factor = F * (washout_ms / 1000.0)
+                if overlap_factor < 2.0:
+                    advisor_html += f"<span style='color: #F44336;'>🔴 Unstable Steady State (Rep Rate {F:.1f} Hz is too low for oversampling. Must be at least {2.0 / (washout_ms/1000.0):.1f} Hz to ensure pulse overlap with {washout_ms:.1f} ms washout)</span><br>"
+                elif worst_rsd > target_rsd:
+                    advisor_html += f"<span style='color: #FFC107;'>🟡 Unstable Steady State (Worst RSD is {worst_rsd:.1f}% for {worst_iso} at {worst_dwell:.1f} ms dwell - target is {target_rsd:.1f}%)</span><br>"
                     suggested_dt = Logic.get_lockwood_min_dwell(F, washout_ms, target_rsd)
-                    advisor_html += f"• Increase minimum dwell of limiting channel to: {suggested_dt:.1f} ms to lower RSD below {target_rsd:.1f}%<br>"
+                    advisor_html += f"• Increase {worst_iso} Dwell/Acquisition Time to: {suggested_dt:.1f} ms to lower RSD below {target_rsd:.1f}%<br>"
                 else:
-                    advisor_html += f"<span style='color: #4CAF50;'>🟢 Stable Steady State (Max RSD is {max_rsd:.1f}% - below {target_rsd:.1f}% target)</span><br>"
+                    advisor_html += f"<span style='color: #4CAF50;'>🟢 Stable Steady State (All channels below {target_rsd:.1f}% target RSD. Worst is {worst_rsd:.1f}% for {worst_iso})</span><br>"
             else:
                 # Standard Synchronised / Snapped modes
                 if is_perfect:
-                    advisor_html += f"<span style='color: #4CAF50;'>🟢 Synchronised ({round(pulses_per_cycle)} pulses/cycle)</span><br>"
+                    advisor_html += f"<span style='color: #4CAF50;'>🟢 Synchronised ({round(pulses_per_cycle)} pulses per acq)</span><br>"
                     target_pulses = pulses_val
                     final_N = round(pulses_per_cycle)
                     if "Auto" in strategy and abs(final_N - target_pulses) >= 1e-9:
-                        advisor_html += f"• Adjusted target from {target_pulses:.1f} to {final_N:.1f} pulses/cycle<br>"
+                        advisor_html += f"• Adjusted target from {target_pulses:.1f} to {final_N:.1f} pulses per acq<br>"
                 else:
                     diff_pulse = abs(pulses_per_cycle - round(pulses_per_cycle))
-                    beat_s = 1.0 / (F * diff_pulse) if (F * diff_pulse) > 0 else 0.0
+                    beat_s = AT_s / diff_pulse if diff_pulse > 1e-9 else 0.0
                     beat_text = f" ({beat_s:.1f}s beat pattern)" if beat_s > 0 else ""
                     
-                    advisor_html += f"<span style='color: #FFC107;'>🟡 Unsynchronised ({pulses_per_cycle:.2f} pulses/cycle{beat_text})</span><br>"
+                    advisor_html += f"<span style='color: #FFC107;'>🟡 Unsynchronised ({pulses_per_cycle:.4f} pulses per acq{beat_text})</span><br>"
                     
-                    # Look for closest target pulse count N (Dosage) keeping RR fixed that can snap perfectly
-                    dosage_suggestions = []
-                    p_s = self.precision / 1000.0
-                    target_pulses = pulses_val
-                    # Lower (negative) suggestion
-                    for N in range(int(round(target_pulses)) - 1, 0, -1):
-                        cand_at = N / F
-                        if abs(cand_at - round(cand_at / p_s) * p_s) < 1e-9:
-                            dosage_suggestions.append(f"{N}.0")
-                            break
-                    # Higher (positive) suggestion
-                    for N in range(int(round(target_pulses)) + 1, 100):
-                        cand_at = N / F
-                        if abs(cand_at - round(cand_at / p_s) * p_s) < 1e-9:
-                            dosage_suggestions.append(f"{N}.0")
-                            break
-                    
-                    if dosage_suggestions:
-                        advisor_html += f"• Change Pulses per Acq. (Dosage) to: {', '.join(dosage_suggestions)} pulses<br>"
+
                     
             self.final_status_base += advisor_html
             
@@ -7461,10 +7645,28 @@ class ioliteOptimiser(QWidget):
                 
                 self.lbl_est_time_hms.setText(f"<b>{hrs:02d}:{mins:02d}:{secs:02d}</b>")
                 self.lbl_est_time_sec.setText(f"<b>{total_sec_int}</b> s")
+
+                # Est # Data Points (for spot and line modes) vs Pixels Per Sec (for imaging mode)
+                at_actual_s = sync.get('at_actual_s', 0.1)
+                if mode in ["Spot", "Line"]:
+                    self.lbl_est_datapoints_title.setText("Est. Data Points:")
+                    if at_actual_s > 0:
+                        datapoints = est_sec / at_actual_s
+                        self.lbl_est_datapoints.setText(f"<b>{int(round(datapoints))}</b>")
+                    else:
+                        self.lbl_est_datapoints.setText("-")
+                else:
+                    # Imaging mode
+                    self.lbl_est_datapoints_title.setText("Pixels Per Sec:")
+                    if at_actual_s > 0:
+                        self.lbl_est_datapoints.setText(f"<b>{1.0 / at_actual_s:.1f}</b> px s⁻¹")
+                    else:
+                        self.lbl_est_datapoints.setText("-")
                 
             except Exception as e:
                 self.lbl_est_time_hms.setText("Error")
                 self.lbl_est_time_sec.setText(f"({str(e)})")
+                self.lbl_est_datapoints.setText("-")
             
             self.lbl_result.setText(self.final_status_base)
             
@@ -7742,6 +7944,16 @@ class ioliteOptimiser(QWidget):
         self.spin_pulse_sig.setValue(30.0)
         self.spin_pulse_sig.setSuffix(" s")
         form_settings.addRow("Signal Duration:", self.spin_pulse_sig)
+
+        self.cmb_pulse_shape = QComboBox()
+        self.cmb_pulse_shape.addItems([
+            "Real Composite Peak",
+            "Model Washout Peak (Lognormal)",
+            "Sawtooth Approximation"
+        ])
+        self.cmb_pulse_shape.setCurrentText(self.persistent_settings.get('pulse_shape_pref', 'Real Composite Peak'))
+        self.cmb_pulse_shape.currentIndexChanged.connect(lambda: self.pulse_debounce_timer.start())
+        form_settings.addRow("Pulse Shape:", self.cmb_pulse_shape)
         
         grp_settings.setLayout(form_settings)
         left_layout.addWidget(grp_settings)
@@ -7943,24 +8155,27 @@ class ioliteOptimiser(QWidget):
                 IoLog.warning("Pulse Train: No sync data found yet. Using current or default parameters.")
                 # If override checked, we can proceed with just defaults if logic handles None sync
 
-            # Get Analyzed Isotopes
-            if self.spr_raw_results_df is None or self.spr_raw_results_df.empty:
-                 IoLog.warning("iolite Optimiser: No SPR results available")
-                 if hasattr(self, 'lbl_result'): self.lbl_result.setText("No SPR analysis available. Please run SPR Analysis first.")
-                 return
-            
             # Get Selected Isotope (for composite peak)
             try:
                 iso = self._get(self.cmb_spr_iso, 'currentText')
                 IoLog.information(f"iolite Optimiser: Selected ISO: {iso}")
             except: iso = None
             
-            if not iso:
-                 IoLog.warning("iolite Optimiser: No isotope selected")
-                 return
+            shape_pref = self._get(self.cmb_pulse_shape, 'currentText')
             
+            if shape_pref == "Real Composite Peak":
+                if not iso:
+                    IoLog.warning("iolite Optimiser: No isotope selected")
+                    return
+                # Get Analyzed Isotopes
+                if self.spr_raw_results_df is None or self.spr_raw_results_df.empty:
+                     IoLog.warning("iolite Optimiser: No SPR results available")
+                     if hasattr(self, 'lbl_result'): self.lbl_result.setText("No SPR analysis available. Please run SPR Analysis first.")
+                     return
+            else:
+                if not iso:
+                    iso = "Model Isotope"
 
-            
             # Get Timing (Always use spinbox values)
             rr = self.spin_pulse_rr.value
             at_ms = self.spin_pulse_at.value
@@ -7982,21 +8197,15 @@ class ioliteOptimiser(QWidget):
             # --- Build Channel Specs ---
             channel_specs = []
             
-            # Use 'optimised_results' if available to get exact dwells and order
-            # optimised_results is a list of dicts [{'Channel': 'U238', 'Final Dwell (ms)': 10.0, ...}]
-            # We must match these to available columns in spr_df
-            
             if hasattr(self, 'optimised_results') and self.optimised_results:
                 # Use optimized order
-                # Overhead is at the end of the cycle, so offsets are just cumulative dwells
                 is_simultaneous = (self.icp_tech in ["Multi-Collector", "TOF"])
                 current_offset_s = 0.0
                 
                 for res in self.optimised_results:
-                    ch_name = str(res.get('Isotope', 'Unknown')) # Or Channel Name
+                    ch_name = str(res.get('Isotope', 'Unknown'))
                     dwell_ms = res.get('Final Dwell (ms)', 10.0)
                     
-                    # Get Scaling Factor (Signal CPS preferred, else SNR)
                     try:
                         if 'Signal CPS' in res:
                              scale_val = float(res['Signal CPS'])
@@ -8007,7 +8216,6 @@ class ioliteOptimiser(QWidget):
                     except:
                         scale_val = 1.0
                     
-                    # Scale dwell if AT has been overridden
                     ratio = 1.0
                     if hasattr(self, 'last_sync') and self.last_sync:
                          orig_at = self.last_sync.get('at_actual_s', 0.001) * 1000.0
@@ -8027,9 +8235,7 @@ class ioliteOptimiser(QWidget):
                     
             else:
                 # Fallback: Simultaneous or Equal Sequential
-                # If no optimization run, assume simultaneous/equal
-                # Let's assume simultaneous to be safe (offset=0, dwell=AT)
-                if self.spr_df is not None:
+                if hasattr(self, 'spr_df') and self.spr_df is not None:
                     cols = [c for c in self.spr_df.columns if c != 'Time']
                     for c in cols:
                         channel_specs.append({
@@ -8038,32 +8244,62 @@ class ioliteOptimiser(QWidget):
                             'offset': 0.0
                         })
             
+            if not channel_specs:
+                channel_specs.append({
+                    'name': iso,
+                    'dwell': at_s,
+                    'offset': 0.0
+                })
+            
             IoLog.information(f"iolite Optimiser: Channel Specs (First 3): {channel_specs[:3]}")
 
-            # Generate ONCE using the selected isotope's parameters
-            # Filter excluded peaks for composite generation
-            excluded = self.spr_excluded_peaks.get(iso, set())
-            filtered_df = self.spr_raw_results_df[~self.spr_raw_results_df['Peak Index'].isin(excluded)]
-            
-            composite_df = Logic.generate_composite_peak(self.spr_df, iso, filtered_df)
-            
-            if composite_df is not None:
-                # --- Washout Stretching / Compression Override ---
-                target_washout = self.spin_pulse_washout.value
-                lvl = getattr(self, 'active_washout_level', 0.01)
-                comp_t = composite_df['Relative Time (s)'].values
-                comp_y = composite_df['Normalised Intensity'].values
-                above = np.where(comp_y >= lvl)[0]
-                if len(above) >= 2:
-                    orig_width_ms = (comp_t[above[-1]] - comp_t[above[0]]) * 1000.0
-                else:
-                    orig_width_ms = (comp_t.max() - comp_t.min()) * 1000.0
+            # Generate peak based on preference
+            target_washout = self.spin_pulse_washout.value
+            target_washout_s = target_washout / 1000.0
+
+            if shape_pref == "Sawtooth Approximation":
+                t_scaled = np.linspace(0.0, target_washout_s, 1000)
+                y_vals = 1.0 - (t_scaled / target_washout_s)
+                import pandas as pd
+                composite_df = pd.DataFrame({
+                    'Relative Time (s)': t_scaled,
+                    'Normalised Intensity': y_vals
+                })
+            elif shape_pref == "Model Washout Peak (Lognormal)":
+                t_vals = np.linspace(1e-6, 4.0, 1000)
+                sigma = 0.5
+                mu = 0.0
+                s2pi = np.sqrt(2.0 * np.pi)
+                y_vals = 1.0 / (t_vals * sigma * s2pi) * np.exp(-0.5 * ((np.log(t_vals) - mu) / sigma) ** 2)
+                y_vals = y_vals / y_vals.max()
                 
-                if orig_width_ms > 0:
-                    scale_factor = target_washout / orig_width_ms
-                    if scale_factor > 0:
-                        composite_df = composite_df.copy()
-                        composite_df['Relative Time (s)'] = composite_df['Relative Time (s)'] * scale_factor
+                # Scale the entire time axis exactly to [0.0, target_washout_s]
+                t_scaled = (t_vals - t_vals[0]) / (t_vals[-1] - t_vals[0]) * target_washout_s
+                import pandas as pd
+                composite_df = pd.DataFrame({
+                    'Relative Time (s)': t_scaled,
+                    'Normalised Intensity': y_vals
+                })
+            else: # Real Composite Peak
+                excluded = self.spr_excluded_peaks.get(iso, set())
+                filtered_df = self.spr_raw_results_df[~self.spr_raw_results_df['Peak Index'].isin(excluded)]
+                composite_df = Logic.generate_composite_peak(self.spr_df, iso, filtered_df)
+                
+                if composite_df is not None:
+                    lvl = getattr(self, 'active_washout_level', 0.01)
+                    comp_t = composite_df['Relative Time (s)'].values
+                    comp_y = composite_df['Normalised Intensity'].values
+                    above = np.where(comp_y >= lvl)[0]
+                    if len(above) >= 2:
+                        orig_width_ms = (comp_t[above[-1]] - comp_t[above[0]]) * 1000.0
+                    else:
+                        orig_width_ms = (comp_t.max() - comp_t.min()) * 1000.0
+                    
+                    if orig_width_ms > 0:
+                        scale_factor = target_washout / orig_width_ms
+                        if scale_factor > 0:
+                            composite_df = composite_df.copy()
+                            composite_df['Relative Time (s)'] = composite_df['Relative Time (s)'] * scale_factor
                         IoLog.information(f"iolite Optimiser: Scaling composite peak by {scale_factor:.4f} (Original {lvl*100}% width: {orig_width_ms:.2f} ms, Target: {target_washout:.2f} ms)")
             
             if composite_df is not None:
