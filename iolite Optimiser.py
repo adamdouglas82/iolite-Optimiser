@@ -1005,7 +1005,12 @@ class Logic:
                 curr_f = start_f
                 found_sync = False
                 max_allowed_rr = inputs.get('max_rr_hz', 10000.0)
-                while curr_f <= max_allowed_rr + 1e-9:
+                # Cap iterations to avoid near-infinite loop when rr_prec is very small
+                max_iter = int((max_allowed_rr - start_f) / rr_prec) + 1
+                max_iter = min(max_iter, 100000)
+                for _ in range(max_iter):
+                    if curr_f > max_allowed_rr + 1e-9:
+                        break
                     pulses = curr_f * at_actual_s
                     if abs(pulses - round(pulses)) < 1e-9:
                         rr_actual = curr_f
@@ -4916,7 +4921,7 @@ class ioliteOptimiser(QWidget):
         if self.allowed_dwells:
             status = f"Allowed Dwells: {', '.join(map(str, self.allowed_dwells))} ms"
         else:
-            status = f"Minimum Dwell Time: {self.min_dwell} ms | Precision: {self.precision} ms"
+            status = f"Minimum Dwell Time: {self.min_dwell} ms | Resolution: {self.precision} ms"
             
         if getattr(self, 'icp_tech', '') == "TOF":
             margin = self._get(self.spin_tof_margin, 'value') if hasattr(self, 'spin_tof_margin') else getattr(self, 'persistent_settings', {}).get('tof_margin', 10.0)
@@ -5008,7 +5013,7 @@ class ioliteOptimiser(QWidget):
         else:
             status = f"Max Rep-Rate: {self.max_rr} Hz"
             
-        status += f" | Precision: {getattr(self, 'laser_rr_prec', 1.0):g} Hz"
+        status += f" | Resolution: {getattr(self, 'laser_rr_prec', 1.0):g} Hz"
         status += f"\nMax Speed: {self.max_speed} µm s⁻¹"
         self.lbl_laser_status.setText(status)
 
@@ -5130,7 +5135,7 @@ class ioliteOptimiser(QWidget):
         
         # 1. Dialog Labels (Detailed)
         if hasattr(self, 'lbl_icp_status'):
-            icp_constraints = f"Allowed Dwell times: {', '.join(map(str, self.allowed_dwells))} ms" if self.allowed_dwells else f"Minimum Dwell Time: {self.min_dwell} ms | Precision: {self.precision} ms"
+            icp_constraints = f"Allowed Dwell times: {', '.join(map(str, self.allowed_dwells))} ms" if self.allowed_dwells else f"Minimum Dwell Time: {self.min_dwell} ms | Resolution: {self.precision} ms"
             if self.icp_tech == "TOF":
                 margin = self._get(self.spin_tof_margin, 'value') if hasattr(self, 'spin_tof_margin') else getattr(self, 'persistent_settings', {}).get('tof_margin', 10.0)
                 icp_constraints += f" | Margin: {margin:g} %"
@@ -5148,7 +5153,7 @@ class ioliteOptimiser(QWidget):
             if self.allowed_dwells:
                 icp_constraints = f"Allowed Dwell Times:<br/>{', '.join(map(str, self.allowed_dwells))} ms"
             else:
-                icp_constraints = f"Minimum Dwell Time: {self.min_dwell} ms<br/>Dwell Precision: {self.precision} ms"
+                icp_constraints = f"Minimum Dwell Time: {self.min_dwell} ms<br/>Dwell Resolution: {self.precision} ms"
             
             if self.icp_tech == "TOF":
                 margin = self._get(self.spin_tof_margin, 'value') if hasattr(self, 'spin_tof_margin') else getattr(self, 'persistent_settings', {}).get('tof_margin', 10.0)
@@ -5159,7 +5164,7 @@ class ioliteOptimiser(QWidget):
             las_header = "<b style='font-size: 1.1em;'>Laser</b>"
             las_details = f"Platform: <b>{las_mfr}</b><br/>Laser Source: <b>{las_mod}</b><br/>Cell Type: <b>{cell}</b>"
             rr_info = f"Allowed Rep-Rates: {', '.join(map(str, self.allowed_rr))} Hz" if self.allowed_rr else f"Maximum Rep-Rate: {self.max_rr} Hz"
-            las_constraints = f"{rr_info}<br/>Rep-Rate Precision: {self.laser_rr_prec:g} Hz<br/>Max Stage Speed: {self.max_speed} µm s⁻¹"
+            las_constraints = f"{rr_info}<br/>Rep-Rate Resolution: {self.laser_rr_prec:g} Hz<br/>Max Stage Speed: {self.max_speed} µm s⁻¹"
             las_full = f"{las_header}<br/>{las_details}<br/><span style='font-size: 11px;'><b><i>{las_constraints}</i></b></span>"
             
             self.lbl_icp_sum.setText(icp_full)
@@ -8508,6 +8513,12 @@ class ioliteOptimiser(QWidget):
         self.spin_pulse_rr.blockSignals(False)
 
     def run_pulse_simulation(self):
+        # Guard: Only run if the Pulse Train tab (index 2) is currently active.
+        # This prevents the simulation from executing when triggered by a background
+        # event (e.g. instrument change in settings dialog) while another tab is open.
+        if hasattr(self, 'tabs') and self.tabs.currentIndex != 2:
+            return
+        
         try:
             IoLog.information("iolite Optimiser: run_pulse_simulation called")
             # 1. Gather Inputs
