@@ -282,7 +282,7 @@ class Logic:
         if abs(T - round(T)) < 1e-9:
             return 0.0
             
-        A_min = ((T - T_floor) ** 2 + T_floor) / 2.0
+        A_min = ((T - T_floor) ** 2 - T_floor) / 2.0
         A_max = (T_ceil - (T_ceil - T) ** 2) / 2.0
         
         if A_max <= 0:
@@ -4264,6 +4264,19 @@ class ioliteOptimiser(QWidget):
         self.cmb_mode.setFixedWidth(spin_w_in)
         grid_input.addWidget(self.cmb_mode, 1, 4)
 
+        # Row 2
+        lbl_num_analytes = QLabel("Number of Analytes:"); lbl_num_analytes.setFixedWidth(lbl_w_in)
+        grid_input.addWidget(lbl_num_analytes, 2, 0)
+        self.spin_num_analytes = QSpinBox()
+        self.spin_num_analytes.setRange(1, 100)
+        self.spin_num_analytes.setValue(int(self.persistent_settings.get('num_analytes', 10)))
+        self.spin_num_analytes.setFixedWidth(spin_w_in)
+        grid_input.addWidget(self.spin_num_analytes, 2, 1)
+
+        self.btn_suggest_prescan = QPushButton("Suggest PreScan Params")
+        self.btn_suggest_prescan.clicked.connect(self.show_prescan_suggestions)
+        grid_input.addWidget(self.btn_suggest_prescan, 2, 3, 1, 2)
+
         # Let Column 2 act as the expanding center space between Column 1 and Column 3
         grid_input.setColumnStretch(2, 1)
 
@@ -4719,6 +4732,7 @@ class ioliteOptimiser(QWidget):
         self.cmb_cell.currentTextChanged.connect(self._on_ui_change)
         
         self.spin_spot.valueChanged.connect(self._on_ui_change)
+        self.spin_num_analytes.valueChanged.connect(self.save_persistent_settings)
         self.spin_height.valueChanged.connect(self._on_ui_change)
         self.spin_width.valueChanged.connect(self._on_ui_change)
         self.spin_wash.valueChanged.connect(self._on_ui_change)
@@ -5470,10 +5484,11 @@ class ioliteOptimiser(QWidget):
                 'model': self._get(self.cmb_model, 'currentText'),
                 'dwell_unit_pref': self._get(self.cmb_dwell_unit, 'currentText'),
                 'mode': self._get(self.cmb_mode, 'currentText'),
-                'shots': self._get(self.spin_shots, 'value'),
                 'laser_mfr': self._get(self.cmb_laser_mfr, 'currentText'),
                 'laser_model': self._get(self.cmb_laser_mod, 'currentText'),
+                'shots': self._get(self.spin_shots, 'value'),
                 'spot_size': self._get(self.spin_spot, 'value'),
+                'num_analytes': self._get(self.spin_num_analytes, 'value'),
                 'washout': self._get(self.spin_wash, 'value'),
                 'init_rr': self._get(self.spin_init_rr, 'value'),
                 'scale_signal': self._get(self.chk_scale, 'isChecked'),
@@ -7980,6 +7995,91 @@ class ioliteOptimiser(QWidget):
         """Override close event to save settings."""
         self.save_persistent_settings()
         event.accept()
+
+    def show_prescan_suggestions(self):
+        try:
+            num_analytes = self.spin_num_analytes.value
+            washout_ms = self.spin_wash.value
+            spot_size = self.spin_spot.value
+
+            # Dwell / Cycle time resolution
+            min_dwell = getattr(self, 'min_dwell', 0.1)
+            precision = getattr(self, 'precision', 0.1)
+            
+            dt_raw = washout_ms / num_analytes
+            dt_ms = max(min_dwell, round(dt_raw / precision) * precision)
+            target_cycle_time_ms = dt_ms * num_analytes
+            
+            # Rep-Rate dynamic sweep at 5.0% RSD oversampling level
+            target_rsd = 5.0
+            rr_prec = getattr(self, 'laser_rr_prec', 1.0)
+            step = rr_prec if rr_prec > 0 else 1.0
+            
+            # Start from f_start = 2.0 / (washout_ms / 1000.0)
+            f_start = 2.0 / (washout_ms / 1000.0) if washout_ms > 0 else 1.0
+            max_allowed_rr = getattr(self, 'max_rr', 10000.0)
+            if hasattr(self, 'spin_init_rr'):
+                max_allowed_rr = self.spin_init_rr.maximum
+                
+            curr_f = f_start
+            found_f = None
+            while curr_f <= max_allowed_rr + 1e-9:
+                rsd = Logic.calculate_lockwood_rsd(curr_f, washout_ms, dt_ms)
+                if rsd <= target_rsd:
+                    found_f = curr_f
+                    break
+                curr_f += step
+                
+            if found_f is None:
+                found_f = max_allowed_rr
+                
+            # Stage Speed (µm/s)
+            cycle_time_s = target_cycle_time_ms / 1000.0
+            suggested_speed = spot_size / cycle_time_s if cycle_time_s > 0 else 0.0
+            
+            # Dosage
+            suggested_dosage = found_f * cycle_time_s
+            
+            # Overlap
+            suggested_overlap_um = spot_size - (suggested_speed / found_f) if found_f > 0 else spot_size
+            suggested_overlap_pct = (suggested_overlap_um / spot_size) * 100.0 if spot_size > 0 else 0.0
+            
+            # Display dialog
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Suggested PreScan Parameters")
+            dlg.resize(300, 200)
+            dlg_layout = QVBoxLayout(dlg)
+            
+            form = QFormLayout()
+            
+            lbl_rr = QLabel(f"<b>{found_f:.3f} Hz</b>")
+            lbl_speed = QLabel(f"<b>{suggested_speed:.3f} µm/s</b>")
+            lbl_overlap = QLabel(f"<b>{suggested_overlap_um:.3f} µm</b>")
+            lbl_dosage = QLabel(f"<b>{suggested_dosage:.2f} pulses/pixel</b>")
+            lbl_cycle = QLabel(f"<b>{target_cycle_time_ms:.3f} ms</b>")
+            lbl_dwell = QLabel(f"<b>{dt_ms:.3f} ms</b>")
+            
+            form.addRow("Suggested Rep-Rate:", lbl_rr)
+            form.addRow("Suggested Stage Speed:", lbl_speed)
+            form.addRow("Suggested Overlap:", lbl_overlap)
+            form.addRow("Suggested Dosage:", lbl_dosage)
+            form.addRow("Target Cycle Time:", lbl_cycle)
+            form.addRow("Dwell Time per Analyte:", lbl_dwell)
+            
+            dlg_layout.addLayout(form)
+            
+            # Close button
+            btn_box = QHBoxLayout()
+            btn_box.addStretch()
+            btn_close = QPushButton("Close")
+            btn_close.clicked.connect(lambda: dlg.accept())
+            btn_box.addWidget(btn_close)
+            dlg_layout.addLayout(btn_box)
+            
+            dlg.exec_()
+        except Exception as e:
+            IoLog.error(f"iolite Optimiser: Error calculating PreScan suggestions: {e}")
+            QMessageBox.critical(self, "Calculation Error", f"Failed to compute suggestions: {e}")
 
     # --- Pulse Train Simulator Methods ---
     def init_pulse_train_tab(self):
