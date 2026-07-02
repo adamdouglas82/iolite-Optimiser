@@ -5754,12 +5754,13 @@ class ioliteOptimiser(QWidget):
             
             # Check if the file is now in the loaded files list (covers cases where importData returns False but succeeds)
             was_imported = False
+            target_base = os.path.basename(norm_file_path.replace('\\', '/')).lower()
             for f in data.importedFiles():
                 try:
                     f_path = os.path.normpath(f.filePath()).lower()
+                    f_base = os.path.basename(f.filePath().replace('\\', '/')).lower()
                     f_name = os.path.normpath(f.fileName()).lower()
-                    target_name = os.path.normpath(os.path.basename(norm_file_path)).lower()
-                    if f_path == norm_file_path.lower() or f_name == target_name:
+                    if f_path == norm_file_path.lower() or f_name == target_base or (f_base == target_base and f_base != ""):
                         was_imported = True
                         break
                 except Exception:
@@ -7051,12 +7052,13 @@ class ioliteOptimiser(QWidget):
             
             if file_path:
                 norm_target = os.path.normpath(file_path).lower()
+                target_base = os.path.basename(file_path.replace('\\', '/')).lower()
                 for f in files:
                     try:
                         f_path = os.path.normpath(f.filePath()).lower()
+                        f_base = os.path.basename(f.filePath().replace('\\', '/')).lower()
                         f_name = os.path.normpath(f.fileName()).lower()
-                        target_name = os.path.normpath(os.path.basename(file_path)).lower()
-                        if f_path == norm_target or f_name == target_name:
+                        if f_path == norm_target or f_name == target_base or (f_base == target_base and f_base != ""):
                             target_file = f
                             break
                     except Exception:
