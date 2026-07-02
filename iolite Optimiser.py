@@ -2433,12 +2433,14 @@ class ioliteOptimiser(QWidget):
         self.spin_spr_prom.setDecimals(0)
         self.spin_spr_prom.setValue(100.0)
         self.spin_spr_prom.setSingleStep(100.0)
+        self.spin_spr_prom.setToolTip("Minimum peak height. Prevents detecting noise as peaks. Auto sets to 10 % of maximum data point.")
         self.spin_spr_prom.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.spin_spr_prom.valueChanged.connect(self._on_spr_prom_changed)
         l_prom.addWidget(self.spin_spr_prom)
         
         self.chk_spr_auto_prom = QCheckBox("Auto", self)
         self.chk_spr_auto_prom.setChecked(True)
+        self.chk_spr_auto_prom.setToolTip("Minimum peak height. Prevents detecting noise as peaks. Auto sets to 10 % of maximum data point.")
         self.chk_spr_auto_prom.toggled.connect(self._on_spr_auto_prom_toggled)
         l_prom.addWidget(self.chk_spr_auto_prom)
         # self.spin_spr_prom.setEnabled(False) # Removed: User wants always clickable
@@ -2465,8 +2467,8 @@ class ioliteOptimiser(QWidget):
         self.spin_spr_baseline_window.valueChanged.connect(self.save_persistent_settings)
         
         lbl_baseline_window = QLabel("Baseline Window:")
-        grid_det.addWidget(lbl_baseline_window, 3, 0)
-        grid_det.addWidget(self.spin_spr_baseline_window, 3, 1)
+        grid_det.addWidget(lbl_baseline_window, 6, 0)
+        grid_det.addWidget(self.spin_spr_baseline_window, 6, 1)
         
         # Hide the baseline controls per user request, but keep the logic
         lbl_baseline_window.hide()
@@ -5749,14 +5751,28 @@ class ioliteOptimiser(QWidget):
         
         try:
             res = data.importData(norm_file_path)
-            if res:
+            
+            # Check if the file is now in the loaded files list (covers cases where importData returns False but succeeds)
+            was_imported = False
+            for f in data.importedFiles():
+                try:
+                    f_path = os.path.normpath(f.filePath()).lower()
+                    f_name = os.path.normpath(f.fileName()).lower()
+                    target_name = os.path.normpath(os.path.basename(norm_file_path)).lower()
+                    if f_path == norm_file_path.lower() or f_name == target_name:
+                        was_imported = True
+                        break
+                except Exception:
+                    pass
+            
+            if res or was_imported:
                 self.refresh_data(tab=tab, file_path=norm_file_path)
                 try:
                     data.unloadFile(norm_file_path)
                 except Exception as ue:
                     IoLog.warning(f"iolite Optimiser: Failed to unload file: {ue}")
             else:
-                IoLog.warning(f"iolite Optimiser: Import returned False or was cancelled for {norm_file_path}")
+                IoLog.warning(f"iolite Optimiser: Import returned False and not found in imported list for {norm_file_path}")
                 log_err = self.check_timestamp_error_in_log()
                 msg = "No file was imported.\n\nPlease check if the time stamp format in the file is set correctly in iolite."
                 if log_err:
@@ -7110,25 +7126,20 @@ class ioliteOptimiser(QWidget):
                 # Unified Dialog: Channel selection + Global dwell
                 det_at = self.spr_detected_at_ms if tab == "spr" else self.detected_at_ms
                 
-                if tab == "spr":
-                    # For SPR tab, we don't need to prompt/show the dialog.
-                    # Just default all dwells to 10.0 ms.
-                    self._preconfigured_dwells = {ch_name: 10.0 for ch_name in ch_names}
-                else:
-                    dlg = DataConfigDialog(ch_names, detected_at=det_at, is_tof=True, parent=self)
-                    if dlg.exec_():
-                        selected_names = set(dlg.result_channels)
-                        channels = [ch for ch in channels if ch.name in selected_names]
-                        
-                        # Store pre-configured dwells (resolve_dwell_times will use these)
-                        self._preconfigured_dwells = dlg.result_dwells.copy()
-                        
-                        if not channels:
-                            IoLog.warning("iolite Optimiser: No channels selected. Aborting load.")
-                            return None, {}
-                    else:
-                        IoLog.information("iolite Optimiser: Configuration cancelled. Aborting load.")
+                dlg = DataConfigDialog(ch_names, detected_at=det_at, is_tof=True, parent=self)
+                if dlg.exec_():
+                    selected_names = set(dlg.result_channels)
+                    channels = [ch for ch in channels if ch.name in selected_names]
+                    
+                    # Store pre-configured dwells (resolve_dwell_times will use these)
+                    self._preconfigured_dwells = dlg.result_dwells.copy()
+                    
+                    if not channels:
+                        IoLog.warning("iolite Optimiser: No channels selected. Aborting load.")
                         return None, {}
+                else:
+                    IoLog.information("iolite Optimiser: Configuration cancelled. Aborting load.")
+                    return None, {}
             else:
                 self._preconfigured_dwells = {}  # Reset for non-TOF data
             
