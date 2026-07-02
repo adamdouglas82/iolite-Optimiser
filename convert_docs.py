@@ -51,7 +51,7 @@ def convert_md_to_pdf(md_path, pdf_path):
 
 if __name__ == "__main__":
     docs_dir = "docs"
-    files_to_convert = ["Optimiser_Manual.md", "SPR_Manual.md", "Optimisation_Workflow_Manual.md"]
+    files_to_convert = ["Optimiser_Manual.md", "SPR_Manual.md", "Optimisation_Workflow_Manual.md", "Pulse_Train_Simulator_Manual.md"]
     
     for filename in files_to_convert:
         md_file = os.path.join(docs_dir, filename)

@@ -1583,7 +1583,7 @@ class SettingsDialog(QDialog):
         
         # Add a Close button and version label at the bottom
         btns = QHBoxLayout()
-        lbl_version = QLabel("Version: dev")
+        lbl_version = QLabel(f"Version: {VERSION}")
         lbl_version.setStyleSheet("color: gray; font-size: 8pt;")
         btns.addWidget(lbl_version)
         btns.addStretch()
@@ -7601,12 +7601,6 @@ class ioliteOptimiser(QWidget):
             
             # STORE SYNC FOR PULSE TRAIN SIMULATOR
             self.last_sync = sync
-            # Inject Warning into the main Spot Size note (Separate Line, White Bullet)
-            warn = sync.get('warning', "")
-            if warn and final_notes:
-                # Insert after the Spot Size message (index 0)
-                # Just insert as a plain string to match standard formatting (Peer bullet)
-                final_notes.insert(1, warn)
             
             # Aggregate notes from Logic
             logic_notes = sync.get("notes", [])
@@ -7693,21 +7687,20 @@ class ioliteOptimiser(QWidget):
                 
                 worst_iso, worst_dwell, worst_rsd = max(rsd_details, key=lambda x: x[2])
                 
-                # If perfect sync is achieved (e.g. in Combined), show both status indicators!
                 if is_perfect:
                     advisor_html += f"<span style='color: #4CAF50;'>🟢 Synchronised ({round(pulses_per_cycle)} pulses per acq)</span><br>"
                 else:
                     advisor_html += f"<span style='color: #8BC34A;'>🟢 Oversampling Mode (No integer snapping required)</span><br>"
-                
-                overlap_factor = F * (washout_ms / 1000.0)
-                if overlap_factor < 2.0:
-                    advisor_html += f"<span style='color: #F44336;'>🔴 Unstable Steady State (Rep Rate {F:.1f} Hz is too low for oversampling. Must be at least {2.0 / (washout_ms/1000.0):.1f} Hz to ensure pulse overlap with {washout_ms:.1f} ms washout)</span><br>"
-                elif worst_rsd > target_rsd:
-                    advisor_html += f"<span style='color: #FFC107;'>🟡 Unstable Steady State (Worst RSD is {worst_rsd:.1f}% for {worst_iso} at {worst_dwell:.1f} ms dwell - target is {target_rsd:.1f}%)</span><br>"
-                    suggested_dt = Logic.get_lockwood_min_dwell(F, washout_ms, target_rsd)
-                    advisor_html += f"• Increase {worst_iso} Dwell/Acquisition Time to: {suggested_dt:.1f} ms to lower RSD below {target_rsd:.1f}%<br>"
-                else:
-                    advisor_html += f"<span style='color: #4CAF50;'>🟢 Stable Steady State (All channels below {target_rsd:.1f}% target RSD. Worst is {worst_rsd:.1f}% for {worst_iso})</span><br>"
+                    
+                    overlap_factor = F * (washout_ms / 1000.0)
+                    if overlap_factor < 2.0:
+                        advisor_html += f"<span style='color: #F44336;'>🔴 Unstable Steady State (Rep Rate {F:.1f} Hz is too low for oversampling. Must be at least {2.0 / (washout_ms/1000.0):.1f} Hz to ensure pulse overlap with {washout_ms:.1f} ms washout)</span><br>"
+                    elif worst_rsd > target_rsd:
+                        advisor_html += f"<span style='color: #FFC107;'>🟡 Unstable Steady State (Worst RSD is {worst_rsd:.1f}% for {worst_iso} at {worst_dwell:.1f} ms dwell - target is {target_rsd:.1f}%)</span><br>"
+                        suggested_dt = Logic.get_lockwood_min_dwell(F, washout_ms, target_rsd)
+                        advisor_html += f"• Increase {worst_iso} Dwell/Acquisition Time to: {suggested_dt:.1f} ms to lower RSD below {target_rsd:.1f}%<br>"
+                    else:
+                        advisor_html += f"<span style='color: #4CAF50;'>🟢 Stable Steady State (All channels below {target_rsd:.1f}% target RSD. Worst is {worst_rsd:.1f}% for {worst_iso})</span><br>"
             else:
                 # Standard Synchronised / Snapped modes
                 if is_perfect:
@@ -8225,23 +8218,44 @@ class ioliteOptimiser(QWidget):
         right_layout = QVBoxLayout()
         
         # --- LEFT COLUMN (CONTROLS) ---
+        self.pulse_scroll = QScrollArea()
+        self.pulse_scroll.setWidgetResizable(True)
+        self.pulse_scroll.setFrameShape(QScrollArea.NoFrame)
+        self.pulse_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        scroll_content = QWidget()
+        l_pulse = QVBoxLayout(scroll_content)
+        l_pulse.setContentsMargins(5, 2, 5, 2)
+        l_pulse.setSpacing(5)
         
         # Settings Group
-        grp_settings = QGroupBox("Simulation Settings")
-        form_settings = QFormLayout()
+        grp_settings = QGroupBox("")
+        v_settings = QVBoxLayout()
+        v_settings.setContentsMargins(5, 5, 5, 5)
+        v_settings.setSpacing(5)
+        
+        lbl_settings_title = QLabel("Simulation Settings")
+        lbl_settings_title.setStyleSheet("font-weight: bold; font-size: 10pt; padding: 0px; margin: 0px;")
+        lbl_settings_title.setAlignment(Qt.AlignCenter)
+        v_settings.addWidget(lbl_settings_title)
+        
+        grid_settings = QGridLayout()
+        grid_settings.setSpacing(5)
         
         self.spin_pulse_bg = QDoubleSpinBox()
         self.spin_pulse_bg.setRange(0, 9999)
         self.spin_pulse_bg.setValue(5.0)
         self.spin_pulse_bg.setSuffix(" s")
-        form_settings.addRow("Background Time:", self.spin_pulse_bg)
+        grid_settings.addWidget(QLabel("BG Time:"), 0, 0)
+        grid_settings.addWidget(self.spin_pulse_bg, 0, 1)
         
         self.spin_pulse_sig = QDoubleSpinBox()
         self.spin_pulse_sig.setRange(0, 9999)
         self.spin_pulse_sig.setValue(30.0)
         self.spin_pulse_sig.setSuffix(" s")
-        form_settings.addRow("Signal Duration:", self.spin_pulse_sig)
-
+        grid_settings.addWidget(QLabel("Signal Duration:"), 0, 2)
+        grid_settings.addWidget(self.spin_pulse_sig, 0, 3)
+        
         self.cmb_pulse_shape = QComboBox()
         self.cmb_pulse_shape.addItems([
             "Real Composite Peak",
@@ -8254,43 +8268,58 @@ class ioliteOptimiser(QWidget):
         default_shape = "Real Composite Peak" if has_composite else "Model Washout Peak (Lognormal)"
         self.cmb_pulse_shape.setCurrentText(default_shape)
         self.cmb_pulse_shape.currentIndexChanged.connect(lambda: self.pulse_debounce_timer.start())
-        form_settings.addRow("Pulse Shape:", self.cmb_pulse_shape)
         
-        grp_settings.setLayout(form_settings)
-        left_layout.addWidget(grp_settings)
+        grid_settings.addWidget(QLabel("Pulse Shape:"), 1, 0)
+        grid_settings.addWidget(self.cmb_pulse_shape, 1, 1, 1, 3)
+        
+        v_settings.addLayout(grid_settings)
+        grp_settings.setLayout(v_settings)
+        l_pulse.addWidget(grp_settings)
         
         # Overrides Group
-        self.grp_pulse_override = QGroupBox("Overrides / Manual Adjustment")
-        self.grp_pulse_override.setCheckable(False)
-        form_overrides = QFormLayout()
+        self.grp_pulse_override = QGroupBox("")
+        v_override = QVBoxLayout()
+        v_override.setContentsMargins(5, 5, 5, 5)
+        v_override.setSpacing(5)
+        
+        lbl_override_title = QLabel("Overrides / Manual Adjustment")
+        lbl_override_title.setStyleSheet("font-weight: bold; font-size: 10pt; padding: 0px; margin: 0px;")
+        lbl_override_title.setAlignment(Qt.AlignCenter)
+        v_override.addWidget(lbl_override_title)
+        
+        grid_override = QGridLayout()
+        grid_override.setSpacing(5)
         
         self.btn_pulse_reset = QPushButton("Reset to Optimum")
         self.btn_pulse_reset.clicked.connect(self.reset_pulse_params_to_optimum)
-        form_overrides.addRow(self.btn_pulse_reset)
-         
+        grid_override.addWidget(self.btn_pulse_reset, 0, 0, 1, 4)
         
         self.spin_pulse_rr = QDoubleSpinBox()
         self.spin_pulse_rr.setRange(0.0001, 100000)
         self.spin_pulse_rr.setDecimals(4)
         self.spin_pulse_rr.setSuffix(" Hz")
-        form_overrides.addRow("Rep Rate:", self.spin_pulse_rr)
+        grid_override.addWidget(QLabel("Rep Rate:"), 1, 0)
+        grid_override.addWidget(self.spin_pulse_rr, 1, 1)
         
         self.spin_pulse_at = QDoubleSpinBox()
         self.spin_pulse_at.setRange(0.001, 10000)
         self.spin_pulse_at.setDecimals(4)
         self.spin_pulse_at.setSuffix(" ms")
-        form_overrides.addRow("Acq Time:", self.spin_pulse_at)
+        grid_override.addWidget(QLabel("Acq Time:"), 1, 2)
+        grid_override.addWidget(self.spin_pulse_at, 1, 3)
         
         self.spin_pulse_count = QDoubleSpinBox()
         self.spin_pulse_count.setRange(0.001, 100000)
         self.spin_pulse_count.setDecimals(3)
-        form_overrides.addRow("Pulses / Acq:", self.spin_pulse_count)
+        grid_override.addWidget(QLabel("Pulses / Acq:"), 2, 0)
+        grid_override.addWidget(self.spin_pulse_count, 2, 1)
         
         self.spin_pulse_washout = QDoubleSpinBox(self)
         self.spin_pulse_washout.setRange(0.01, 50000.0)
         self.spin_pulse_washout.setDecimals(2)
         self.spin_pulse_washout.setSuffix(" ms")
-        form_overrides.addRow("Washout:", self.spin_pulse_washout)
+        grid_override.addWidget(QLabel("Washout:"), 2, 2)
+        grid_override.addWidget(self.spin_pulse_washout, 2, 3)
         
         # Connect signals for auto-calc and debounce timer
         self.spin_pulse_bg.valueChanged.connect(lambda: self.pulse_debounce_timer.start())
@@ -8305,12 +8334,15 @@ class ioliteOptimiser(QWidget):
         self.spin_pulse_at.valueChanged.connect(lambda: self.pulse_debounce_timer.start())
         self.spin_pulse_count.valueChanged.connect(lambda: self.pulse_debounce_timer.start())
         
-        # self.grp_pulse_override.toggled.connect(lambda: self.pulse_debounce_timer.start())
+        v_override.addLayout(grid_override)
+        self.grp_pulse_override.setLayout(v_override)
+        l_pulse.addWidget(self.grp_pulse_override)
         
-        self.grp_pulse_override.setLayout(form_overrides)
-        left_layout.addWidget(self.grp_pulse_override)
+        l_pulse.addStretch()
         
-        left_layout.addStretch()
+        self.pulse_scroll.setWidget(scroll_content)
+        self.pulse_scroll.setFixedWidth(460)
+        left_layout.addWidget(self.pulse_scroll)
         
         # --- RIGHT COLUMN (PLOT) ---
         

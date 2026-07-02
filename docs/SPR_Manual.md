@@ -75,6 +75,12 @@ A dedicated panel highlighting the single longest pulse detected in your dataset
 * **Double-Click**: Instantly resets the plot to show the full data range.
 * **Auto-Rescale Y**: When checked, the plot automatically snaps to show the full pulse intensity whenever values change. Uncheck this to manually zoom into specific features (like the peak tail).
 
+#### **Plot Controls Layout**
+
+To preserve display height on compact screens, the layout settings are separated into two rows:
+- **Row 1**: Theme override dropdown (Auto/Dark/Light), Normalize checkbox, Pan/Zoom Y checkbox, Auto-Rescale Y checkbox, Show Background checkbox.
+- **Row 2**: Auto Select Regions checkbox, Background time spinboxes, Signal time spinboxes.
+
 #### **Results Table (Bottom)**
 
 * Lists every detected peak individually.
@@ -124,8 +130,14 @@ Ensure you have a selection in iolite that contains single laser pulses (e.g., a
 
 ---
 
-## Troubleshooting
+## Troubleshooting & Logging
 
+### Date/Time Stamp Format mismatch on CSV Imports
+When importing files, if the timestamp format does not match the active settings in iolite, the import will fail. 
+
+If this happens, the tool will intercept the failure and display a **QMessageBox** alert showing the specific failure details from the iolite application log. It will automatically suggest matching dropdown formatting layouts to check in your preferences (e.g., suggesting `yyyy MM dd hh mm ss` or `dd MM yyyy hh mm ss` depending on the digits parsed from the timestamp).
+
+### Other Issues
 * **No Peaks Detected**:
   * Check if the correct channel is selected.
   * Lower the **Peak Cutoff**.
@@ -134,7 +146,7 @@ Ensure you have a selection in iolite that contains single laser pulses (e.g., a
   * Usually means the baseline is too high or the pulse never drops below 10%/1% within the available window.
   * Try selecting a cleaner channel.
 * **Optimiser vs SPR Units**:
-  * The Optimiser usually works in **Milliseconds**. the SPR tab handles unit conversion automatically when you click "Apply".
+  * The Optimiser usually works in **Milliseconds**. The SPR tab handles unit conversion automatically when you click "Apply".
 
 ---
 
