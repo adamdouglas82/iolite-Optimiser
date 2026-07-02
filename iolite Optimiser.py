@@ -1581,8 +1581,11 @@ class SettingsDialog(QDialog):
 
         # We will add groupboxes to this layout from initUI
         
-        # Add a Close button at the bottom
+        # Add a Close button and version label at the bottom
         btns = QHBoxLayout()
+        lbl_version = QLabel("Version: dev")
+        lbl_version.setStyleSheet("color: gray; font-size: 8pt;")
+        btns.addWidget(lbl_version)
         btns.addStretch()
         self.btn_close = QPushButton("Close")
         self.btn_close.setFixedWidth(120)
@@ -2851,7 +2854,8 @@ class ioliteOptimiser(QWidget):
         left_layout.addWidget(self.spr_scroll)
         
         # --- RIGHT COLUMN (PLOT & TABLE) ---
-        h_ctrl_spr = QHBoxLayout()
+        h_ctrl_spr1 = QHBoxLayout()
+        h_ctrl_spr2 = QHBoxLayout()
         
         self.combo_theme_spr = QComboBox()
         self.combo_theme_spr.addItems(["Auto", "Dark", "Light"])
@@ -2866,21 +2870,21 @@ class ioliteOptimiser(QWidget):
         self.chk_rescale_spr.setChecked(True) # Ephemeral: Always default to ON
         self.chk_rescale_spr.toggled.connect(self._on_spr_rescale_toggled)
         
-        h_ctrl_spr.addWidget(QLabel("Theme:"))
-        h_ctrl_spr.addWidget(self.combo_theme_spr)
-        h_ctrl_spr.addSpacing(10)
-        h_ctrl_spr.addWidget(self.chk_y_zoom_spr)
-        h_ctrl_spr.addWidget(self.chk_rescale_spr)
-        h_ctrl_spr.addStretch()
+        h_ctrl_spr1.addWidget(QLabel("Theme:"))
+        h_ctrl_spr1.addWidget(self.combo_theme_spr)
+        h_ctrl_spr1.addSpacing(10)
+        h_ctrl_spr1.addWidget(self.chk_y_zoom_spr)
+        h_ctrl_spr1.addWidget(self.chk_rescale_spr)
+        h_ctrl_spr1.addStretch()
         
-        h_ctrl_spr.addWidget(self.chk_spr_auto_bg)
+        h_ctrl_spr2.addWidget(self.chk_spr_auto_bg)
         self.lbl_bg_prefix = QLabel("Background (s):", self)
-        h_ctrl_spr.addWidget(self.lbl_bg_prefix)
-        h_ctrl_spr.addWidget(self.spin_spr_bg_start)
+        h_ctrl_spr2.addWidget(self.lbl_bg_prefix)
+        h_ctrl_spr2.addWidget(self.spin_spr_bg_start)
         self.lbl_bg_to = QLabel("to", self)
-        h_ctrl_spr.addWidget(self.lbl_bg_to)
-        h_ctrl_spr.addWidget(self.spin_spr_bg_end)
-        h_ctrl_spr.addSpacing(10)
+        h_ctrl_spr2.addWidget(self.lbl_bg_to)
+        h_ctrl_spr2.addWidget(self.spin_spr_bg_end)
+        h_ctrl_spr2.addStretch()
         
         def _toggle_bg_layout_vis(visible):
             self.chk_spr_auto_bg.setVisible(visible)
@@ -2897,9 +2901,10 @@ class ioliteOptimiser(QWidget):
         self.chk_hide_stats = QCheckBox("Hide Summary Stats")
         self.chk_hide_stats.setChecked(False)
         self.chk_hide_stats.toggled.connect(self._on_stats_toggled)
-        h_ctrl_spr.addWidget(self.chk_hide_stats)
+        h_ctrl_spr1.addWidget(self.chk_hide_stats)
         
-        right_layout.addLayout(h_ctrl_spr)
+        right_layout.addLayout(h_ctrl_spr1)
+        right_layout.addLayout(h_ctrl_spr2)
 
         self.spr_figure = Figure(figsize=(5, 4), dpi=96, constrained_layout=False)
         self.spr_canvas = FigureCanvas(self.spr_figure)
@@ -4048,7 +4053,7 @@ class ioliteOptimiser(QWidget):
         self.spin_cust_min.setValue(self.persistent_settings.get('cust_min', 0.1))
         self.form_icp.addRow(self.lbl_cust_min, self.spin_cust_min)
         
-        self.lbl_cust_prec = QLabel("Dwell Precision (ms):"); self.lbl_cust_prec.setFixedWidth(lbl_w)
+        self.lbl_cust_prec = QLabel("Dwell Resolution (ms):"); self.lbl_cust_prec.setFixedWidth(lbl_w)
         self.spin_cust_prec = QDoubleSpinBox()
         self.spin_cust_prec.setRange(0.0001, 100); self.spin_cust_prec.setFixedWidth(100); self.spin_cust_prec.setDecimals(4)
         self.spin_cust_prec.setValue(self.persistent_settings.get('cust_prec', 0.1))
@@ -4142,11 +4147,11 @@ class ioliteOptimiser(QWidget):
         self.spin_cust_rr.setValue(self.persistent_settings.get('cust_rr', 100))
         self.form_las.addRow(self.lbl_cust_rr_max, self.spin_cust_rr)
 
-        self.lbl_cust_rr_prec = QLabel("Rep-Rate Precision (Hz):"); self.lbl_cust_rr_prec.setFixedWidth(lbl_w)
+        self.lbl_cust_rr_prec = QLabel("Rep-Rate Resolution (Hz):"); self.lbl_cust_rr_prec.setFixedWidth(lbl_w)
         self.spin_cust_rr_prec = QDoubleSpinBox()
         self.spin_cust_rr_prec.setRange(0.001, 100); self.spin_cust_rr_prec.setFixedWidth(100); self.spin_cust_rr_prec.setDecimals(3)
         self.spin_cust_rr_prec.setValue(self.persistent_settings.get('cust_rr_prec', 1.0))
-        self.spin_cust_rr_prec.setToolTip("Rep Rate Precision (Hz)")
+        self.spin_cust_rr_prec.setToolTip("Rep Rate Resolution (Hz)")
         self.form_las.addRow(self.lbl_cust_rr_prec, self.spin_cust_rr_prec)
 
         self.lbl_cust_rr_list = QLabel("Allowed Rep-Rates (Hz):"); self.lbl_cust_rr_list.setFixedWidth(lbl_w)
@@ -4189,7 +4194,7 @@ class ioliteOptimiser(QWidget):
         l_plot.setContentsMargins(10, 5, 10, 5)
         
         self.chk_limit_vis = QCheckBox("Limit Visible Plots:")
-        self.chk_limit_vis.setChecked(self.persistent_settings.get('limit_vis', True))
+        self.chk_limit_vis.setChecked(self.persistent_settings.get('limit_vis', False))
         self.chk_limit_vis.toggled.connect(lambda: self.update_plot(preserve_zoom=True))
         
         self.spin_max_vis = QSpinBox()
@@ -4608,7 +4613,8 @@ class ioliteOptimiser(QWidget):
         self.canvas.mpl_connect('pick_event', self.on_pick)
         self.plot_panning = False; self.press_x = None
         
-        h_ctrl = QHBoxLayout()
+        h_ctrl1 = QHBoxLayout()
+        h_ctrl2 = QHBoxLayout()
         self.chk_norm = QCheckBox("Normalise")
         self.chk_norm.setChecked(self.persistent_settings.get('normalise', True))
         
@@ -4625,8 +4631,6 @@ class ioliteOptimiser(QWidget):
         self.combo_theme.addItems(["Auto", "Dark", "Light"])
         self.combo_theme.setCurrentText(self.persistent_settings.get('theme', 'Auto'))
         
-
-        
         # Region Controls (Moved to Plot Toolbar)
         self.chk_auto = QCheckBox("Auto Select Regions")
         self.chk_auto.setChecked(True) # Default On
@@ -4636,23 +4640,22 @@ class ioliteOptimiser(QWidget):
         self.spin_sig_start = QDoubleSpinBox(); self.spin_sig_start.setRange(0, 10000); self.spin_sig_start.setDecimals(2); self.spin_sig_start.setFixedWidth(60)
         self.spin_sig_end = QDoubleSpinBox(); self.spin_sig_end.setRange(0, 10000); self.spin_sig_end.setDecimals(2); self.spin_sig_end.setFixedWidth(60)
         
-
-
-        h_ctrl.addWidget(QLabel("Theme:")); h_ctrl.addWidget(self.combo_theme)
-        h_ctrl.addSpacing(10)
-        h_ctrl.addWidget(self.chk_norm); h_ctrl.addWidget(self.chk_y_zoom)
-        h_ctrl.addWidget(self.chk_rescale)
+        h_ctrl1.addWidget(QLabel("Theme:")); h_ctrl1.addWidget(self.combo_theme)
+        h_ctrl1.addSpacing(10)
+        h_ctrl1.addWidget(self.chk_norm); h_ctrl1.addWidget(self.chk_y_zoom)
+        h_ctrl1.addWidget(self.chk_rescale)
+        h_ctrl1.addStretch()
         
-        h_ctrl.addStretch()
+        h_ctrl2.addWidget(self.chk_auto)
+        h_ctrl2.addWidget(QLabel("Background (s):"))
+        h_ctrl2.addWidget(self.spin_bg_start); h_ctrl2.addWidget(QLabel("to")); h_ctrl2.addWidget(self.spin_bg_end)
+        h_ctrl2.addSpacing(10)
+        h_ctrl2.addWidget(QLabel("Signal (s):"))
+        h_ctrl2.addWidget(self.spin_sig_start); h_ctrl2.addWidget(QLabel("to")); h_ctrl2.addWidget(self.spin_sig_end)
+        h_ctrl2.addStretch()
         
-        h_ctrl.addWidget(self.chk_auto)
-        h_ctrl.addWidget(QLabel("Background (s):"))
-        h_ctrl.addWidget(self.spin_bg_start); h_ctrl.addWidget(QLabel("to")); h_ctrl.addWidget(self.spin_bg_end)
-        h_ctrl.addSpacing(10)
-        h_ctrl.addWidget(QLabel("Signal (s):"))
-        h_ctrl.addWidget(self.spin_sig_start); h_ctrl.addWidget(QLabel("to")); h_ctrl.addWidget(self.spin_sig_end)
-        
-        plot_layout.addLayout(h_ctrl)
+        plot_layout.addLayout(h_ctrl1)
+        plot_layout.addLayout(h_ctrl2)
         plot_layout.addWidget(self.canvas)
         
         # Results Panel (Bottom)
@@ -5613,6 +5616,129 @@ class ioliteOptimiser(QWidget):
             
         return [anchor_hex] + pool
 
+    def suggest_formats_from_timestamp(self, timestamp_str, attempted_format):
+        try:
+            import re
+            ts_tokens = re.split(r'([^0-9a-zA-Z]+)', timestamp_str)
+            ts_vals = [t for i, t in enumerate(ts_tokens) if i % 2 == 0 and t]
+            
+            if not ts_vals:
+                return []
+                
+            supported_formats = [
+                "dd MM yyyy hh mm ss",
+                "MM dd yyyy hh mm ss",
+                "yyyy MM dd hh mm ss",
+                "yyyy dd MM hh mm ss",
+                "dd MMMM yyyy hh mm ss",
+                "MMMM dd yyyy hh mm ss",
+                "dd MMM yyyy hh mm ss",
+                "MMM dd yyyy hh mm ss"
+            ]
+            
+            suggestions = []
+            for fmt in supported_formats:
+                fmt_tokens = re.split(r'([^a-zA-Z]+)', fmt)
+                fmt_vals = [t for i, t in enumerate(fmt_tokens) if i % 2 == 0 and t]
+                
+                if len(fmt_vals) != len(ts_vals):
+                    continue
+                    
+                is_valid = True
+                for f_token, t_val in zip(fmt_vals, ts_vals):
+                    if f_token == 'yyyy':
+                        if not (len(t_val) == 4 and t_val.isdigit()):
+                            is_valid = False
+                            break
+                    elif f_token == 'yy':
+                        if not (len(t_val) == 2 and t_val.isdigit()):
+                            is_valid = False
+                            break
+                    elif f_token == 'dd':
+                        if not (t_val.isdigit() and 1 <= int(t_val) <= 31):
+                            is_valid = False
+                            break
+                    elif f_token == 'MM':
+                        if not (t_val.isdigit() and 1 <= int(t_val) <= 12):
+                            is_valid = False
+                            break
+                    elif f_token == 'MMM':
+                        if not (t_val.isalpha() and len(t_val) == 3):
+                            is_valid = False
+                            break
+                    elif f_token == 'MMMM':
+                        if not (t_val.isalpha() and len(t_val) >= 3):
+                            is_valid = False
+                            break
+                    elif f_token == 'hh':
+                        if not (t_val.isdigit() and 0 <= int(t_val) <= 23):
+                            is_valid = False
+                            break
+                    elif f_token == 'mm' or f_token == 'ss':
+                        if not (t_val.isdigit() and 0 <= int(t_val) <= 59):
+                            is_valid = False
+                            break
+                            
+                if is_valid:
+                    suggestions.append(fmt)
+                    
+            return suggestions
+        except Exception:
+            return []
+
+    def check_timestamp_error_in_log(self):
+        try:
+            import tempfile
+            import json
+            import re
+            temp_dir = tempfile.gettempdir()
+            temp_log_path = os.path.normpath(os.path.join(temp_dir, "iolite_optimiser_log.json"))
+            
+            IoLog.saveLogToFile(temp_log_path)
+            
+            if not os.path.exists(temp_log_path):
+                return None
+                
+            with open(temp_log_path, 'r', encoding='utf-8') as f:
+                log_data = json.load(f)
+                
+            entries = []
+            if isinstance(log_data, dict):
+                entries = log_data.get('Log Entries', [])
+            elif isinstance(log_data, list):
+                entries = log_data
+                
+            if isinstance(entries, list):
+                # Search backwards for the most recent timestamp/csv import failure message
+                for entry in reversed(entries):
+                    msg_str = ""
+                    if isinstance(entry, dict):
+                        # Safely search standard fields (Message with capital M is used in iolite's JSON output)
+                        msg_str = entry.get("Message", entry.get("message", entry.get("text", entry.get("msg", ""))))
+                        if not msg_str:
+                            msg_str = " ".join(str(v) for v in entry.values() if isinstance(v, (str, int, float)))
+                    elif isinstance(entry, str):
+                        msg_str = entry
+                        
+                    if any(p.lower() in msg_str.lower() for p in ["Could not load", "invalid time stamp", "impossible or invalid"]):
+                        # Extract and parse suggestions
+                        match = re.search(r'invalid time stamp "([^"]+)" using the date/time format ([^.]+)', msg_str)
+                        if match:
+                            ts_val = match.group(1)
+                            fmt_val = match.group(2).strip().rstrip('.')
+                            sugs = self.suggest_formats_from_timestamp(ts_val, fmt_val)
+                            if sugs:
+                                return msg_str + f"\n\nSuggested format(s) to check in preferences:\n" + "\n".join(f" - {s}" for s in sugs)
+                        return msg_str
+            
+            try:
+                os.remove(temp_log_path)
+            except Exception:
+                pass
+        except Exception as le:
+            IoLog.warning(f"iolite Optimiser: Failed to parse iolite log: {le}")
+        return None
+
     def import_and_unload_data(self, tab):
         caption = "Import SPR File" if tab == "spr" else "Import Optimisation File"
         file_path = QFileDialog.getOpenFileName(self, caption, "", "Raw data (*.xlsx *.h5 *.io4 *.zip *.prn *.info *.lax *.FIN2 *.REP *.csv *.NC *.CDF *.xml *.vit);;iolite 3 experiment (*.pxp);;All files (*)")
@@ -5631,11 +5757,21 @@ class ioliteOptimiser(QWidget):
                     IoLog.warning(f"iolite Optimiser: Failed to unload file: {ue}")
             else:
                 IoLog.warning(f"iolite Optimiser: Import returned False or was cancelled for {norm_file_path}")
+                log_err = self.check_timestamp_error_in_log()
+                msg = "No file was imported.\n\nPlease check if the time stamp format in the file is set correctly in iolite."
+                if log_err:
+                    msg += f"\n\nDetails from iolite log:\n{log_err}"
+                QMessageBox.warning(self, "Import Failed", msg)
         except Exception as e:
             msg = f"Failed to import/load file: {e}"
             print(msg)
             print(traceback.format_exc())
             IoLog.error(f"iolite Optimiser: {msg}")
+            log_err = self.check_timestamp_error_in_log()
+            if log_err:
+                msg += f"\n\nDetails from iolite log:\n{log_err}"
+            else:
+                msg += "\n\nPlease check if the time stamp format in the file is set correctly in iolite."
             QMessageBox.critical(self, "Import Error", msg)
 
     def refresh_data(self, tab=None, file_path=None):
