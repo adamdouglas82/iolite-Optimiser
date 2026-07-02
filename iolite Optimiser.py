@@ -3599,7 +3599,7 @@ class ioliteOptimiser(QWidget):
         # Save custom prominence for this channel
         curr_iso = self._get(self.cmb_spr_iso, 'currentText')
         if curr_iso and hasattr(self, 'spr_channel_prominence'):
-             self.spr_channel_prominence[curr_iso] = self.spin_spr_prom.value()
+             self.spr_channel_prominence[curr_iso] = self._get(self.spin_spr_prom, 'value')
              self.spr_channel_auto_prom[curr_iso] = False
              
         # 1. Uncheck the Auto box if it's currently checked
@@ -5204,7 +5204,7 @@ class ioliteOptimiser(QWidget):
         if hasattr(self, 'spin_dosage'):
             if checked:
                 self._block_signals(self.spin_dosage, True)
-                self.spin_dosage.setValue(self.spin_pulses.value())
+                self.spin_dosage.setValue(self._get(self.spin_pulses, 'value'))
                 self._block_signals(self.spin_dosage, False)
         self._on_ui_change()
 
