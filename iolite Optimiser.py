@@ -5752,6 +5752,10 @@ class ioliteOptimiser(QWidget):
         try:
             res = data.importData(norm_file_path)
             
+            # Debug prints to trace import status
+            print(f"iolite Optimiser DEBUG: data.importData('{norm_file_path}') returned {res} (type: {type(res)})")
+            IoLog.information(f"iolite Optimiser DEBUG: data.importData('{norm_file_path}') returned {res}")
+            
             # Check if the file is now in the loaded files list (covers cases where importData returns False but succeeds)
             was_imported = False
             for f in data.importedFiles():
