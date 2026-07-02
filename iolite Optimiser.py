@@ -2294,6 +2294,13 @@ class ioliteOptimiser(QWidget):
         
     def _on_tab_changed(self, index):
         if index == 2:
+            # Dynamically adjust default pulse shape based on SPR composite peak availability
+            has_composite = (hasattr(self, 'spr_raw_results_df') and 
+                             self.spr_raw_results_df is not None and 
+                             not self.spr_raw_results_df.empty)
+            default_shape = "Real Composite Peak" if has_composite else "Model Washout Peak (Lognormal)"
+            self.cmb_pulse_shape.setCurrentText(default_shape)
+
             # 1. Determine target values (default to current values of spinboxes)
             target_rr = self.spin_pulse_rr.value
             target_at_ms = self.spin_pulse_at.value
@@ -2304,13 +2311,20 @@ class ioliteOptimiser(QWidget):
             if hasattr(self, 'grp_pulse_override') and self.grp_pulse_override.isChecked():
                 is_override = True
                 
-            # If not in override, pull from last_sync (Optimiser Tab results)
-            if hasattr(self, 'last_sync') and self.last_sync:
-                if not is_override:
+            # If not in override, pull from last_sync (Optimiser Tab results) or Optimiser tab inputs
+            if not is_override:
+                if hasattr(self, 'last_sync') and self.last_sync:
                     target_rr = self.last_sync.get('rr_actual', target_rr)
                     target_at_ms = self.last_sync.get('at_actual_s', 0.1) * 1000.0
                     target_pulses = self.last_sync.get('actual_pulses', target_pulses)
                     target_washout = self.spin_wash.value
+                else:
+                    if hasattr(self, 'spin_init_rr'):
+                        target_rr = self.spin_init_rr.value
+                    if hasattr(self, 'spin_wash'):
+                        target_washout = self.spin_wash.value
+                    target_at_ms = getattr(self, 'detected_at_ms', 10.0) if getattr(self, 'detected_at_ms', None) is not None else 10.0
+                    target_pulses = target_rr * (target_at_ms / 1000.0)
             
             target_bg_s = self.spin_pulse_bg.value
             target_sig_s = self.spin_pulse_sig.value
@@ -5415,6 +5429,14 @@ class ioliteOptimiser(QWidget):
             # Ensure step matches precision
             self.spin_init_rr.setSingleStep(getattr(self, 'laser_rr_prec', 1.0))
             
+        # Update Pulse Train Simulator spinners to match Optimiser resolutions
+        if hasattr(self, 'spin_pulse_rr'):
+            self.spin_pulse_rr.setDecimals(rr_dps)
+            self.spin_pulse_rr.setSingleStep(getattr(self, 'laser_rr_prec', 1.0))
+        if hasattr(self, 'spin_pulse_at'):
+            self.spin_pulse_at.setDecimals(icp_dps)
+            self.spin_pulse_at.setSingleStep(getattr(self, 'precision', 0.1))
+            
         # Update Target Panel if needed (e.g. if we had RR related there)
         # Note: Pulses and Sigma are usually not bound to hardware RR precision steps. 
         # But we ensure they are at least readable.
@@ -5492,7 +5514,6 @@ class ioliteOptimiser(QWidget):
                 'line_length': self._get(self.spin_line_len, 'value') if hasattr(self, 'spin_line_len') else 1000.0,
                 'avoid_gaps': self._get(self.chk_avoid_gaps, 'isChecked'),
                 'prefer_exact_pulses': self._get(self.chk_prefer_exact_pulses, 'isChecked') if hasattr(self, 'chk_prefer_exact_pulses') else False,
-                'pulse_shape_pref': self._get(self.cmb_pulse_shape, 'currentText') if hasattr(self, 'cmb_pulse_shape') else 'Real Composite Peak',
                 
                 # New Persistence Keys
                 'theme': self._get(self.combo_theme, 'currentText'),
@@ -5625,7 +5646,7 @@ class ioliteOptimiser(QWidget):
                     
                     # Resolve Dwell Times & Units specifically for SPR
                     cols_all = [c for c in new_df_spr.columns if c != 'Time']
-                    self.spr_dwells = self.resolve_dwell_times(cols_all) if cols_all else {}
+                    self.spr_dwells = self.resolve_dwell_times(cols_all, tab="spr") if cols_all else {}
                     
                     if self.spr_df is not None and 'Time' in self.spr_df.columns and len(self.spr_df['Time']) > 0:
                          cols = [c for c in self.spr_df.columns if c != 'Time']
@@ -5689,7 +5710,7 @@ class ioliteOptimiser(QWidget):
             print(msg)
             IoLog.error(f"iolite Optimiser: {msg}")
 
-    def resolve_dwell_times(self, channel_names):
+    def resolve_dwell_times(self, channel_names, tab=None):
         local_dwells = {} # Local dict instead of shared self.channel_dwells
         
         try:
@@ -5717,15 +5738,16 @@ class ioliteOptimiser(QWidget):
                         else:
                             self.channel_is_cps[name] = False
                             
-                    except: pass
+                    except Exception: pass
                 
                 if not found:
                     missing.append(name)
+                    self.channel_is_cps[name] = False # Default
             
             # 2. If missing, check for preconfigured dwells (from TOF dialog) or show dialog
             
             # Log Unit Detection Summary
-            n_cps = sum(1 for v in self.channel_is_cps.values() if v)
+            n_cps = sum(1 for name, is_cps in self.channel_is_cps.items() if is_cps)
             n_counts = len(self.channel_is_cps) - n_cps
             IoLog.information(f"iolite Optimiser: Unit Detection - {n_cps} channels detected as CPS, {n_counts} as Counts")
             
@@ -5733,33 +5755,38 @@ class ioliteOptimiser(QWidget):
             self.cached_unit_label = "CPS" if n_cps > 0 else "Counts"
             
             if missing:
-                # Check for pre-configured dwells (from TOF/Vitesse dialog)
-                preconfigured = getattr(self, '_preconfigured_dwells', {})
-                
-                still_missing = []
-                for m in missing:
-                    if m in preconfigured:
-                        local_dwells[m] = preconfigured[m]
-                    else:
-                        still_missing.append(m)
-                
-                if still_missing:
-                    # Show unified config dialog for remaining channels
-                    at_val = getattr(self, 'detected_at_ms', None)
-                    dlg = DataConfigDialog(still_missing, detected_at=at_val, is_tof=False, parent=self)
-                    if dlg.exec_():
-                        local_dwells.update(dlg.result_dwells)
-                        
-                        # SAVE BACK TO IOLITE PROPERTIES
-                        try:
-                            for name, val in dlg.result_dwells.items():
-                                if name in ts_map:
-                                    ts_map[name].setProperty("Dwell Time (ms)", float(val))
-                                    IoLog.information(f"iolite Optimiser: Saved dwell {val}ms to channel '{name}'")
-                        except Exception as e:
-                            IoLog.warning(f"iolite Optimiser: Could not save property: {e}")
-                    else:
-                        IoLog.warning("iolite Optimiser: Dwell configuration cancelled.")
+                if tab == "spr":
+                    # For SPR tab, we don't need to prompt for dwell times, just default them to 10.0 ms
+                    for m in missing:
+                        local_dwells[m] = 10.0
+                else:
+                    # Check for pre-configured dwells (from TOF/Vitesse dialog)
+                    preconfigured = getattr(self, '_preconfigured_dwells', {})
+                    
+                    still_missing = []
+                    for m in missing:
+                        if m in preconfigured:
+                            local_dwells[m] = preconfigured[m]
+                        else:
+                            still_missing.append(m)
+                    
+                    if still_missing:
+                        # Show unified config dialog for remaining channels
+                        at_val = getattr(self, 'detected_at_ms', None)
+                        dlg = DataConfigDialog(still_missing, detected_at=at_val, is_tof=False, parent=self)
+                        if dlg.exec_():
+                            local_dwells.update(dlg.result_dwells)
+                            
+                            # SAVE BACK TO IOLITE PROPERTIES
+                            try:
+                                for name, val in dlg.result_dwells.items():
+                                    if name in ts_map:
+                                        ts_map[name].setProperty("Dwell Time (ms)", float(val))
+                                        IoLog.information(f"iolite Optimiser: Saved dwell {val}ms to channel '{name}'")
+                            except Exception as e:
+                                IoLog.warning(f"iolite Optimiser: Could not save property: {e}")
+                        else:
+                            IoLog.warning("iolite Optimiser: Dwell configuration cancelled.")
             
             IoLog.information(f"iolite Optimiser: Resolved dwells for {len(local_dwells)} channels")
             return local_dwells
@@ -6931,20 +6958,26 @@ class ioliteOptimiser(QWidget):
                 
                 # Unified Dialog: Channel selection + Global dwell
                 det_at = self.spr_detected_at_ms if tab == "spr" else self.detected_at_ms
-                dlg = DataConfigDialog(ch_names, detected_at=det_at, is_tof=True, parent=self)
-                if dlg.exec_():
-                    selected_names = set(dlg.result_channels)
-                    channels = [ch for ch in channels if ch.name in selected_names]
-                    
-                    # Store pre-configured dwells (resolve_dwell_times will use these)
-                    self._preconfigured_dwells = dlg.result_dwells.copy()
-                    
-                    if not channels:
-                        IoLog.warning("iolite Optimiser: No channels selected. Aborting load.")
-                        return None, {}
+                
+                if tab == "spr":
+                    # For SPR tab, we don't need to prompt/show the dialog.
+                    # Just default all dwells to 10.0 ms.
+                    self._preconfigured_dwells = {ch_name: 10.0 for ch_name in ch_names}
                 else:
-                    IoLog.information("iolite Optimiser: Configuration cancelled. Aborting load.")
-                    return None, {}
+                    dlg = DataConfigDialog(ch_names, detected_at=det_at, is_tof=True, parent=self)
+                    if dlg.exec_():
+                        selected_names = set(dlg.result_channels)
+                        channels = [ch for ch in channels if ch.name in selected_names]
+                        
+                        # Store pre-configured dwells (resolve_dwell_times will use these)
+                        self._preconfigured_dwells = dlg.result_dwells.copy()
+                        
+                        if not channels:
+                            IoLog.warning("iolite Optimiser: No channels selected. Aborting load.")
+                            return None, {}
+                    else:
+                        IoLog.information("iolite Optimiser: Configuration cancelled. Aborting load.")
+                        return None, {}
             else:
                 self._preconfigured_dwells = {}  # Reset for non-TOF data
             
@@ -7979,7 +8012,11 @@ class ioliteOptimiser(QWidget):
             "Model Washout Peak (Lognormal)",
             "Sawtooth Approximation"
         ])
-        self.cmb_pulse_shape.setCurrentText(self.persistent_settings.get('pulse_shape_pref', 'Real Composite Peak'))
+        has_composite = (hasattr(self, 'spr_raw_results_df') and 
+                         self.spr_raw_results_df is not None and 
+                         not self.spr_raw_results_df.empty)
+        default_shape = "Real Composite Peak" if has_composite else "Model Washout Peak (Lognormal)"
+        self.cmb_pulse_shape.setCurrentText(default_shape)
         self.cmb_pulse_shape.currentIndexChanged.connect(lambda: self.pulse_debounce_timer.start())
         form_settings.addRow("Pulse Shape:", self.cmb_pulse_shape)
         
@@ -8117,15 +8154,15 @@ class ioliteOptimiser(QWidget):
         self.tab_pulse.setLayout(main_layout)
 
     def reset_pulse_params_to_optimum(self):
-        # Pull from last_sync (Optimiser Tab results)
+        # Pull from last_sync (Optimiser Tab results) or Optimiser tab inputs
         if hasattr(self, 'last_sync') and self.last_sync:
             rr = self.last_sync.get('rr_actual', 10.0)
             at_ms = self.last_sync.get('at_actual_s', 0.1) * 1000.0
             pulses = self.last_sync.get('actual_pulses', 1.0)
         else:
-            rr = 10.0
-            at_ms = 100.0
-            pulses = 1.0
+            rr = self.spin_init_rr.value if hasattr(self, 'spin_init_rr') else 10.0
+            at_ms = getattr(self, 'detected_at_ms', 10.0) if getattr(self, 'detected_at_ms', None) is not None else 10.0
+            pulses = rr * (at_ms / 1000.0)
             
         # Update spinboxes (Block signals to avoid double-triggers, then manually start timer)
         self.spin_pulse_rr.blockSignals(True)
@@ -8136,7 +8173,7 @@ class ioliteOptimiser(QWidget):
         self.spin_pulse_rr.setValue(rr)
         self.spin_pulse_at.setValue(at_ms)
         self.spin_pulse_count.setValue(pulses)
-        self.spin_pulse_washout.setValue(self.spin_wash.value())
+        self.spin_pulse_washout.setValue(self.spin_wash.value)
         
         self.spin_pulse_rr.blockSignals(False)
         self.spin_pulse_at.blockSignals(False)
