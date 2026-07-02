@@ -5750,26 +5750,40 @@ class ioliteOptimiser(QWidget):
         norm_file_path = os.path.normpath(file_path)
         
         try:
+            # Record loaded files before importing
+            files_before = data.importedFiles()
+            existing_paths = {f.filePath().lower() for f in files_before}
+            
             res = data.importData(norm_file_path)
             
-            # Check if the file is now in the loaded files list (covers cases where importData returns False but succeeds)
-            was_imported = False
-            target_base = os.path.basename(norm_file_path.replace('\\', '/')).lower()
-            for f in data.importedFiles():
-                try:
-                    f_path = os.path.normpath(f.filePath()).lower()
-                    f_base = os.path.basename(f.filePath().replace('\\', '/')).lower()
-                    f_name = os.path.normpath(f.fileName()).lower()
-                    if f_path == norm_file_path.lower() or f_name == target_base or (f_base == target_base and f_base != ""):
-                        was_imported = True
-                        break
-                except Exception:
-                    pass
+            # Check loaded files after importing
+            files_after = data.importedFiles()
             
-            if res or was_imported:
-                self.refresh_data(tab=tab, file_path=norm_file_path)
+            # Find the new file added during this import (if any)
+            newly_imported_file = None
+            for f in files_after:
+                if f.filePath().lower() not in existing_paths:
+                    newly_imported_file = f
+                    break
+            
+            # Resolve target path using the newly added file or fallback to match name of existing file
+            target_path = None
+            if newly_imported_file:
+                target_path = newly_imported_file.filePath()
+            else:
+                target_base = os.path.basename(norm_file_path.replace('\\', '/')).lower()
+                for f in files_after:
+                    f_path = f.filePath().replace('\\', '/').lower()
+                    f_base = os.path.basename(f_path)
+                    if f_path == norm_file_path.lower() or f_base == target_base:
+                        target_path = f.filePath()
+                        break
+            
+            if res or target_path is not None:
+                # Use the actual internal path recognized by iolite (e.g. Mac path embedded inside io4)
+                self.refresh_data(tab=tab, file_path=target_path or norm_file_path)
                 try:
-                    data.unloadFile(norm_file_path)
+                    data.unloadFile(target_path or norm_file_path)
                 except Exception as ue:
                     IoLog.warning(f"iolite Optimiser: Failed to unload file: {ue}")
             else:
