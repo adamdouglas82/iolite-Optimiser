@@ -51,7 +51,6 @@ import traceback
 import urllib.request
 import urllib.error
 import threading
-import webbrowser
 import pandas as pd
 import numpy as np
 import random
@@ -92,7 +91,7 @@ from iolite.QtGui import (QAction, QSizePolicy, QWidget, QLabel, QDoubleSpinBox,
                           QColorDialog, QDialog, QPushButton, QScrollArea, QSplitter, QFrame, 
                           QLineEdit, QTabWidget, QStackedWidget, QApplication, QPalette, QColor,
                           QListWidget, QListWidgetItem, QTextEdit, QInputDialog, QMessageBox,
-                          QFileDialog)
+                          QFileDialog, QDesktopServices)
 from iolite.QtCore import Qt, QTimer, QSize, QEvent, QUrl
 
 try:
@@ -1623,31 +1622,71 @@ class SettingsDialog(QDialog):
         return parts, has_suffix
 
     def check_for_updates(self):
-        """Fetch the latest GitHub release in a background thread and report to the user."""
+        """Fetch the latest GitHub release in a background thread and report to the user.
+
+        PythonQt / iolite does not allow QTimer.singleShot to be called from a
+        non-Qt thread. Instead we use a shared result_holder list: the background
+        thread writes its result there, and a main-thread polling QTimer picks it
+        up every 100 ms then stops itself.
+        """
         GITHUB_API = "https://api.github.com/repos/adamdouglas82/iolite-Optimiser/releases/latest"
         RELEASES_URL = "https://github.com/adamdouglas82/iolite-Optimiser/releases"
+
+        IoLog.information("iolite Optimiser: check_for_updates called")
+        print("iolite Optimiser: check_for_updates called")
 
         self.btn_check_updates.setEnabled(False)
         self.btn_check_updates.setText("Checking\u2026")
 
+        # Shared result container — written by the thread, read by the timer.
+        # Format: [(remote_tag, release_url, error_str_or_None)]
+        result_holder = []
+
         def _fetch():
-            """Run in a daemon thread — no Qt widgets touched here."""
+            """Run in a daemon thread — never touches any Qt object."""
+            IoLog.information("iolite Optimiser: _fetch thread started")
+            print("iolite Optimiser: _fetch thread started")
             try:
+                IoLog.information(f"iolite Optimiser: Opening URL: {GITHUB_API}")
+                print(f"iolite Optimiser: Opening URL: {GITHUB_API}")
                 req = urllib.request.Request(
                     GITHUB_API,
                     headers={"Accept": "application/vnd.github+json",
                              "User-Agent": f"iolite-Optimiser/{VERSION}"}
                 )
                 with urllib.request.urlopen(req, timeout=10) as resp:
-                    payload = json.loads(resp.read().decode())
+                    IoLog.information("iolite Optimiser: Response received, reading...")
+                    print("iolite Optimiser: Response received, reading...")
+                    raw = resp.read().decode()
+                IoLog.information(f"iolite Optimiser: Raw response length: {len(raw)} chars")
+                print(f"iolite Optimiser: Raw response length: {len(raw)} chars")
+                payload = json.loads(raw)
                 remote_tag = payload.get("tag_name", "")
                 release_url = payload.get("html_url", RELEASES_URL)
-                QTimer.singleShot(0, lambda: _on_result(remote_tag, release_url, None))
+                IoLog.information(f"iolite Optimiser: Remote tag = {remote_tag}, writing to result_holder")
+                print(f"iolite Optimiser: Remote tag = {remote_tag}, writing to result_holder")
+                result_holder.append((remote_tag, release_url, None))
             except Exception as exc:
-                QTimer.singleShot(0, lambda: _on_result(None, RELEASES_URL, str(exc)))
+                IoLog.error(f"iolite Optimiser: _fetch exception: {exc}")
+                print(f"iolite Optimiser: _fetch exception: {exc}")
+                print(traceback.format_exc())
+                result_holder.append((None, RELEASES_URL, str(exc)))
+
+        def _poll():
+            """Called on the main thread every 100 ms until a result arrives."""
+            if not result_holder:
+                return  # still waiting — timer will fire again
+            poll_timer.stop()
+            remote_tag, release_url, error = result_holder[0]
+            IoLog.information(f"iolite Optimiser: _poll got result — error={error}, tag={remote_tag}")
+            print(f"iolite Optimiser: _poll got result — error={error}, tag={remote_tag}")
+            _on_result(remote_tag, release_url, error)
 
         def _on_result(remote_tag, release_url, error):
-            """Called back on the Qt main thread once the fetch completes."""
+            """Process the fetch result — runs on the Qt main thread."""
+            IoLog.information(f"iolite Optimiser: _on_result called — error={error}, tag={remote_tag}")
+            print(f"iolite Optimiser: _on_result called — error={error}, tag={remote_tag}")
+
             self.btn_check_updates.setEnabled(True)
             self.btn_check_updates.setText("Check for Updates")
 
@@ -1661,6 +1700,8 @@ class SettingsDialog(QDialog):
 
             # --- dev / unversioned build ---
             if VERSION.lower() in ("dev", "", "unknown"):
+                IoLog.information(f"iolite Optimiser: dev build detected, latest remote = {remote_tag}")
+                print(f"iolite Optimiser: dev build detected, latest remote = {remote_tag}")
                 QMessageBox.information(
                     self, "Development Build",
                     f"You are running a development build.\n"
@@ -1671,6 +1712,8 @@ class SettingsDialog(QDialog):
             # --- compare versions ---
             local_ver, local_pre = SettingsDialog._parse_version(VERSION)
             remote_ver, remote_pre = SettingsDialog._parse_version(remote_tag)
+            IoLog.information(f"iolite Optimiser: local={local_ver} pre={local_pre}  remote={remote_ver} pre={remote_pre}")
+            print(f"iolite Optimiser: local={local_ver} pre={local_pre}  remote={remote_ver} pre={remote_pre}")
 
             update_available = (
                 remote_ver > local_ver or
@@ -1686,15 +1729,27 @@ class SettingsDialog(QDialog):
                     QMessageBox.Yes | QMessageBox.No
                 )
                 if reply == QMessageBox.Yes:
-                    webbrowser.open(release_url)
+                    # Use Qt's native URL handler — webbrowser.open() crashes
+                    # iolite's embedded Python 3.13 via PyOS_AfterFork/ShellExecuteW
+                    QDesktopServices.openUrl(QUrl(release_url))
             else:
                 QMessageBox.information(
                     self, "Up to Date",
                     f"You are running the latest version ({VERSION})."
                 )
 
+        # Start the background fetch
+        IoLog.information("iolite Optimiser: Starting background fetch thread")
+        print("iolite Optimiser: Starting background fetch thread")
         t = threading.Thread(target=_fetch, daemon=True)
         t.start()
+        IoLog.information(f"iolite Optimiser: Thread started, is_alive={t.is_alive()}")
+        print(f"iolite Optimiser: Thread started, is_alive={t.is_alive()}")
+
+        # Poll for the result on the main thread every 100 ms
+        poll_timer = QTimer(self)
+        poll_timer.timeout.connect(_poll)
+        poll_timer.start(100)
 
 
 class PresetManagerDialog(QDialog):
