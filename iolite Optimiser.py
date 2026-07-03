@@ -48,6 +48,10 @@ import math
 import os
 import json
 import traceback
+import urllib.request
+import urllib.error
+import threading
+import webbrowser
 import pandas as pd
 import numpy as np
 import random
@@ -1592,12 +1596,105 @@ class SettingsDialog(QDialog):
         lbl_version.setStyleSheet("color: gray; font-size: 8pt;")
         btns.addWidget(lbl_version)
         btns.addStretch()
+        self.btn_check_updates = QPushButton("Check for Updates")
+        self.btn_check_updates.setFixedHeight(30)
+        self.btn_check_updates.clicked.connect(self.check_for_updates)
+        btns.addWidget(self.btn_check_updates)
         self.btn_close = QPushButton("Close")
         self.btn_close.setFixedWidth(120)
         self.btn_close.setFixedHeight(30)
         self.btn_close.clicked.connect(lambda: self.done(1))
         btns.addWidget(self.btn_close)
         self.main_layout.addLayout(btns)
+
+    @staticmethod
+    def _parse_version(tag):
+        """Parse a version tag into (numeric_tuple, has_pre_release_suffix).
+
+        Examples:
+            "v1.0.0"        -> ((1, 0, 0), False)
+            "1.0.0-abcxyz"  -> ((1, 0, 0), True)
+            "v1.0.1"        -> ((1, 0, 1), False)
+        """
+        tag = tag.strip().lstrip("v")
+        has_suffix = "-" in tag
+        base = tag.split("-")[0]
+        parts = tuple(int(x) for x in base.split(".") if x.isdigit())
+        return parts, has_suffix
+
+    def check_for_updates(self):
+        """Fetch the latest GitHub release in a background thread and report to the user."""
+        GITHUB_API = "https://api.github.com/repos/adamdouglas82/iolite-Optimiser/releases/latest"
+        RELEASES_URL = "https://github.com/adamdouglas82/iolite-Optimiser/releases"
+
+        self.btn_check_updates.setEnabled(False)
+        self.btn_check_updates.setText("Checking\u2026")
+
+        def _fetch():
+            """Run in a daemon thread — no Qt widgets touched here."""
+            try:
+                req = urllib.request.Request(
+                    GITHUB_API,
+                    headers={"Accept": "application/vnd.github+json",
+                             "User-Agent": f"iolite-Optimiser/{VERSION}"}
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    payload = json.loads(resp.read().decode())
+                remote_tag = payload.get("tag_name", "")
+                release_url = payload.get("html_url", RELEASES_URL)
+                QTimer.singleShot(0, lambda: _on_result(remote_tag, release_url, None))
+            except Exception as exc:
+                QTimer.singleShot(0, lambda: _on_result(None, RELEASES_URL, str(exc)))
+
+        def _on_result(remote_tag, release_url, error):
+            """Called back on the Qt main thread once the fetch completes."""
+            self.btn_check_updates.setEnabled(True)
+            self.btn_check_updates.setText("Check for Updates")
+
+            if error:
+                QMessageBox.warning(
+                    self, "Update Check Failed",
+                    f"Could not check for updates.\n\nError: {error}\n\n"
+                    "Please check your internet connection."
+                )
+                return
+
+            # --- dev / unversioned build ---
+            if VERSION.lower() in ("dev", "", "unknown"):
+                QMessageBox.information(
+                    self, "Development Build",
+                    f"You are running a development build.\n"
+                    f"The latest release on GitHub is {remote_tag}."
+                )
+                return
+
+            # --- compare versions ---
+            local_ver, local_pre = SettingsDialog._parse_version(VERSION)
+            remote_ver, remote_pre = SettingsDialog._parse_version(remote_tag)
+
+            update_available = (
+                remote_ver > local_ver or
+                (remote_ver == local_ver and local_pre and not remote_pre)
+            )
+
+            if update_available:
+                reply = QMessageBox.question(
+                    self, "Update Available",
+                    f"A new version is available: {remote_tag}\n"
+                    f"You are running: {VERSION}\n\n"
+                    "Would you like to open the releases page?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply == QMessageBox.Yes:
+                    webbrowser.open(release_url)
+            else:
+                QMessageBox.information(
+                    self, "Up to Date",
+                    f"You are running the latest version ({VERSION})."
+                )
+
+        t = threading.Thread(target=_fetch, daemon=True)
+        t.start()
 
 
 class PresetManagerDialog(QDialog):
