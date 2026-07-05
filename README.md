@@ -1,4 +1,4 @@
-# iolite Optimiser (v1.0.0)
+# iolite Optimiser
 
 An advanced optimization and simulation plugin for **iolite 4** to determine the best combination of **Spot Size**, **Laser Repetition Rate**, and **Scan Speed** (or Dwell/Acquisition Times) for laser ablation ICP-MS analyses.
 
