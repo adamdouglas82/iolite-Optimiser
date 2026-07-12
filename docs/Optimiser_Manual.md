@@ -12,12 +12,12 @@ The **Optimiser Tab** determines the best combination of **Spot Size**, **Laser 
 
 #### **Top Controls**
 
-- **Reload Data from iolite**: Refreshes input channels from the main iolite interface.
+- **Import Optimisation File**: Loads or refreshes the optimization input data from a file in your iolite session.
 - **Settings**: Opens the detailed **Hardware Configuration** dialog.
 
 #### **Hardware Configuration Dialog**
 
-Accessible via the "Settings" button. This establishes the physical limits of your system. A version label (e.g. `Version: dev`) is displayed at the bottom-left of this dialog.
+Accessible via the "Settings" button. This establishes the physical limits of your system. A version label (e.g. `Version: dev`) is displayed at the bottom-left of this dialog, alongside a **Check for Updates** button to check for newer plugin versions on GitHub.
 
 - **ICP-MS Hardware**:
   - **Manufacturer/Model**: Presets minimum dwell times and switching speeds.
@@ -101,7 +101,7 @@ The calculated "Ideal" instrument settings.
 - **Acq Time / Budget**: The total integration cycle time calculated to match the laser synchronization.
 - **Est. Time**: Total predicted duration of the analysis (HH:MM:SS).
 - **Est. Data Points**: (Displayed in Spot/Line modes only) The predicted total number of mass spectrometer measurements that will be collected over the run.
-- **Pixels Per Sec**: (Displayed in Imaging mode only) The scanning rate of pixels per second based on the optimized scan speed and spot size.
+- **Pixels Per Sec**: (Displayed in Imaging mode only) The scanning rate of pixels per second based on the optimised scan speed and spot size.
 
 ### 2. Right Panel: Visualisation & Details
 
@@ -116,11 +116,12 @@ The calculated "Ideal" instrument settings.
 #### **Plot Controls**
 
 To maximize vertical display efficiency, controls are split into two stacked rows:
-- **Row 1**: Theme override dropdown (Auto/Dark/Light), Normalize checkbox, Pan/Zoom Y checkbox, Auto-Rescale Y checkbox, Show Background checkbox.
+
+- **Row 1**: Theme override dropdown (Auto/Dark/Light), Normalise checkbox, Pan/Zoom Y checkbox, Auto-Rescale Y checkbox, Show Background checkbox.
 - **Row 2**: Auto Select Regions checkbox, Background time spinboxes, Signal time spinboxes.
 
 - **Theme**: Toggle Dark/Light mode.
-- **Normalize**: Scales all traces to 0-1 range for easy comparison.
+- **Normalise**: Scales all traces to 0-1 range for easy comparison.
 - **Auto-Rescale Y**:
   - **Checked (Default/Ephemeral)**: The plot automatically snaps to the full data range. This is reset to ON whenever new data is loaded or the application starts.
   - **Unchecked**: The plot keeps your current zoom level. Switch this off to "lock" your view while adjusting parameters.
@@ -134,6 +135,7 @@ To maximize vertical display efficiency, controls are split into two stacked row
 #### **Synchronization Advisor**
 
 Displays real-time diagnostic indicators based on the active Sync Strategy:
+
 - **🟢 Synchronised**: Green indicator representing perfect snapping to integer pulse counts.
 - **🟢 Oversampling Mode**: Green indicator indicating no integer snapping is required (pure time-driven).
 - **🟢 Stable Steady State**: Green indicator indicating all channels are within the target RSD limits.
@@ -161,7 +163,7 @@ Detailed breakdown per channel.
 When loading external standard or tuning data via a CSV file, iolite requires the timestamp column format to exactly match the format configuration selected in preferences. If a mismatch occurs, the import will fail to parse and show a dialog:
 
 - **Error popup**: Displays detailed failure information extracted from the iolite application log.
-- **Smart Suggestions**: Analyzes the failed timestamp structure and suggests the exact matching preferences layout to configure in your iolite settings (e.g. suggesting `yyyy MM dd hh mm ss` or `dd MM yyyy hh mm ss`).
+- **Smart Suggestions**: Analyses the failed timestamp structure and suggests the exact matching preferences layout to configure in your iolite settings (e.g. suggesting `yyyy MM dd hh mm ss` or `dd MM yyyy hh mm ss`).
 
 ---
 
@@ -176,7 +178,7 @@ When loading external standard or tuning data via a CSV file, iolite requires th
 ### Step 2: Load Data
 
 1. Ensure your iolite session has representative data (e.g., a "Tuning" line).
-2. Click **Reload Data from iolite**.
+2. Click **Import Optimisation File** and select your data file.
 3. **Missing Dwell Times?**
     - If your data lacks embedded dwell time metadata (common with some CSV imports), a dialog will appear.
     - **Set to Global**: Apply a single dwell time (e.g., 10ms) to all channels.
@@ -216,7 +218,7 @@ The optimization runs automatically whenever you change a parameter.
 3. **Manual Overrides**:
     - If you need to force a specific spot size:
     - Change the **Spot Size** spinbox in the "Optimised Settings" panel (it normally says "Auto").
-    - This locks the spot size and re-optimizes only the Rep-Rate and Speed.
+    - This locks the spot size and re-optimises only the Rep-Rate and Speed.
     - Set it back to 0 (or "Auto") to resume full optimization.
 4. If you need to force a specific rep-rate:
     - This is usually derived from the spot size and washout. To influence it, try changing the **Avoid Gaps** setting or **Washout** value.
@@ -262,7 +264,7 @@ These messages list specific isotopes that are affecting the optimization logic.
   - For **MC/TOF** systems, this is just a warning.
   - For **Quadrupole** systems, these channels have been forced to the minimum dwell time to save budget.
 - **"The following channels cannot be set lower than the hardware minimum ([X] ms)..."**
-  - **Blue Warning**: The algorithm wants to reduce the dwell time for these channels (usually high-signal ones) to optimize speed, but is blocked by the hard limit of the instrument (e.g., 1ms or 10ms minimum dwell).
+  - **Blue Warning**: The algorithm wants to reduce the dwell time for these channels (usually high-signal ones) to optimise speed, but is blocked by the hard limit of the instrument (e.g., 1ms or 10ms minimum dwell).
 - **"The following channels had zero counts in the background. The detection limit ($L_c$) has been calculated using the Square Root Transform rule..."**
   - **Gray Warning**: Indicates that the background signal was perfectly zero (common in simulated data or extremely short baselines). To prevent division-by-zero errors in the SNR calculation, a theoretical detection limit ($L_c$) was calculated using the Square Root Transform rule for variance stabilization. The results matrix displays these estimated targets with a grey `(Lc)` subscript.
 

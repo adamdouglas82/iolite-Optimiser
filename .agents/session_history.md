@@ -5,6 +5,7 @@ This file tracks technical notes, design decisions, and environment quirks from 
 ---
 
 ## Session: Adding Check For Updates (July 2026)
+
 * **Conversation ID**: `23c10865-3d71-495e-b153-879793992ed7`
 * **Key Tasks & Technical Quirks**:
   * **Feature**: Added a "Check for Updates" button to the Settings dialog that queries the GitHub repository release tag.
@@ -20,6 +21,7 @@ This file tracks technical notes, design decisions, and environment quirks from 
 ---
 
 ## Session: Pulse Train Simulator Improvements (July 2026)
+
 * **Conversation ID**: `73854a79-ab52-410e-9480-2a7925cb17d8`
 * **Key Tasks & Technical Quirks**:
   * **Advisor Updates**: Bypassed steady-state oversampling stability and RSD warnings for **Combined Integer Sync** (or any strategy that yields perfect integer synchronization).
@@ -33,6 +35,7 @@ This file tracks technical notes, design decisions, and environment quirks from 
 ---
 
 ## Session: SPR Tab Manual Creation (Jan 2026)
+
 * **Conversation ID**: `c305e18f-d7d4-49fd-aeed-aa867cd91b2d`
 * **Key Tasks**:
   * Researched and documented key SPR UI elements, inputs, outputs, and workflow steps in `docs/SPR_Manual.md`.
@@ -40,6 +43,7 @@ This file tracks technical notes, design decisions, and environment quirks from 
 ---
 
 ## Session: Localisation to British English (Jan 2026)
+
 * **Conversation ID**: `503996db-c15f-4786-be53-103c300c3532`
 * **Key Tasks**:
   * Localised internal naming conventions and user-facing labels to British English (e.g., `run_optimization` -> `run_optimisation`, `analyze_washout_peaks` -> `analyse_washout_peaks`, `normalize_rgb` -> `normalise_rgb`).
@@ -47,6 +51,7 @@ This file tracks technical notes, design decisions, and environment quirks from 
 ---
 
 ## Session: Minimum SNR Logic Fix (Jan 2026)
+
 * **Conversation ID**: `b0d3aca1-e874-4d39-92ae-8b343907d3e8`
 * **Key Tasks & Technical Quirks**:
   * Corrected Minimum SNR logic for Multi-Collector (MC) and Time-of-Flight (TOF) systems.
@@ -55,6 +60,7 @@ This file tracks technical notes, design decisions, and environment quirks from 
 ---
 
 ## Session: Composite Peak Feature for SPR (Jan 2026)
+
 * **Conversation ID**: `106beadb-39f5-45f1-9a4c-75956d9491bb`
 * **Key Tasks & Technical Quirks**:
   * Implemented average peak shape visualization ("Composite Peak") in the Single Pulse Response tab.
@@ -63,6 +69,7 @@ This file tracks technical notes, design decisions, and environment quirks from 
 ---
 
 ## Session: SPR Results Alignment & UI Refinements (Jan 2026)
+
 * **Conversation ID**: `f43581b5-f4e9-443b-aeb0-e2ab92d31e08`
 * **Key Tasks & Technical Quirks**:
   * Aligned SPR statistics panel values (Average, Max, RSD, Area) into a strict four-column grid with standardized 8pt font and explicit spacing to prevent layout shifting.
@@ -72,6 +79,7 @@ This file tracks technical notes, design decisions, and environment quirks from 
 ---
 
 ## Session: Intelligent Unit Awareness & Theme Controls (Dec 2025)
+
 * **Conversation ID**: `2de3e3de-040c-4346-978c-83a9d93e651a`
 * **Key Tasks**:
   * Added plot control options (Theme selector, Pan/Zoom Y axis, Auto-Rescale Y) directly above the Matplotlib canvas in the SPR tab.
@@ -80,6 +88,7 @@ This file tracks technical notes, design decisions, and environment quirks from 
 ---
 
 ## Session: Refinement & Code Cleanups (Dec 2025)
+
 * **Conversation ID**: `9468776b-9a36-4194-aa98-34fc712447eb`
 * **Key Tasks**:
   * Added multi-mode selection ("Spot", "Line", "Imaging") to the Method Optimiser.

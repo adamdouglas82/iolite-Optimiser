@@ -2,7 +2,7 @@
 
 ## Overview
 
-The **SPR Tab** allows you to analyze the "Single Pulse Response" (washout characteristics) of your laser ablation system. By analyzing the shape of individual laser pulses, the software can calculate the **Wait Time** (washout time) required for the signal to decay to a specific baseline level (10% or 1%).
+The **SPR Tab** allows you to analyse the "Single Pulse Response" (washout characteristics) of your laser ablation system. By analysing the shape of individual laser pulses, the software can calculate the **Wait Time** (washout time) required for the signal to decay to a specific baseline level (10% or 1%).
 
 This specific washout time is a critical input for the **Optimiser**, ensuring that subsequent laser shots do not overlap unintentionally or that necessary delays are added between spots to prevent signal mixing.
 
@@ -16,13 +16,13 @@ The interface is divided into two main sections: **Controls & Results** (Left) a
 
 #### **Global Controls**
 
-* **Reload Data from iolite**: Refreshes the input data from the main iolite interface. Use this if you have changed selections or processing in iolite while the plugin is open.
+* **Import SPR File**: Loads or refreshes the single pulse response data from a file in your iolite session.
 
 #### **Peak Detection**
 
 Configure how the software identifies individual laser pulses in the signal.
 
-* **Select Channel**: Choose the isotope channel to analyze (e.g., `U238`, `Th232`). Usually, a high-abundance isotope is best for characterizing washout.
+* **Select Channel**: Choose the isotope channel to analyse (e.g., `U238`, `Th232`). Usually, a high-abundance isotope is best for characterising washout.
 * **Peak Cutoff (Prominence)**:
   * **Auto**: Automatically estimates a threshold to identify peaks above the baseline noise.
   * **Manual**: Uncheck "Auto" to set a specific prominence value. Higher values filter out noise but may miss smaller peaks.
@@ -78,8 +78,9 @@ A dedicated panel highlighting the single longest pulse detected in your dataset
 #### **Plot Controls Layout**
 
 To preserve display height on compact screens, the layout settings are separated into two rows:
-- **Row 1**: Theme override dropdown (Auto/Dark/Light), Normalize checkbox, Pan/Zoom Y checkbox, Auto-Rescale Y checkbox, Show Background checkbox.
-- **Row 2**: Auto Select Regions checkbox, Background time spinboxes, Signal time spinboxes.
+
+* **Row 1**: Theme override dropdown (Auto/Dark/Light), Normalise checkbox, Pan/Zoom Y checkbox, Auto-Rescale Y checkbox, Show Background checkbox.
+* **Row 2**: Auto Select Regions checkbox, Background time spinboxes, Signal time spinboxes.
 
 #### **Results Table (Bottom)**
 
@@ -96,14 +97,14 @@ To preserve display height on compact screens, the layout settings are separated
 Ensure you have a selection in iolite that contains single laser pulses (e.g., a "Test" or "Tune" line with low repetition rate, like 1 Hz).
 
 1. Open the **Advanced Spot Optimiser**.
-2. Click **Reload Data from iolite** if your data is not visible.
+2. Click **Import SPR File** and select your SPR data file.
 
 ### Step 2: Select Channel
 
 1. Go to the **SPR** tab.
 2. In the **Peak Detection** group, select a representative channel (e.g., `U238` or a matrix element).
 
-### Step 3: Optimize Detection
+### Step 3: Optimise Detection
 
 1. Observe the **SPR Plot**. Are all pulses marked with an orange `X`?
 2. If noise is being detected as peaks:
@@ -133,11 +134,13 @@ Ensure you have a selection in iolite that contains single laser pulses (e.g., a
 ## Troubleshooting & Logging
 
 ### Date/Time Stamp Format mismatch on CSV Imports
-When importing files, if the timestamp format does not match the active settings in iolite, the import will fail. 
+
+When importing files, if the timestamp format does not match the active settings in iolite, the import will fail.
 
 If this happens, the tool will intercept the failure and display a **QMessageBox** alert showing the specific failure details from the iolite application log. It will automatically suggest matching dropdown formatting layouts to check in your preferences (e.g., suggesting `yyyy MM dd hh mm ss` or `dd MM yyyy hh mm ss` depending on the digits parsed from the timestamp).
 
 ### Other Issues
+
 * **No Peaks Detected**:
   * Check if the correct channel is selected.
   * Lower the **Peak Cutoff**.
@@ -152,7 +155,7 @@ If this happens, the tool will intercept the failure and display a **QMessageBox
 
 ## Methodology & References
 
-The **SPR Tab** characterizes system washout by analyzing the temporal profile of individual laser pulses.
+The **SPR Tab** characterises system washout by analysing the temporal profile of individual laser pulses.
 
 ### Peak Analysis Process
 

@@ -19,7 +19,7 @@ Establish the temporal boundaries and pulse shape characteristics of the simulat
 - **Background Time**: The simulated duration (seconds) preceding active laser ablation, representing the baseline gas blank.
 - **Signal Duration**: The active duration (seconds) of simulated laser firing/ablation.
 - **Pulse Shape**:
-  - **Real Composite Peak**: Reconstructs the pulse train utilizing the actual average pulse shape extracted from the **SPR tab** data. (Only available if SPR data has been loaded and analyzed).
+  - **Real Composite Peak**: Reconstructs the pulse train utilizing the actual average pulse shape extracted from the **SPR tab** data. (Only available if SPR data has been loaded and analysed).
   - **Model Washout Peak (Lognormal)**: Models the signal using a theoretical lognormal distribution curve. (Default shape if no composite peak is loaded).
   - **Sawtooth Approximation**: A geometric sawtooth approximation representing linear rise and decay signals.
 
@@ -42,7 +42,7 @@ Manually adjust the simulation parameters. By default, these parameters are init
 #### **Plot Controls**
 
 - **Theme**: Select `Auto` (inherits system theme), `Dark`, or `Light` styling.
-- **Normalize**: Scales the trace amplitude to a 0–1 range, making it easy to examine shapes and relative carryover.
+- **Normalise**: Scales the trace amplitude to a 0–1 range, making it easy to examine shapes and relative carryover.
 - **Pan / Zoom Y**: Enables mouse interactions to zoom or pan along the vertical Y-axis.
 - **Auto-Rescale Y**: When enabled, automatically snaps the vertical axis to display the full simulated signal range whenever parameters change.
 - **Show Background**: Toggles visualization of the baseline background noise level.

@@ -8,16 +8,16 @@ This guide provides a comprehensive, step-by-step workflow for using the **iolit
 
 ## Phase 1: Determine Washout (SPR Tab)
 
-Before optimizing spot size or scan speed, you must characterize your system's Single Pulse Response (SPR) to determine the washout time.
+Before optimising spot size or scan speed, you must characterise your system's Single Pulse Response (SPR) to determine the washout time.
 
 ### Step 1.1: Acquire and Load SPR Test Data
 
 1. **Acquire Test Data**: Run a single-pulse test ablaton on your instrument using a low laser repetition rate of **1 Hz** and a **10 ms** integration time measuring a single mass (isotope). This ensures you record cleanly separated, high-resolution profiles of individual laser pulses.
 2. Open the **iolite Optimiser** plugin from the *Tools* menu in iolite.
 3. Go to the **SPR Tab**.
-4. Click **Reload Data from iolite** to ingest the current selection.
+4. Click **Import SPR File** and select your SPR data file.
 
-### Step 1.2: Select & Optimize Peak Detection
+### Step 1.2: Select & Optimise Peak Detection
 
 1. **Select Channel**: Choose the high-abundance isotope channel (e.g. `U238`, `Th232`) used during the single-pulse run.
 2. **Verify Detection**: Look at the **SPR Plot**. Valid pulses should be marked with an orange `X`.
@@ -65,7 +65,7 @@ Once the Single Pulse Response washout is determined, you can use the advisor to
 ### Step 3.2: Load Sensitivity Data
 
 1. Ensure your iolite session has a representative ablation signal (e.g., a "Tuning" line or standard block).
-2. Click **Reload Data from iolite**.
+2. Click **Import Optimisation File** and select your data file.
 3. **Dwell Time Check**:
     - If your data lacks dwell time metadata, a dialog will appear.
     - Choose **Set to Global** (e.g., 10ms) or enter **Individual** times per channel to match your instrument method.
@@ -85,7 +85,7 @@ Once the Single Pulse Response washout is determined, you can use the advisor to
 1. **Mode**: Select your analysis type (usually **Imaging** or **Line**).
 2. **Washout**: Verify this matches the value you applied from the SPR tab (Phase 1).
 3. **Parameters**:
-    - **Sync Strategy**: Choose how rep-rates and integration times are optimized:
+    - **Sync Strategy**: Choose how rep-rates and integration times are optimised:
       - **Adaptive Integer Sync (Auto)**: Sweeps frequencies to guarantee integer pulses per cycle.
       - **Strict Pulse Target (Manual)**: Hard-locks to the target pulses.
       - **Oversampling (Time-Driven)**: Prioritizes steady-state oversampling without snapping.
