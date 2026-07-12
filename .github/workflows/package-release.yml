@@ -74,7 +74,10 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v3
         with:
-          files: "iolite-Optimiser-v${{ env.VERSION }}.zip"
+          files: |
+            iolite-Optimiser-v${{ env.VERSION }}.zip
+            iolite Optimiser.py
+            docs/*.pdf
           body_path: release_body.md
           generate_release_notes: false
 
