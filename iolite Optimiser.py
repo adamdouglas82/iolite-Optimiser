@@ -48,6 +48,9 @@ import math
 import os
 import json
 import traceback
+import urllib.request
+import urllib.error
+import threading
 import pandas as pd
 import numpy as np
 import random
@@ -88,7 +91,7 @@ from iolite.QtGui import (QAction, QSizePolicy, QWidget, QLabel, QDoubleSpinBox,
                           QColorDialog, QDialog, QPushButton, QScrollArea, QSplitter, QFrame, 
                           QLineEdit, QTabWidget, QStackedWidget, QApplication, QPalette, QColor,
                           QListWidget, QListWidgetItem, QTextEdit, QInputDialog, QMessageBox,
-                          QFileDialog)
+                          QFileDialog, QDesktopServices)
 from iolite.QtCore import Qt, QTimer, QSize, QEvent, QUrl
 
 try:
@@ -1005,7 +1008,12 @@ class Logic:
                 curr_f = start_f
                 found_sync = False
                 max_allowed_rr = inputs.get('max_rr_hz', 10000.0)
-                while curr_f <= max_allowed_rr + 1e-9:
+                # Cap iterations to avoid near-infinite loop when rr_prec is very small
+                max_iter = int((max_allowed_rr - start_f) / rr_prec) + 1
+                max_iter = min(max_iter, 100000)
+                for _ in range(max_iter):
+                    if curr_f > max_allowed_rr + 1e-9:
+                        break
                     pulses = curr_f * at_actual_s
                     if abs(pulses - round(pulses)) < 1e-9:
                         rr_actual = curr_f
@@ -1521,7 +1529,7 @@ class CopyableTableWidget(QTableWidget):
             self.copy_selection()
             event.accept()
             return
-        super().keyPressEvent(event)
+        QTableWidget.keyPressEvent(self, event)
 
     def contextMenuEvent(self, event):
         from iolite.QtGui import QMenu, QAction
@@ -1587,12 +1595,161 @@ class SettingsDialog(QDialog):
         lbl_version.setStyleSheet("color: gray; font-size: 8pt;")
         btns.addWidget(lbl_version)
         btns.addStretch()
+        self.btn_check_updates = QPushButton("Check for Updates")
+        self.btn_check_updates.setFixedHeight(30)
+        self.btn_check_updates.clicked.connect(self.check_for_updates)
+        btns.addWidget(self.btn_check_updates)
         self.btn_close = QPushButton("Close")
         self.btn_close.setFixedWidth(120)
         self.btn_close.setFixedHeight(30)
         self.btn_close.clicked.connect(lambda: self.done(1))
         btns.addWidget(self.btn_close)
         self.main_layout.addLayout(btns)
+
+    @staticmethod
+    def _parse_version(tag):
+        """Parse a version tag into (numeric_tuple, has_pre_release_suffix).
+
+        Examples:
+            "v1.0.0"        -> ((1, 0, 0), False)
+            "1.0.0-abcxyz"  -> ((1, 0, 0), True)
+            "v1.0.1"        -> ((1, 0, 1), False)
+        """
+        tag = tag.strip().lstrip("v")
+        has_suffix = "-" in tag
+        base = tag.split("-")[0]
+        parts = tuple(int(x) for x in base.split(".") if x.isdigit())
+        return parts, has_suffix
+
+    def check_for_updates(self):
+        """Fetch the latest GitHub release in a background thread and report to the user.
+
+        PythonQt / iolite does not allow QTimer.singleShot to be called from a
+        non-Qt thread. Instead we use a shared result_holder list: the background
+        thread writes its result there, and a main-thread polling QTimer picks it
+        up every 100 ms then stops itself.
+        """
+        GITHUB_API = "https://api.github.com/repos/adamdouglas82/iolite-Optimiser/releases/latest"
+        RELEASES_URL = "https://github.com/adamdouglas82/iolite-Optimiser/releases"
+
+        IoLog.information("iolite Optimiser: check_for_updates called")
+        
+
+        self.btn_check_updates.setEnabled(False)
+        self.btn_check_updates.setText("Checking\u2026")
+
+        # Shared result container — written by the thread, read by the timer.
+        # Format: [(remote_tag, release_url, error_str_or_None)]
+        result_holder = []
+
+        def _fetch():
+            """Run in a daemon thread — never touches any Qt object."""
+            IoLog.information("iolite Optimiser: _fetch thread started")
+            print("iolite Optimiser: _fetch thread started")
+            try:
+                IoLog.information(f"iolite Optimiser: Opening URL: {GITHUB_API}")
+                
+                req = urllib.request.Request(
+                    GITHUB_API,
+                    headers={"Accept": "application/vnd.github+json",
+                             "User-Agent": f"iolite-Optimiser/{VERSION}"}
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    IoLog.information("iolite Optimiser: Response received, reading...")
+                    print("iolite Optimiser: Response received, reading...")
+                    raw = resp.read().decode()
+                IoLog.information(f"iolite Optimiser: Raw response length: {len(raw)} chars")
+                
+                payload = json.loads(raw)
+                remote_tag = payload.get("tag_name", "")
+                release_url = payload.get("html_url", RELEASES_URL)
+                IoLog.information(f"iolite Optimiser: Remote tag = {remote_tag}, writing to result_holder")
+                
+                result_holder.append((remote_tag, release_url, None))
+            except Exception as exc:
+                IoLog.error(f"iolite Optimiser: _fetch exception: {exc}")
+                print(f"iolite Optimiser: _fetch exception: {exc}")
+                print(traceback.format_exc())
+                result_holder.append((None, RELEASES_URL, str(exc)))
+
+        def _poll():
+            """Called on the main thread every 100 ms until a result arrives."""
+            if not result_holder:
+                return  # still waiting — timer will fire again
+            poll_timer.stop()
+            remote_tag, release_url, error = result_holder[0]
+            IoLog.information(f"iolite Optimiser: _poll got result — error={error}, tag={remote_tag}")
+            
+            _on_result(remote_tag, release_url, error)
+
+        def _on_result(remote_tag, release_url, error):
+            """Process the fetch result — runs on the Qt main thread."""
+            IoLog.information(f"iolite Optimiser: _on_result called — error={error}, tag={remote_tag}")
+            
+
+            self.btn_check_updates.setEnabled(True)
+            self.btn_check_updates.setText("Check for Updates")
+
+            if error:
+                QMessageBox.warning(
+                    self, "Update Check Failed",
+                    f"Could not check for updates.\n\nError: {error}\n\n"
+                    "Please check your internet connection."
+                )
+                return
+
+            # --- dev / unversioned build ---
+            if VERSION.lower() in ("dev", "", "unknown"):
+                IoLog.information(f"iolite Optimiser: dev build detected, latest remote = {remote_tag}")
+                
+                QMessageBox.information(
+                    self, "Development Build",
+                    f"You are running a development build.\n"
+                    f"The latest release on GitHub is {remote_tag}."
+                )
+                return
+
+            # --- compare versions ---
+            local_ver, local_pre = SettingsDialog._parse_version(VERSION)
+            remote_ver, remote_pre = SettingsDialog._parse_version(remote_tag)
+            IoLog.information(f"iolite Optimiser: local={local_ver} pre={local_pre}  remote={remote_ver} pre={remote_pre}")
+            
+
+            update_available = (
+                remote_ver > local_ver or
+                (remote_ver == local_ver and local_pre and not remote_pre)
+            )
+
+            if update_available:
+                reply = QMessageBox.question(
+                    self, "Update Available",
+                    f"A new version is available: {remote_tag}\n"
+                    f"You are running: {VERSION}\n\n"
+                    "Would you like to open the releases page?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply == QMessageBox.Yes:
+                    # Use Qt's native URL handler — webbrowser.open() crashes
+                    # iolite's embedded Python 3.13 via PyOS_AfterFork/ShellExecuteW
+                    QDesktopServices.openUrl(QUrl(release_url))
+            else:
+                QMessageBox.information(
+                    self, "Up to Date",
+                    f"You are running the latest version ({VERSION})."
+                )
+
+        # Start the background fetch
+        IoLog.information("iolite Optimiser: Starting background fetch thread")
+        
+        t = threading.Thread(target=_fetch, daemon=True)
+        t.start()
+        IoLog.information(f"iolite Optimiser: Thread started, is_alive={t.is_alive()}")
+        
+
+        # Poll for the result on the main thread every 100 ms
+        poll_timer = QTimer(self)
+        poll_timer.timeout.connect(_poll)
+        poll_timer.start(100)
 
 
 class PresetManagerDialog(QDialog):
@@ -1755,9 +1912,9 @@ class DataConfigDialog(QDialog):
             h_dwell = QHBoxLayout()
             h_dwell.addWidget(QLabel("Global Dwell Time (ms):"))
             self.spin_dwell = QDoubleSpinBox()
+            self.spin_dwell.setDecimals(3)
             self.spin_dwell.setRange(0.001, 10000)
             self.spin_dwell.setValue(detected_at if detected_at else 10.0)
-            self.spin_dwell.setDecimals(3)
             h_dwell.addWidget(self.spin_dwell)
             h_dwell.addStretch()
             layout.addLayout(h_dwell)
@@ -1782,9 +1939,9 @@ class DataConfigDialog(QDialog):
             l_global.setContentsMargins(0,0,0,0)
             l_global.addWidget(QLabel("Global Dwell Time (ms):"))
             self.spin_dwell = QDoubleSpinBox()
+            self.spin_dwell.setDecimals(3)
             self.spin_dwell.setRange(0.001, 10000)
             self.spin_dwell.setValue(detected_at if detected_at else 10.0)
-            self.spin_dwell.setDecimals(3)
             l_global.addWidget(self.spin_dwell)
             l_global.addStretch()
             self.stack.addWidget(self.page_global) # Index 0
@@ -1804,9 +1961,9 @@ class DataConfigDialog(QDialog):
             for i, ch_name in enumerate(channels):
                 self.table.setItem(i, 0, QTableWidgetItem(ch_name))
                 sp = QDoubleSpinBox()
+                sp.setDecimals(3)
                 sp.setRange(0.001, 10000)
                 sp.setValue(detected_at if detected_at else 10.0)
-                sp.setDecimals(3)
                 self.table.setCellWidget(i, 1, sp)
                 self.spin_map[ch_name] = sp
                 
@@ -2433,12 +2590,14 @@ class ioliteOptimiser(QWidget):
         self.spin_spr_prom.setDecimals(0)
         self.spin_spr_prom.setValue(100.0)
         self.spin_spr_prom.setSingleStep(100.0)
+        self.spin_spr_prom.setToolTip("Minimum peak height. Prevents detecting noise as peaks. Auto sets to 10 % of maximum data point.")
         self.spin_spr_prom.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.spin_spr_prom.valueChanged.connect(self._on_spr_prom_changed)
         l_prom.addWidget(self.spin_spr_prom)
         
         self.chk_spr_auto_prom = QCheckBox("Auto", self)
         self.chk_spr_auto_prom.setChecked(True)
+        self.chk_spr_auto_prom.setToolTip("Minimum peak height. Prevents detecting noise as peaks. Auto sets to 10 % of maximum data point.")
         self.chk_spr_auto_prom.toggled.connect(self._on_spr_auto_prom_toggled)
         l_prom.addWidget(self.chk_spr_auto_prom)
         # self.spin_spr_prom.setEnabled(False) # Removed: User wants always clickable
@@ -2465,8 +2624,8 @@ class ioliteOptimiser(QWidget):
         self.spin_spr_baseline_window.valueChanged.connect(self.save_persistent_settings)
         
         lbl_baseline_window = QLabel("Baseline Window:")
-        grid_det.addWidget(lbl_baseline_window, 3, 0)
-        grid_det.addWidget(self.spin_spr_baseline_window, 3, 1)
+        grid_det.addWidget(lbl_baseline_window, 6, 0)
+        grid_det.addWidget(self.spin_spr_baseline_window, 6, 1)
         
         # Hide the baseline controls per user request, but keep the logic
         lbl_baseline_window.hide()
@@ -3599,7 +3758,7 @@ class ioliteOptimiser(QWidget):
         # Save custom prominence for this channel
         curr_iso = self._get(self.cmb_spr_iso, 'currentText')
         if curr_iso and hasattr(self, 'spr_channel_prominence'):
-             self.spr_channel_prominence[curr_iso] = self.spin_spr_prom.value()
+             self.spr_channel_prominence[curr_iso] = self._get(self.spin_spr_prom, 'value')
              self.spr_channel_auto_prom[curr_iso] = False
              
         # 1. Uncheck the Auto box if it's currently checked
@@ -4914,7 +5073,7 @@ class ioliteOptimiser(QWidget):
         if self.allowed_dwells:
             status = f"Allowed Dwells: {', '.join(map(str, self.allowed_dwells))} ms"
         else:
-            status = f"Minimum Dwell Time: {self.min_dwell} ms | Precision: {self.precision} ms"
+            status = f"Minimum Dwell Time: {self.min_dwell} ms | Resolution: {self.precision} ms"
             
         if getattr(self, 'icp_tech', '') == "TOF":
             margin = self._get(self.spin_tof_margin, 'value') if hasattr(self, 'spin_tof_margin') else getattr(self, 'persistent_settings', {}).get('tof_margin', 10.0)
@@ -5006,7 +5165,7 @@ class ioliteOptimiser(QWidget):
         else:
             status = f"Max Rep-Rate: {self.max_rr} Hz"
             
-        status += f" | Precision: {getattr(self, 'laser_rr_prec', 1.0):g} Hz"
+        status += f" | Resolution: {getattr(self, 'laser_rr_prec', 1.0):g} Hz"
         status += f"\nMax Speed: {self.max_speed} µm s⁻¹"
         self.lbl_laser_status.setText(status)
 
@@ -5128,7 +5287,7 @@ class ioliteOptimiser(QWidget):
         
         # 1. Dialog Labels (Detailed)
         if hasattr(self, 'lbl_icp_status'):
-            icp_constraints = f"Allowed Dwell times: {', '.join(map(str, self.allowed_dwells))} ms" if self.allowed_dwells else f"Minimum Dwell Time: {self.min_dwell} ms | Precision: {self.precision} ms"
+            icp_constraints = f"Allowed Dwell times: {', '.join(map(str, self.allowed_dwells))} ms" if self.allowed_dwells else f"Minimum Dwell Time: {self.min_dwell} ms | Resolution: {self.precision} ms"
             if self.icp_tech == "TOF":
                 margin = self._get(self.spin_tof_margin, 'value') if hasattr(self, 'spin_tof_margin') else getattr(self, 'persistent_settings', {}).get('tof_margin', 10.0)
                 icp_constraints += f" | Margin: {margin:g} %"
@@ -5146,7 +5305,7 @@ class ioliteOptimiser(QWidget):
             if self.allowed_dwells:
                 icp_constraints = f"Allowed Dwell Times:<br/>{', '.join(map(str, self.allowed_dwells))} ms"
             else:
-                icp_constraints = f"Minimum Dwell Time: {self.min_dwell} ms<br/>Dwell Precision: {self.precision} ms"
+                icp_constraints = f"Minimum Dwell Time: {self.min_dwell} ms<br/>Dwell Resolution: {self.precision} ms"
             
             if self.icp_tech == "TOF":
                 margin = self._get(self.spin_tof_margin, 'value') if hasattr(self, 'spin_tof_margin') else getattr(self, 'persistent_settings', {}).get('tof_margin', 10.0)
@@ -5157,7 +5316,7 @@ class ioliteOptimiser(QWidget):
             las_header = "<b style='font-size: 1.1em;'>Laser</b>"
             las_details = f"Platform: <b>{las_mfr}</b><br/>Laser Source: <b>{las_mod}</b><br/>Cell Type: <b>{cell}</b>"
             rr_info = f"Allowed Rep-Rates: {', '.join(map(str, self.allowed_rr))} Hz" if self.allowed_rr else f"Maximum Rep-Rate: {self.max_rr} Hz"
-            las_constraints = f"{rr_info}<br/>Rep-Rate Precision: {self.laser_rr_prec:g} Hz<br/>Max Stage Speed: {self.max_speed} µm s⁻¹"
+            las_constraints = f"{rr_info}<br/>Rep-Rate Resolution: {self.laser_rr_prec:g} Hz<br/>Max Stage Speed: {self.max_speed} µm s⁻¹"
             las_full = f"{las_header}<br/>{las_details}<br/><span style='font-size: 11px;'><b><i>{las_constraints}</i></b></span>"
             
             self.lbl_icp_sum.setText(icp_full)
@@ -5204,7 +5363,7 @@ class ioliteOptimiser(QWidget):
         if hasattr(self, 'spin_dosage'):
             if checked:
                 self._block_signals(self.spin_dosage, True)
-                self.spin_dosage.setValue(self.spin_pulses.value())
+                self.spin_dosage.setValue(self._get(self.spin_pulses, 'value'))
                 self._block_signals(self.spin_dosage, False)
         self._on_ui_change()
 
@@ -5748,15 +5907,44 @@ class ioliteOptimiser(QWidget):
         norm_file_path = os.path.normpath(file_path)
         
         try:
+            # Record loaded files before importing
+            files_before = data.importedFiles()
+            existing_paths = {f.filePath().lower() for f in files_before}
+            
             res = data.importData(norm_file_path)
-            if res:
-                self.refresh_data(tab=tab, file_path=norm_file_path)
+            
+            # Check loaded files after importing
+            files_after = data.importedFiles()
+            
+            # Find the new file added during this import (if any)
+            newly_imported_file = None
+            for f in files_after:
+                if f.filePath().lower() not in existing_paths:
+                    newly_imported_file = f
+                    break
+            
+            # Resolve target path using the newly added file or fallback to match name of existing file
+            target_path = None
+            if newly_imported_file:
+                target_path = newly_imported_file.filePath()
+            else:
+                target_base = os.path.basename(norm_file_path.replace('\\', '/')).lower()
+                for f in files_after:
+                    f_path = f.filePath().replace('\\', '/').lower()
+                    f_base = os.path.basename(f_path)
+                    if f_path == norm_file_path.lower() or f_base == target_base:
+                        target_path = f.filePath()
+                        break
+            
+            if res or target_path is not None:
+                # Use the actual internal path recognized by iolite (e.g. Mac path embedded inside io4)
+                self.refresh_data(tab=tab, file_path=target_path or norm_file_path)
                 try:
-                    data.unloadFile(norm_file_path)
+                    data.unloadFile(target_path or norm_file_path)
                 except Exception as ue:
                     IoLog.warning(f"iolite Optimiser: Failed to unload file: {ue}")
             else:
-                IoLog.warning(f"iolite Optimiser: Import returned False or was cancelled for {norm_file_path}")
+                IoLog.warning(f"iolite Optimiser: Import returned False and not found in imported list for {norm_file_path}")
                 log_err = self.check_timestamp_error_in_log()
                 msg = "No file was imported.\n\nPlease check if the time stamp format in the file is set correctly in iolite."
                 if log_err:
@@ -7035,12 +7223,13 @@ class ioliteOptimiser(QWidget):
             
             if file_path:
                 norm_target = os.path.normpath(file_path).lower()
+                target_base = os.path.basename(file_path.replace('\\', '/')).lower()
                 for f in files:
                     try:
                         f_path = os.path.normpath(f.filePath()).lower()
+                        f_base = os.path.basename(f.filePath().replace('\\', '/')).lower()
                         f_name = os.path.normpath(f.fileName()).lower()
-                        target_name = os.path.normpath(os.path.basename(file_path)).lower()
-                        if f_path == norm_target or f_name == target_name:
+                        if f_path == norm_target or f_name == target_base or (f_base == target_base and f_base != ""):
                             target_file = f
                             break
                     except Exception:
@@ -7110,25 +7299,20 @@ class ioliteOptimiser(QWidget):
                 # Unified Dialog: Channel selection + Global dwell
                 det_at = self.spr_detected_at_ms if tab == "spr" else self.detected_at_ms
                 
-                if tab == "spr":
-                    # For SPR tab, we don't need to prompt/show the dialog.
-                    # Just default all dwells to 10.0 ms.
-                    self._preconfigured_dwells = {ch_name: 10.0 for ch_name in ch_names}
-                else:
-                    dlg = DataConfigDialog(ch_names, detected_at=det_at, is_tof=True, parent=self)
-                    if dlg.exec_():
-                        selected_names = set(dlg.result_channels)
-                        channels = [ch for ch in channels if ch.name in selected_names]
-                        
-                        # Store pre-configured dwells (resolve_dwell_times will use these)
-                        self._preconfigured_dwells = dlg.result_dwells.copy()
-                        
-                        if not channels:
-                            IoLog.warning("iolite Optimiser: No channels selected. Aborting load.")
-                            return None, {}
-                    else:
-                        IoLog.information("iolite Optimiser: Configuration cancelled. Aborting load.")
+                dlg = DataConfigDialog(ch_names, detected_at=det_at, is_tof=True, parent=self)
+                if dlg.exec_():
+                    selected_names = set(dlg.result_channels)
+                    channels = [ch for ch in channels if ch.name in selected_names]
+                    
+                    # Store pre-configured dwells (resolve_dwell_times will use these)
+                    self._preconfigured_dwells = dlg.result_dwells.copy()
+                    
+                    if not channels:
+                        IoLog.warning("iolite Optimiser: No channels selected. Aborting load.")
                         return None, {}
+                else:
+                    IoLog.information("iolite Optimiser: Configuration cancelled. Aborting load.")
+                    return None, {}
             else:
                 self._preconfigured_dwells = {}  # Reset for non-TOF data
             
@@ -8481,6 +8665,12 @@ class ioliteOptimiser(QWidget):
         self.spin_pulse_rr.blockSignals(False)
 
     def run_pulse_simulation(self):
+        # Guard: Only run if the Pulse Train tab (index 2) is currently active.
+        # This prevents the simulation from executing when triggered by a background
+        # event (e.g. instrument change in settings dialog) while another tab is open.
+        if hasattr(self, 'tabs') and self.tabs.currentIndex != 2:
+            return
+        
         try:
             IoLog.information("iolite Optimiser: run_pulse_simulation called")
             # 1. Gather Inputs
