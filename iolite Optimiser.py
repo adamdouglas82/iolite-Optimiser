@@ -848,7 +848,7 @@ class Logic:
         ss_max = inputs['max_speed_um_s']
         is_mc = inputs['icp_technology'] == "Multi-Collector"
         valid_times_s = [d/1000.0 for d in (inputs.get('allowed_dwells') or [])]
-        p_s = inputs['precision_ms'] / 1000.0
+        p_s = max(1e-9, inputs.get('precision_ms', 0.1) / 1000.0)
         strategy = inputs.get('sync_strategy', 'Adaptive Integer Sync (Auto)')
         is_oversampling = "Oversampling" in strategy
 
@@ -1094,7 +1094,7 @@ class Logic:
             
             # Hardware resolution constants (always needed)
             at_hw_min_ms = inputs['min_dwell_ms'] + (overhead_s * 1000.0)
-            at_res_ms    = inputs.get('min_dwell_ms', 0.1)
+            at_res_ms    = max(1e-6, inputs.get('precision_ms', 0.1))
             washout_ms   = inputs.get('washout_ms', 30.0)
             allowed_rr   = inputs.get('allowed_rr', None)
 
@@ -1579,7 +1579,7 @@ class SettingsDialog(QDialog):
         self.setWindowTitle("Hardware Configuration")
         # Fixed size: Compacted width and stable height (Restored to 480, height 500)
         self.main_layout = QVBoxLayout(self)
-        self.setFixedSize(480, 500)
+        self.setFixedWidth(480)
         self.main_layout.setContentsMargins(10, 10, 10, 10)
         self.main_layout.setSpacing(5)
 
@@ -4250,7 +4250,7 @@ class ioliteOptimiser(QWidget):
         
         self.lbl_cust_min = QLabel("Minimum Dwell Time (ms):"); self.lbl_cust_min.setFixedWidth(lbl_w)
         self.spin_cust_min = QDoubleSpinBox()
-        self.spin_cust_min.setRange(0, 100); self.spin_cust_min.setFixedWidth(100); self.spin_cust_min.setDecimals(4)
+        self.spin_cust_min.setRange(0.0001, 100); self.spin_cust_min.setFixedWidth(100); self.spin_cust_min.setDecimals(4)
         self.spin_cust_min.setValue(self.persistent_settings.get('cust_min', 0.1))
         self.form_icp.addRow(self.lbl_cust_min, self.spin_cust_min)
         
@@ -5212,6 +5212,9 @@ class ioliteOptimiser(QWidget):
         self.lbl_laser_status.setText(status)
 
     def show_settings_dialog(self):
+        self._update_custom_visibility()
+        if hasattr(self, 'settings_dlg'):
+            self.settings_dlg.adjustSize()
         self.settings_dlg.exec_()
         # Apply any plot-related settings that changed (fresh, don't preserve visibility)
         if hasattr(self, 'opt_df') and self.opt_df is not None:
@@ -5277,6 +5280,9 @@ class ioliteOptimiser(QWidget):
             # Stage Speed (Only if Custom Stage)
             self.lbl_cust_speed.setVisible(is_custom_stage)
             self.spin_cust_speed.setVisible(is_custom_stage)
+            
+        if hasattr(self, 'settings_dlg'):
+            self.settings_dlg.adjustSize()
 
     def _update_hw_summary(self):
         icp_mfr = self._get(self.cmb_mfr, 'currentText')
@@ -6196,7 +6202,12 @@ class ioliteOptimiser(QWidget):
         b_in = 0.55
         
         # Dynamic row-aware top padding (Inches)
-        rows = getattr(self, 'last_opt_rows', 1) if canvas == getattr(self, 'canvas', None) else getattr(self, 'last_spr_rows', 1)
+        if canvas == getattr(self, 'canvas', None):
+            rows = getattr(self, 'last_opt_rows', 1)
+        elif canvas == getattr(self, 'pulse_canvas', None):
+            rows = getattr(self, 'last_pulse_rows', 1)
+        else:
+            rows = getattr(self, 'last_spr_rows', 1)
         # Base 0.25 in + 0.20 in per row (~24px base + 19px per row at 96 DPI) - Tighter as requested
         t_in = 0.25 + (rows * 0.20)
         
@@ -6289,7 +6300,12 @@ class ioliteOptimiser(QWidget):
         
         # Recalculate defaults if not passed (similar to _on_plot_resize logic)
         if not override_margins:
-            rows = getattr(self, 'last_opt_rows', 1) if canvas == getattr(self, 'canvas', None) else getattr(self, 'last_spr_rows', 1)
+            if canvas == getattr(self, 'canvas', None):
+                rows = getattr(self, 'last_opt_rows', 1)
+            elif canvas == getattr(self, 'pulse_canvas', None):
+                rows = getattr(self, 'last_pulse_rows', 1)
+            else:
+                rows = getattr(self, 'last_spr_rows', 1)
             # Match tuned inch-based logic
             t_px = (0.25 + (rows * 0.20)) * fig.dpi
             b_px = 0.55 * fig.dpi
@@ -6789,15 +6805,29 @@ class ioliteOptimiser(QWidget):
             canvas = mouse.canvas
             if canvas is None: return
 
-            # 1. Identify context (Main or SPR)
+            # 1. Identify context (Main, SPR, or Pulse Train Simulator)
             is_spr = (hasattr(self, 'spr_canvas') and canvas == self.spr_canvas)
-            fig = getattr(self, 'spr_figure', None) if is_spr else getattr(self, 'figure', None)
+            is_pulse = (hasattr(self, 'pulse_canvas') and canvas == self.pulse_canvas)
+            
+            if is_spr:
+                fig = getattr(self, 'spr_figure', None)
+                l_frame = getattr(self, 'spr_legend_frame', None)
+                l_map = getattr(self, 'spr_map_legend_to_line', {})
+                l_chk_rescale = getattr(self, 'chk_rescale_spr', None)
+            elif is_pulse:
+                fig = getattr(self, 'pulse_figure', None)
+                l_frame = getattr(self, 'pulse_legend_frame', None)
+                l_map = getattr(self, 'pulse_map_legend_to_line', {})
+                l_chk_rescale = getattr(self, 'chk_rescale_pulse', None)
+            else:
+                fig = getattr(self, 'figure', None)
+                l_frame = getattr(self, 'legend_frame', None)
+                l_map = getattr(self, 'map_legend_to_line', {})
+                l_chk_rescale = getattr(self, 'chk_rescale', None)
+                
             if fig is None or not fig.axes: return
             
             ax = fig.axes[0]
-            l_frame = getattr(self, 'spr_legend_frame', None) if is_spr else getattr(self, 'legend_frame', None)
-            l_map = getattr(self, 'spr_map_legend_to_line', {}) if is_spr else getattr(self, 'map_legend_to_line', {})
-            l_chk_rescale = getattr(self, 'chk_rescale_spr', None) if is_spr else getattr(self, 'chk_rescale', None)
 
             # Helper to get all artists (lines + collections)
             all_artists = list(ax.lines) + list(ax.collections)
@@ -6820,6 +6850,9 @@ class ioliteOptimiser(QWidget):
                             # Force visual refresh by toggling visibility
                             item.set_visible(False)
                             item.set_visible(True)
+                        if is_pulse:
+                            if hasattr(self, 'pulse_hidden_channels'):
+                                self.pulse_hidden_channels.clear()
                         if l_chk_rescale and self._get(l_chk_rescale, 'isChecked'):
                             self.rescale_to_visible(ax=ax, canvas=canvas)
                         canvas.draw()
@@ -6900,6 +6933,18 @@ class ioliteOptimiser(QWidget):
             for t in target_list:
                 t.set_visible(new_vis)
             
+            # If we toggle a pulse simulator line, update self.pulse_hidden_channels
+            is_pulse = (hasattr(self, 'pulse_canvas') and canvas == self.pulse_canvas)
+            if is_pulse:
+                if not hasattr(self, 'pulse_hidden_channels'):
+                    self.pulse_hidden_channels = set()
+                for line in target_list:
+                    label = line.get_label()
+                    if new_vis:
+                        self.pulse_hidden_channels.discard(label)
+                    else:
+                        self.pulse_hidden_channels.add(label)
+            
             # Sync alpha for all legend artists mapping to THIS underlying line
             alpha = 1.0 if new_vis else 0.2
             for m_artist, m_spec in l_map.items():
@@ -6944,6 +6989,18 @@ class ioliteOptimiser(QWidget):
             for line in manageable_static:
                 line.set_visible(True)
             
+            # If we isolate a pulse simulator line, update self.pulse_hidden_channels
+            is_pulse = (hasattr(self, 'pulse_canvas') and canvas == self.pulse_canvas)
+            if is_pulse:
+                if not hasattr(self, 'pulse_hidden_channels'):
+                    self.pulse_hidden_channels = set()
+                for line in manageable_hidable:
+                    label = line.get_label()
+                    if line in target_list:
+                        self.pulse_hidden_channels.discard(label)
+                    else:
+                        self.pulse_hidden_channels.add(label)
+
             # Sync Legend Alphas
             for m_artist, m_spec in l_map.items():
                 m_obj, m_hidable = m_spec
@@ -8662,9 +8719,7 @@ class ioliteOptimiser(QWidget):
         self.pulse_canvas.mpl_connect('button_press_event', self.on_press)
         self.pulse_canvas.mpl_connect('button_release_event', self.on_release)
         self.pulse_canvas.mpl_connect('motion_notify_event', self.on_drag)
-        self.pulse_canvas.mpl_connect('pick_event', self.on_pulse_pick)
-        
-        self.pulse_legend_map = {} # Mapping for interactive legend
+        self.pulse_canvas.mpl_connect('pick_event', self.on_pick)
         
         right_layout.addWidget(self.pulse_canvas, 1) # Set stretch to 1 to give plot more space
         
@@ -9128,10 +9183,17 @@ class ioliteOptimiser(QWidget):
             else:
                 ax.set_ylabel("Normalized Intensity" if norm else "Intensity", color=fg_color)
             
-            # Legend with interactivity
-            self.pulse_legend_map = {}
             handles, labels = ax.get_legend_handles_labels()
-            
+
+            # Dynamic row-aware top padding calculation
+            n_items = len(handles)
+            if n_items > 0:
+                ncols = min(10, n_items)
+                nrows = math.ceil(n_items / ncols)
+                self.last_pulse_rows = nrows
+                self._on_plot_resize(type('obj', (object,), {'canvas': self.pulse_canvas}))
+
+            # Legend with interactivity
             import matplotlib.transforms as mtransforms
             leg = ax.legend(handles, labels, loc='lower center', 
                             bbox_to_anchor=(0.5, 1.0), 
@@ -9140,15 +9202,20 @@ class ioliteOptimiser(QWidget):
                             handlelength=1.5, handletextpad=0.7, columnspacing=1.5)
             
             leg.get_frame().set_alpha(0.0) # Transparent frame
+            leg.get_frame().set_picker(5)
+            self.pulse_legend_frame = leg.get_frame()
             
-            for legline, handle in zip(leg.get_lines(), handles):
-                legline.set_picker(5) # 5 pts tolerance
-                self.pulse_legend_map[legline] = handle
+            self.pulse_map_legend_to_line = {}
+            for legline, legtext, handle in zip(leg.get_lines(), leg.get_texts(), handles):
+                legline.set_picker(5)
+                legtext.set_picker(5)
+                self.pulse_map_legend_to_line[legline] = (handle, True)
+                self.pulse_map_legend_to_line[legtext] = (handle, True)
+                # Sync label colour and initial transparency based on visibility
+                legtext.set_color(fg_color)
                 if not handle.get_visible():
                     legline.set_alpha(0.2)
-            
-            for text in leg.get_texts():
-                text.set_color(fg_color)
+                    legtext.set_alpha(0.2)
 
             
             ax.tick_params(colors=fg_color)
@@ -9265,30 +9332,7 @@ class ioliteOptimiser(QWidget):
 
 
 
-    def on_pulse_pick(self, event):
-        """
-        Handles click events on the pulse plot legend to toggle trace visibility.
-        """
-        legline = event.artist
-        origline = self.pulse_legend_map.get(legline)
-        
-        if origline:
-            vis = not origline.get_visible()
-            origline.set_visible(vis)
-            
-            # Dim the legend line to indicate hidden state
-            legline.set_alpha(1.0 if vis else 0.2)
-            
-            # Track hidden state by label
-            label = origline.get_label()
-            if not hasattr(self, 'pulse_hidden_channels'):
-                self.pulse_hidden_channels = set()
-            if vis:
-                self.pulse_hidden_channels.discard(label)
-            else:
-                self.pulse_hidden_channels.add(label)
-                
-            self.pulse_canvas.draw()
+
 
     def _on_pulse_rescale_toggled(self, checked):
         if checked:

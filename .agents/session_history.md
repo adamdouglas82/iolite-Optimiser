@@ -4,6 +4,20 @@ This file tracks technical notes, design decisions, and environment quirks from 
 
 ---
 
+## Session: Pulse Train Simulator Legend and Scaling Alignment (July 2026)
+
+* **Conversation ID**: `9691bbdc-1788-4c84-8ebf-e5a1a1ae9d99`
+* **Key Tasks & Technical Quirks**:
+  - **Feature**: Aligned the **Pulse Train Simulator** (Pulse Logger) plot legend click interactions and dynamic row-aware margin scaling with the main **Optimiser** plot.
+  - **Unified picker (`on_pick`)**: Connected `pulse_canvas` picker events to the unified `on_pick` handler. Supports single-click toggles, double-click isolations, double-click background restores, and auto-rescale sync.
+  - **Dynamic Margin Scaling**: Updated `_on_plot_resize` and `_update_smart_margins` to query `last_pulse_rows` when target canvas is `pulse_canvas`. Automatically resizes (scales down) the plot to fit the legend as items/rows grow.
+  - **Simulator Legend Reconstruction**: Rebuilt interactive legend mapping in `update_pulse_plot`. Sets pickers on both legend lines and text labels and populates `pulse_map_legend_to_line`. Tracks hidden channels in `pulse_hidden_channels` to preserve selections.
+  - **ZeroDivisionError Fix**: Fixed ZeroDivisionError by setting custom min dwell time spinner to non-zero range `[0.0001, 100]` and protecting division by zero with `max(1e-9, ...)` and `max(1e-6, ...)` guards inside `calculate_constrained_at`.
+  - **Dynamic Settings Dialog Sizing**: Replaced `self.setFixedSize(480, 500)` with `self.setFixedWidth(480)` in SettingsDialog, and triggered `self.settings_dlg.adjustSize()` on visibility changes. This expands/shrinks the window height dynamically when custom controls appear.
+  - **Cleanup**: Removed the redundant `on_pulse_pick` method.
+
+---
+
 ## Session: Adding GitHub Repo and Report Issue Buttons (July 2026)
 
 * **Conversation ID**: `9691bbdc-1788-4c84-8ebf-e5a1a1ae9d99`
