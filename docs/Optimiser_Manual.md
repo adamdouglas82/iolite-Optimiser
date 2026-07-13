@@ -17,7 +17,7 @@ The **Optimiser Tab** determines the best combination of **Spot Size**, **Laser 
 
 #### **Hardware Configuration Dialog**
 
-Accessible via the "Settings" button. This establishes the physical limits of your system. A version label (e.g. `Version: dev`) is displayed at the bottom-left of this dialog, alongside a **Check for Updates** button to check for newer plugin versions on GitHub.
+Accessible via the "Settings" button. This establishes the physical limits of your system. A version label (e.g. `Version: dev`) is displayed at the bottom-left of this dialog, alongside **GitHub Repo**, **Report Issue**, and **Check for Updates** buttons to interact with the repository on GitHub.
 
 - **ICP-MS Hardware**:
   - **Manufacturer/Model**: Presets minimum dwell times and switching speeds.
