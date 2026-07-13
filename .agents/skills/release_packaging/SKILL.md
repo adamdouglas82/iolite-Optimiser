@@ -11,7 +11,7 @@ When this skill is triggered, you must guide the release process systematically 
 
 ## 1. Pre-Release Verification & Document Compilation
 
-Before tagging any commit or pushing a release:
+Before tagging any commit or pushing a release (compilation of PDF manuals by running `convert_docs.py` should only be performed immediately prior to commits, pushes, or releases to avoid redundant compilation of binary PDF files during development):
 
 1. **Audit UI Changes**: Review the Git commits since the last release tag (using `git log v<last_version>..HEAD --oneline`) to identify any new features, settings, options, or UI layout changes.
 2. **Verify & Update Documentation**:

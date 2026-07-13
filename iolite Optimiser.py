@@ -2372,13 +2372,18 @@ class ioliteOptimiser(QWidget):
         if text is None:
             # Determine which combo sent the signal or default to main
             sender = self.sender()
-            if sender == getattr(self, 'combo_theme_spr', None):
+            if sender is not None and sender == getattr(self, 'combo_theme_spr', None):
                 text = self._get(self.combo_theme_spr, 'currentText')
+            elif sender is not None and sender == getattr(self, 'combo_theme_pulse', None):
+                text = self._get(self.combo_theme_pulse, 'currentText')
             else:
                 text = self._get(self.combo_theme, 'currentText')
         
-        # Sync both combos
-        for combo_attr in ['combo_theme', 'combo_theme_spr']:
+        if not isinstance(text, str):
+            text = self.persistent_settings.get('theme', 'Auto')
+        
+        # Sync all combos
+        for combo_attr in ['combo_theme', 'combo_theme_spr', 'combo_theme_pulse']:
             if hasattr(self, combo_attr):
                 cb = getattr(self, combo_attr)
                 if self._get(cb, 'currentText') != text:
@@ -2411,7 +2416,8 @@ class ioliteOptimiser(QWidget):
             # below with the is_theme_change flag. Calling it here without the flag wipes the zoom.
             for fig_attr, canvas_attr, update_func in [
                 ('figure', 'canvas', None), # Main Optimiser Figure - Handled manually below
-                ('spr_figure', 'spr_canvas', self.run_spr_analysis)
+                ('spr_figure', 'spr_canvas', self.run_spr_analysis),
+                ('pulse_figure', 'pulse_canvas', self.update_pulse_plot)
             ]:
                 if hasattr(self, fig_attr):
                     fig = getattr(self, fig_attr)
@@ -8441,8 +8447,8 @@ class ioliteOptimiser(QWidget):
                 dt_ms = max(min_dwell, round(dt_raw / precision) * precision)
             target_cycle_time_ms = dt_ms * num_analytes
             
-            # Rep-Rate dynamic sweep at 5.0% RSD oversampling level
-            target_rsd = 5.0
+            # Rep-Rate dynamic sweep at 3.0% RSD oversampling level
+            target_rsd = 3.0
             allowed_rr = getattr(self, 'allowed_rr', None)
             max_allowed_rr = getattr(self, 'max_rr', 10000.0)
             if hasattr(self, 'spin_init_rr'):
@@ -9043,21 +9049,15 @@ class ioliteOptimiser(QWidget):
         
         try:
             # Theme Handling
-            is_dark = self.system_is_dark
-            try:
-                theme_sel = self._get(self.combo_theme_pulse, 'currentText')
-                if theme_sel == "Dark": is_dark = True
-                elif theme_sel == "Light": is_dark = False
-            except: pass
-            
-            bg_color = '#2b2b2b' if is_dark else 'white'
-            fg_color = 'white' if is_dark else 'black'
+            bg_color = plt.rcParams['figure.facecolor']
+            fg_color = plt.rcParams['axes.labelcolor']
+            ax_color = plt.rcParams['axes.facecolor']
             
             self.pulse_figure.clear()
             self.pulse_figure.patch.set_facecolor(bg_color)
             
             ax = self.pulse_figure.add_subplot(111)
-            ax.set_facecolor(bg_color)
+            ax.set_facecolor(ax_color)
             
             norm = self.chk_norm_pulse.isChecked()
             
@@ -9179,9 +9179,9 @@ class ioliteOptimiser(QWidget):
                     ax.autoscale(False)
                     ax.set_ylim(y_bottom, y_top)
 
-                ax.set_ylabel("Normalized Intensity (Signal Overlay)", color=fg_color)
+                ax.set_ylabel("Normalised Intensity (Signal Overlay)", color=fg_color)
             else:
-                ax.set_ylabel("Normalized Intensity" if norm else "Intensity", color=fg_color)
+                ax.set_ylabel("Normalised Intensity" if norm else "Intensity", color=fg_color)
             
             handles, labels = ax.get_legend_handles_labels()
 

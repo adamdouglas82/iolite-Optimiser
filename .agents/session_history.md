@@ -8,13 +8,15 @@ This file tracks technical notes, design decisions, and environment quirks from 
 
 * **Conversation ID**: `9691bbdc-1788-4c84-8ebf-e5a1a1ae9d99`
 * **Key Tasks & Technical Quirks**:
-  - **Feature**: Aligned the **Pulse Train Simulator** (Pulse Logger) plot legend click interactions and dynamic row-aware margin scaling with the main **Optimiser** plot.
-  - **Unified picker (`on_pick`)**: Connected `pulse_canvas` picker events to the unified `on_pick` handler. Supports single-click toggles, double-click isolations, double-click background restores, and auto-rescale sync.
-  - **Dynamic Margin Scaling**: Updated `_on_plot_resize` and `_update_smart_margins` to query `last_pulse_rows` when target canvas is `pulse_canvas`. Automatically resizes (scales down) the plot to fit the legend as items/rows grow.
-  - **Simulator Legend Reconstruction**: Rebuilt interactive legend mapping in `update_pulse_plot`. Sets pickers on both legend lines and text labels and populates `pulse_map_legend_to_line`. Tracks hidden channels in `pulse_hidden_channels` to preserve selections.
-  - **ZeroDivisionError Fix**: Fixed ZeroDivisionError by setting custom min dwell time spinner to non-zero range `[0.0001, 100]` and protecting division by zero with `max(1e-9, ...)` and `max(1e-6, ...)` guards inside `calculate_constrained_at`.
-  - **Dynamic Settings Dialog Sizing**: Replaced `self.setFixedSize(480, 500)` with `self.setFixedWidth(480)` in SettingsDialog, and triggered `self.settings_dlg.adjustSize()` on visibility changes. This expands/shrinks the window height dynamically when custom controls appear.
-  - **Cleanup**: Removed the redundant `on_pulse_pick` method.
+  * **Feature**: Aligned the **Pulse Train Simulator** (Pulse Logger) plot legend click interactions and dynamic row-aware margin scaling with the main **Optimiser** plot.
+  * **Unified picker (`on_pick`)**: Connected `pulse_canvas` picker events to the unified `on_pick` handler. Supports single-click toggles, double-click isolations, double-click background restores, and auto-rescale sync.
+  * **Dynamic Margin Scaling**: Updated `_on_plot_resize` and `_update_smart_margins` to query `last_pulse_rows` when target canvas is `pulse_canvas`. Automatically resizes (scales down) the plot to fit the legend as items/rows grow.
+  * **Simulator Legend Reconstruction**: Rebuilt interactive legend mapping in `update_pulse_plot`. Sets pickers on both legend lines and text labels and populates `pulse_map_legend_to_line`. Tracks hidden channels in `pulse_hidden_channels` to preserve selections.
+  * **ZeroDivisionError Fix**: Fixed ZeroDivisionError by setting custom min dwell time spinner to non-zero range `[0.0001, 100]` and protecting division by zero with `max(1e-9, ...)` and `max(1e-6, ...)` guards inside `calculate_constrained_at`.
+  * **Dynamic Settings Dialog Sizing**: Replaced `self.setFixedSize(480, 500)` with `self.setFixedWidth(480)` in SettingsDialog, and triggered `self.settings_dlg.adjustSize()` on visibility changes. This expands/shrinks the window height dynamically when custom controls appear.
+  * **Theme & Label Alignment (Pulse Plot)**: Synchronised theme selector (`combo_theme_pulse`) inside `apply_theme` and enabled dynamic plot redrawing upon theme swaps. Cleaned up hardcoded color mappings in `update_pulse_plot` to load from `plt.rcParams` and localised label spellings to British English (`Normalised`).
+  * **Startup Crash Fix**: Fixed a critical startup crash during early theme initialization when `self.sender()` is `None` incorrectly matching the uninitialized `combo_theme_pulse` (evaluating `None == None`). Guarded checks with `sender is not None` and added fallback defaults for non-string values.
+  * **Cleanup**: Removed the redundant `on_pulse_pick` method.
 
 ---
 
@@ -22,23 +24,23 @@ This file tracks technical notes, design decisions, and environment quirks from 
 
 * **Conversation ID**: `9691bbdc-1788-4c84-8ebf-e5a1a1ae9d99`
 * **Key Tasks & Technical Quirks**:
-  - **Feature**: Added **GitHub Repo** and **Report Issue** buttons to the bottom of the Hardware Configuration (Settings) dialog.
-  - **Layout & Sizing**: Restored the `SettingsDialog` width to its original `480` (height `500`). Implemented a two-row stacked layout at the bottom: Row 1 containing the GitHub utility buttons, and Row 2 containing the version label, updater, and close buttons. Set all four buttons to a matching fixed width of `120px` for symmetric alignment.
-  - **Qt URL Handling**: Used native Qt `QDesktopServices.openUrl(QUrl(url))` for browser redirection to align with iolite's embedded Python 3.13 event loop safety.
-  - **Focus & Aesthetics**: Set `setFocusPolicy(Qt.NoFocus)` on all three utility buttons to prevent distracting automatic focus shifts/highlights (e.g., when the check updates button disables/enables or when buttons are clicked).
-  - **Instrument & Laser Specs**:
-    - Updated Thermo iCAP series (Q, RQ, TQ, MSX, MTX) dwell time precision from `0.001` to `0.1` to match actual hardware capability.
-    - Increased `Custom Laser` maximum repetition rate from `100` to `300` Hz.
-    - Added `"Custom Laser"` as an available source option for `"imageGEO"` and `"ESL193UC"` laser platform presets.
-  - **PreScan Parameter Suggestions**:
-    - Aligned the Suggested PreScan Parameters window (`show_prescan_suggestions`) to respect instrument constraints: it now checks and snaps recommendations to `allowed_dwells`, `allowed_rr`, `laser_rr_prec` step sizes, and caps speed at `max_speed` (displaying a `(capped at max)` label in the UI when active).
-    - Replaced raw property access on spin boxes with the safe retrieval helper `self._get(...)`.
-  - **Adaptive SNR formatting**:
-    - Addressed rounding errors where low SNR was reported as `0.0` but grew post-optimisation. Increased internal rounding resolution of Initial SNR and Sigma Sep in output rows from `2` to `6` decimal places.
-    - Implemented adaptive formatting in the table display layer: shows values `< 0.001` if positive and below threshold, uses 3 decimals below `0.1`, 2 decimals below `1.0`, and 1 decimal otherwise.
-  - **Custom Spin Box Inputs**:
-    - Fixed an issue where the custom minimum dwell time and rep-rate resolution input boxes automatically appended trailing zeros while typing. Removed the redundant dynamic `setDecimals` calls from the UI update function (`_update_ui_precisions`) so that values are not reformatted on active text edits.
-  - **Manuals & Compilation**: Documented the additions in `docs/Optimiser_Manual.md` and recompiled all documentation PDFs.
+  * **Feature**: Added **GitHub Repo** and **Report Issue** buttons to the bottom of the Hardware Configuration (Settings) dialog.
+  * **Layout & Sizing**: Restored the `SettingsDialog` width to its original `480` (height `500`). Implemented a two-row stacked layout at the bottom: Row 1 containing the GitHub utility buttons, and Row 2 containing the version label, updater, and close buttons. Set all four buttons to a matching fixed width of `120px` for symmetric alignment.
+  * **Qt URL Handling**: Used native Qt `QDesktopServices.openUrl(QUrl(url))` for browser redirection to align with iolite's embedded Python 3.13 event loop safety.
+  * **Focus & Aesthetics**: Set `setFocusPolicy(Qt.NoFocus)` on all three utility buttons to prevent distracting automatic focus shifts/highlights (e.g., when the check updates button disables/enables or when buttons are clicked).
+  * **Instrument & Laser Specs**:
+    * Updated Thermo iCAP series (Q, RQ, TQ, MSX, MTX) dwell time precision from `0.001` to `0.1` to match actual hardware capability.
+    * Increased `Custom Laser` maximum repetition rate from `100` to `300` Hz.
+    * Added `"Custom Laser"` as an available source option for `"imageGEO"` and `"ESL193UC"` laser platform presets.
+  * **PreScan Parameter Suggestions**:
+    * Aligned the Suggested PreScan Parameters window (`show_prescan_suggestions`) to respect instrument constraints: it now checks and snaps recommendations to `allowed_dwells`, `allowed_rr`, `laser_rr_prec` step sizes, and caps speed at `max_speed` (displaying a `(capped at max)` label in the UI when active).
+    * Replaced raw property access on spin boxes with the safe retrieval helper `self._get(...)`.
+  * **Adaptive SNR formatting**:
+    * Addressed rounding errors where low SNR was reported as `0.0` but grew post-optimisation. Increased internal rounding resolution of Initial SNR and Sigma Sep in output rows from `2` to `6` decimal places.
+    * Implemented adaptive formatting in the table display layer: shows values `< 0.001` if positive and below threshold, uses 3 decimals below `0.1`, 2 decimals below `1.0`, and 1 decimal otherwise.
+  * **Custom Spin Box Inputs**:
+    * Fixed an issue where the custom minimum dwell time and rep-rate resolution input boxes automatically appended trailing zeros while typing. Removed the redundant dynamic `setDecimals` calls from the UI update function (`_update_ui_precisions`) so that values are not reformatted on active text edits.
+  * **Manuals & Compilation**: Documented the additions in `docs/Optimiser_Manual.md` and recompiled all documentation PDFs.
 
 ---
 

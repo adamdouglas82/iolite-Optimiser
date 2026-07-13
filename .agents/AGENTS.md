@@ -56,3 +56,7 @@ These rules and guidelines help Antigravity and other AI coding assistants under
 * **British English Localisation**:
   * All user-facing UI labels, documentation manuals, and code implementations (variable names, method names, comments) must use **British English** spelling.
   * **Key words**: Use `optimisation` / `optimise`, `analyse` / `analysis`, `normalise` / `normalisation`, `colour` (e.g. `run_optimisation`, `analyse_washout_peaks`, etc.). Do not use `optimization`, `optimize`, `analyze`, or `color`.
+* **Markdown Formatting & Linting**:
+  * **List Consistency**: Always use asterisk (`*`) for all unordered list items (including nested items) in markdown files (such as `session_history.md`, `walkthrough.md`, `implementation_plan.md`, and `task.md`) to prevent list style mixed warnings.
+  * **Blank Lines**: Always surround headings and lists with exactly one blank line (preventing `blanks-around-headings` and `blanks-around-lists` warnings).
+  * **File Headings**: Always start markdown files with a top-level `#` H1 heading as the first line of the file (preventing `first-line-h1` warnings).
