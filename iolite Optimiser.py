@@ -122,11 +122,11 @@ ICP_SPECS = {
         "7850": {"type": "Quadrupole", "min_dwell": 0.1, "prec": 0.1},
     },
     "Thermo": {
-        "iCAP Q":   {"type": "Quadrupole", "min_dwell": 1.0, "prec": 0.001},
-        "iCAP RQ":  {"type": "Quadrupole", "min_dwell": 1.0, "prec": 0.001},
-        "iCAP TQ":  {"type": "Quadrupole", "min_dwell": 1.0, "prec": 0.001},
-        "iCAP MSX": {"type": "Quadrupole", "min_dwell": 0.5, "prec": 0.001},
-        "iCAP MTX": {"type": "Quadrupole", "min_dwell": 0.5, "prec": 0.001},
+        "iCAP Q":   {"type": "Quadrupole", "min_dwell": 1.0, "prec": 0.1},
+        "iCAP RQ":  {"type": "Quadrupole", "min_dwell": 1.0, "prec": 0.1},
+        "iCAP TQ":  {"type": "Quadrupole", "min_dwell": 1.0, "prec": 0.1},
+        "iCAP MSX": {"type": "Quadrupole", "min_dwell": 0.5, "prec": 0.1},
+        "iCAP MTX": {"type": "Quadrupole", "min_dwell": 0.5, "prec": 0.1},
         "Element 2":    {"type": "Sector-Field", "min_dwell": 2.0, "prec": 1.0},
         "Element 2 XR": {"type": "Sector-Field", "min_dwell": 0.1, "prec": 0.1},
         "Neoma":   {"type": "Multi-Collector", "min_dwell": 0.0, "prec": 0.001, "allowed_dwells": [50, 100, 250, 500, 1000]},
@@ -178,13 +178,13 @@ LASER_SOURCES = {
     "Tempest 213":  {"max_rr": 20,   "allowed_rr": [1, 2, 4, 5, 10, 20], "rr_prec": 1},
     "Pharos":       {"max_rr": 1000, "allowed_rr": None, "rr_prec": 1},
     "Tempest 266":  {"max_rr": 10,   "allowed_rr": [1, 2, 4, 5, 10], "rr_prec": 1},
-    "Custom Laser": {"max_rr": 100,  "allowed_rr": None, "rr_prec": 1}
+    "Custom Laser": {"max_rr": 300,  "allowed_rr": None, "rr_prec": 1}
 }
 
 LASER_PLATFORMS = {
     "imageGEO": {
         "stages": ["TV2", "TV3"], 
-        "lasers": ["MLase 1000", "Coherent 500"]
+        "lasers": ["MLase 1000", "Coherent 500", "Custom Laser"]
     },
     "imageBIO": {
         "stages": ["TV2", "TV3"], 
@@ -192,7 +192,7 @@ LASER_PLATFORMS = {
     },
     "ESL193UC": {
         "stages": ["TV2"], 
-        "lasers": ["Coherent 200"]
+        "lasers": ["Coherent 200", "Custom Laser"]
     },
     "ESL213": {
         "stages": ["TV2", "TV3"], 
@@ -1375,7 +1375,7 @@ class Logic:
             if iso['status'] not in ["Exclude", "Set to Min", "Custom"]: separations.append(sep)
             val_ms = round(iso['snapped_dt'] * 1000.0, decimals)
             output_rows.append({"Isotope": iso['name'], "Final Dwell (ms)": val_ms if decimals > 0 else int(val_ms),
-                                "Initial SNR": round(iso['initial_snr_display'], 2), "Sigma Sep": round(sep, 2),
+                                "Initial SNR": round(iso['initial_snr_display'], 6), "Sigma Sep": round(sep, 6),
                                 "Status": iso['status'], "Constraint": iso.get('constraint', ""), "IsZeroBG": iso.get('is_zero_bg', False),
                                 "Signal CPS": iso.get('sig_cps', 0.0)})
 
@@ -1577,7 +1577,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Hardware Configuration")
-        # Fixed size: Compacted width and stable height (Reduced to 500)
+        # Fixed size: Compacted width and stable height (Restored to 480, height 500)
         self.main_layout = QVBoxLayout(self)
         self.setFixedSize(480, 500)
         self.main_layout.setContentsMargins(10, 10, 10, 10)
@@ -1589,22 +1589,64 @@ class SettingsDialog(QDialog):
 
         # We will add groupboxes to this layout from initUI
         
-        # Add a Close button and version label at the bottom
-        btns = QHBoxLayout()
+        # Add a Close button and version label at the bottom in a stacked layout
+        bottom_box = QVBoxLayout()
+        bottom_box.setSpacing(5)
+        bottom_box.setContentsMargins(0, 0, 0, 0)
+
+        # Row 1: GitHub actions
+        row1 = QHBoxLayout()
+        row1.addStretch()
+
+        self.btn_visit_repo = QPushButton("GitHub Repo")
+        self.btn_visit_repo.setFixedWidth(120)
+        self.btn_visit_repo.setFixedHeight(30)
+        self.btn_visit_repo.setFocusPolicy(Qt.NoFocus)
+        self.btn_visit_repo.clicked.connect(self.visit_repo)
+        row1.addWidget(self.btn_visit_repo)
+
+        self.btn_report_issue = QPushButton("Report Issue")
+        self.btn_report_issue.setFixedWidth(120)
+        self.btn_report_issue.setFixedHeight(30)
+        self.btn_report_issue.setFocusPolicy(Qt.NoFocus)
+        self.btn_report_issue.clicked.connect(self.report_issue)
+        row1.addWidget(self.btn_report_issue)
+        bottom_box.addLayout(row1)
+
+        # Row 2: Check Updates and Close, plus Version label
+        row2 = QHBoxLayout()
         lbl_version = QLabel(f"Version: {VERSION}")
         lbl_version.setStyleSheet("color: gray; font-size: 8pt;")
-        btns.addWidget(lbl_version)
-        btns.addStretch()
+        row2.addWidget(lbl_version)
+        row2.addStretch()
+
         self.btn_check_updates = QPushButton("Check for Updates")
+        self.btn_check_updates.setFixedWidth(120)
         self.btn_check_updates.setFixedHeight(30)
+        self.btn_check_updates.setFocusPolicy(Qt.NoFocus)
         self.btn_check_updates.clicked.connect(self.check_for_updates)
-        btns.addWidget(self.btn_check_updates)
+        row2.addWidget(self.btn_check_updates)
+
         self.btn_close = QPushButton("Close")
         self.btn_close.setFixedWidth(120)
         self.btn_close.setFixedHeight(30)
         self.btn_close.clicked.connect(lambda: self.done(1))
-        btns.addWidget(self.btn_close)
-        self.main_layout.addLayout(btns)
+        row2.addWidget(self.btn_close)
+        bottom_box.addLayout(row2)
+
+        self.main_layout.addLayout(bottom_box)
+
+    def visit_repo(self):
+        """Open the main repository page in the user's browser."""
+        REPO_URL = "https://github.com/adamdouglas82/iolite-Optimiser"
+        IoLog.information("iolite Optimiser: visit_repo called")
+        QDesktopServices.openUrl(QUrl(REPO_URL))
+
+    def report_issue(self):
+        """Open the GitHub issues page in the user's browser."""
+        ISSUES_URL = "https://github.com/adamdouglas82/iolite-Optimiser/issues"
+        IoLog.information("iolite Optimiser: report_issue called")
+        QDesktopServices.openUrl(QUrl(ISSUES_URL))
 
     @staticmethod
     def _parse_version(tag):
@@ -5618,10 +5660,7 @@ class ioliteOptimiser(QWidget):
         # But we ensure they are at least readable.
         
         # Update custom hardware spinners to match their own precision requirements
-        if hasattr(self, 'spin_cust_min'):
-            self.spin_cust_min.setDecimals(4) # Custom always high
-        if hasattr(self, 'spin_cust_rr_prec'):
-            self.spin_cust_rr_prec.setDecimals(3)
+        # (Redundant dynamic setDecimals calls removed to prevent Qt formatting issues during typing)
 
 
     def load_persistent_settings(self):
@@ -8190,8 +8229,20 @@ class ioliteOptimiser(QWidget):
                 self.table.setCellWidget(i, c_idx, None)
                 self.table.setItem(i, c_idx, item_final)
                 
+                # Adaptive SNR formatting helper
+                def _format_snr(val):
+                    if val <= 0:
+                        return "0.0"
+                    if val < 0.001:
+                        return "<0.001"
+                    if val < 0.1:
+                        return f"{val:.3f}"
+                    if val < 1.0:
+                        return f"{val:.2f}"
+                    return f"{val:.1f}"
+
                 # Initial SNR
-                item_snr = QTableWidgetItem(f"{row['Initial SNR']:.1f}")
+                item_snr = QTableWidgetItem(_format_snr(row['Initial SNR']))
                 item_snr.setTextAlignment(Qt.AlignCenter)
                 item_snr.setFlags(item_snr.flags() & ~Qt.ItemIsEditable)
                 self.table.setItem(i, self.col_map['Initial SNR'], item_snr)
@@ -8203,7 +8254,7 @@ class ioliteOptimiser(QWidget):
                 elif val_sigma < 0:
                     txt_sigma = "Undetectable"
                 else:
-                    txt_sigma = f"{val_sigma:.1f}"
+                    txt_sigma = _format_snr(val_sigma)
                 
                 item_sigma = QTableWidgetItem(txt_sigma)
                 item_sigma.setTextAlignment(Qt.AlignCenter)
@@ -8311,45 +8362,81 @@ class ioliteOptimiser(QWidget):
 
     def show_prescan_suggestions(self):
         try:
-            num_analytes = self.spin_num_analytes.value
-            washout_ms = self.spin_wash.value
-            spot_size = self.spin_spot.value
+            num_analytes = self._get(self.spin_num_analytes, 'value')
+            washout_ms = self._get(self.spin_wash, 'value')
+            spot_size = self._get(self.spin_spot, 'value')
 
-            # Dwell / Cycle time resolution
+            # Dwell / Cycle time resolution and hardware constraints
             min_dwell = getattr(self, 'min_dwell', 0.1)
             precision = getattr(self, 'precision', 0.1)
+            allowed_dwells = getattr(self, 'allowed_dwells', None)
             
-            dt_raw = washout_ms / num_analytes
-            dt_ms = max(min_dwell, round(dt_raw / precision) * precision)
+            dt_raw = washout_ms / num_analytes if num_analytes > 0 else washout_ms
+            if allowed_dwells:
+                # Snap to the smallest allowed dwell that is >= dt_raw
+                sorted_dwells = sorted(allowed_dwells)
+                dt_ms = sorted_dwells[-1]
+                for d in sorted_dwells:
+                    if d >= dt_raw - 1e-7:
+                        dt_ms = d
+                        break
+            else:
+                dt_ms = max(min_dwell, round(dt_raw / precision) * precision)
             target_cycle_time_ms = dt_ms * num_analytes
             
             # Rep-Rate dynamic sweep at 5.0% RSD oversampling level
             target_rsd = 5.0
-            rr_prec = getattr(self, 'laser_rr_prec', 1.0)
-            step = rr_prec if rr_prec > 0 else 1.0
-            
-            # Start from f_start = 2.0 / (washout_ms / 1000.0)
-            f_start = 2.0 / (washout_ms / 1000.0) if washout_ms > 0 else 1.0
+            allowed_rr = getattr(self, 'allowed_rr', None)
             max_allowed_rr = getattr(self, 'max_rr', 10000.0)
             if hasattr(self, 'spin_init_rr'):
-                max_allowed_rr = self.spin_init_rr.maximum
+                max_allowed_rr = self._get(self.spin_init_rr, 'maximum')
                 
-            curr_f = f_start
             found_f = None
-            while curr_f <= max_allowed_rr + 1e-9:
-                rsd = Logic.calculate_lockwood_rsd(curr_f, washout_ms, dt_ms)
-                if rsd <= target_rsd:
-                    found_f = curr_f
-                    break
-                curr_f += step
+            if allowed_rr:
+                # Search within discrete allowed rep-rates
+                for r in sorted(allowed_rr):
+                    if r <= max_allowed_rr + 1e-9:
+                        rsd = Logic.calculate_lockwood_rsd(r, washout_ms, dt_ms)
+                        if rsd <= target_rsd:
+                            found_f = r
+                            break
+                if found_f is None:
+                    # Fallback to the highest allowed rep-rate <= max_allowed_rr
+                    candidates = [r for r in allowed_rr if r <= max_allowed_rr + 1e-9]
+                    found_f = max(candidates) if candidates else max_allowed_rr
+            else:
+                # Search within continuous rep-rates using precision step
+                rr_prec = getattr(self, 'laser_rr_prec', 1.0)
+                step = rr_prec if rr_prec > 0 else 1.0
+                f_start = 2.0 / (washout_ms / 1000.0) if washout_ms > 0 else 1.0
                 
-            if found_f is None:
-                found_f = max_allowed_rr
+                # Align starting frequency to step resolution
+                f_start = max(1.0, round(f_start / step) * step)
+                
+                curr_f = f_start
+                while curr_f <= max_allowed_rr + 1e-9:
+                    rsd = Logic.calculate_lockwood_rsd(curr_f, washout_ms, dt_ms)
+                    if rsd <= target_rsd:
+                        found_f = curr_f
+                        break
+                    curr_f += step
+                if found_f is None:
+                    found_f = max_allowed_rr
+                
+                # Snap final frequency to step resolution
+                found_f = round(found_f / step) * step
                 
             # Stage Speed (µm/s)
             cycle_time_s = target_cycle_time_ms / 1000.0
             suggested_speed = spot_size / cycle_time_s if cycle_time_s > 0 else 0.0
             
+            # Cap suggested speed at maximum hardware speed if defined
+            max_speed = getattr(self, 'max_speed', None)
+            is_speed_capped = False
+            if max_speed is not None and suggested_speed > max_speed:
+                suggested_speed = max_speed
+                is_speed_capped = True
+                
             # Dosage
             suggested_dosage = found_f * cycle_time_s
             
@@ -8360,14 +8447,18 @@ class ioliteOptimiser(QWidget):
             # Display dialog
             dlg = QDialog(self)
             dlg.setWindowTitle("Suggested PreScan Parameters")
-            dlg.resize(300, 200)
+            dlg.resize(350, 220)
             dlg_layout = QVBoxLayout(dlg)
             
             form = QFormLayout()
             
+            speed_str = f"{suggested_speed:.3f} µm/s"
+            if is_speed_capped:
+                speed_str += " (capped at max)"
+                
             lbl_rr = QLabel(f"<b>{found_f:.3f} Hz</b>")
-            lbl_speed = QLabel(f"<b>{suggested_speed:.3f} µm/s</b>")
-            lbl_overlap = QLabel(f"<b>{suggested_overlap_um:.3f} µm</b>")
+            lbl_speed = QLabel(f"<b>{speed_str}</b>")
+            lbl_overlap = QLabel(f"<b>{suggested_overlap_um:.3f} µm ({suggested_overlap_pct:.1f}%)</b>")
             lbl_dosage = QLabel(f"<b>{suggested_dosage:.2f} pulses/pixel</b>")
             lbl_cycle = QLabel(f"<b>{target_cycle_time_ms:.3f} ms</b>")
             lbl_dwell = QLabel(f"<b>{dt_ms:.3f} ms</b>")
