@@ -41,6 +41,7 @@ These rules and guidelines help Antigravity and other AI coding assistants under
   * **Commit Messages**: Always show the user the proposed commit message before committing.
 * **Release Versioning & Packaging Workflow**:
   * **Keep `VERSION = "dev"`**: Do not manually change `VERSION` in `iolite Optimiser.py`. The GitHub Actions CI/CD workflow dynamically handles versioning based on the Git release tag (`v<version>`).
+  * **Release Commit Title Format**: Always format the top-line title of release commits as `Release v<version>: <summary>` (e.g. `Release v1.0.6: pulse train simulator updates and code cleanup`). Do not prefix with `release: release...`.
   * **Conditional PDF Compilation**: Only run `convert_docs.py` if source `.md` files in `docs/` have been modified. If no Markdown documentation files were changed, do not run `convert_docs.py` or commit unneeded PDF binary diffs.
   * **Release Tagging**: Always tag release commits with semantic versioning (`git tag -a v<version> -m "Release v<version>"`) and push the tag (`git push origin v<version>`) after explicit user approval to trigger GitHub Actions release packaging.
 
