@@ -349,7 +349,7 @@ class Logic:
         try:
             min_distance_pts = max(1, int(round(min_distance / dt)))
             wlen_pts = max(1, int(round(wlen / dt))) if wlen is not None and wlen > 0 else None
-            peaks, properties = find_peaks(y_proc, prominence=prominence_threshold, distance=min_distance_pts, wlen=wlen_pts)
+            peaks, _ = find_peaks(y_proc, prominence=prominence_threshold, distance=min_distance_pts, wlen=wlen_pts)
         except Exception as e:
             return pd.DataFrame(), {"Error": str(e)}
         
@@ -357,8 +357,8 @@ class Logic:
             return pd.DataFrame(), {"Count": 0}
             
         # 2. Calculate Widths
-        widths_01, width_heights_01, left_ips_01, right_ips_01 = peak_widths(y_proc, peaks, rel_height=0.9)
-        widths_001, width_heights_001, left_ips_001, right_ips_001 = peak_widths(y_proc, peaks, rel_height=0.99)
+        _, width_heights_01, left_ips_01, right_ips_01 = peak_widths(y_proc, peaks, rel_height=0.9)
+        _, width_heights_001, left_ips_001, right_ips_001 = peak_widths(y_proc, peaks, rel_height=0.99)
         
         peak_data = []
         
@@ -4611,7 +4611,6 @@ class ioliteOptimiser(QWidget):
         lbl_sync_title.setAlignment(Qt.AlignCenter)
         v_sync.addWidget(lbl_sync_title)
         
-        l_sync = QHBoxLayout()
         # Column 1: Spot Size (Left)
         # Core Optimised Values (Unified Grid)
         grid_sync = QGridLayout()
@@ -5057,6 +5056,8 @@ class ioliteOptimiser(QWidget):
 
     def _handle_laser_mod_changed(self, model):
         mfr = self._get(self.cmb_laser_mfr, 'currentText')
+        if mfr:
+            self.persistent_settings[f"last_laser_for_{mfr}"] = model
         # Only show overrides if the MODEL itself is "Custom Laser"
         is_custom_laser = (model == "Custom Laser")
         
@@ -5065,8 +5066,6 @@ class ioliteOptimiser(QWidget):
         is_custom_stage = (cell == "Custom Stage")
         
         # Toggle Custom Settings Visibility (individual widgets in form)
-        is_hybrid_visible = (is_custom_laser or is_custom_stage)
-        
         # Mode is only for Custom Laser
         self.lbl_cust_mode.setVisible(is_custom_laser)
         self.cmb_cust_rr_type.setVisible(is_custom_laser)
@@ -5112,6 +5111,9 @@ class ioliteOptimiser(QWidget):
 
 
     def _handle_cell_changed(self, cell):
+        mfr = self._get(self.cmb_laser_mfr, 'currentText')
+        if mfr:
+            self.persistent_settings[f"last_cell_for_{mfr}"] = cell
         is_custom_stage = (cell == "Custom Stage")
         
         # Mode is only for Custom Laser
@@ -5158,7 +5160,6 @@ class ioliteOptimiser(QWidget):
         icp_mod = self._get(self.cmb_model, 'currentText')
         is_custom_icp = (icp_mod == "Custom Model" or icp_mfr == "Custom")
         
-        las_mfr = self._get(self.cmb_laser_mfr, 'currentText')
         las_mod = self._get(self.cmb_laser_mod, 'currentText')
         is_custom_laser = (las_mod == "Custom Laser")
         
@@ -5387,7 +5388,6 @@ class ioliteOptimiser(QWidget):
 
         is_spot = (mode == 'Spot')
         is_line = (mode == 'Line')
-        is_imaging = (mode == 'Imaging')
         
         if not hasattr(self, 'grid_qual'): return
 
@@ -5513,18 +5513,6 @@ class ioliteOptimiser(QWidget):
         # Trigger updates
         self._handle_laser_mod_changed(self._get(self.cmb_laser_mod, 'currentText'))
         self._handle_cell_changed(self._get(self.cmb_cell, 'currentText'))
-        
-    def _handle_laser_mod_changed(self, lmod):
-        mfr = self._get(self.cmb_laser_mfr, 'currentText')
-        if mfr:
-            self.persistent_settings[f"last_laser_for_{mfr}"] = lmod
-        self._update_hw_summary()
-
-    def _handle_cell_changed(self, cell):
-        mfr = self._get(self.cmb_laser_mfr, 'currentText')
-        if mfr:
-            self.persistent_settings[f"last_cell_for_{mfr}"] = cell
-        self._on_ui_change()
 
     def _on_opt_spot_changed(self, val):
         self.run_optimisation(refresh=False, fixed_spot_um=val, preserve_zoom=True)
@@ -5702,16 +5690,11 @@ class ioliteOptimiser(QWidget):
                 'theme': self._get(self.combo_theme, 'currentText'),
                 'opt_y_zoom': self._get(self.chk_y_zoom, 'isChecked'),
                 'normalise': self._get(self.chk_norm, 'isChecked'),
-                'cust_rr_list': self._get(self.edit_cust_rr_list, 'text'),
-                'img_height': self._get(self.spin_height, 'value') if hasattr(self, 'spin_height') else 1000.0,
-                'img_width': self._get(self.spin_width, 'value') if hasattr(self, 'spin_width') else 1000.0,
-                'avoid_gaps': self._get(self.chk_avoid_gaps, 'isChecked') if hasattr(self, 'chk_avoid_gaps') else False,
                 'spr_time_unit': self._get(self.cmb_spr_unit, 'currentText'),
                 'spr_min_distance': self._get(self.spin_spr_dist, 'value'),
                 'spr_baseline_window': self._get(self.spin_spr_baseline_window, 'value'),
                 'spr_apply_smooth': self._get(self.chk_spr_smooth, 'isChecked'),
                 'spr_smooth_window': self._get(self.spin_spr_smooth_window, 'value'),
-                'opt_y_zoom': self._get(self.chk_y_zoom, 'isChecked'),
                 # 'opt_rescale_y': Ephemeral
                 'spr_y_zoom': self._get(self.chk_y_zoom_spr, 'isChecked'),
                 'sync_strategy': self._get(self.cmb_sync_strategy, 'currentText'),
@@ -7234,9 +7217,6 @@ class ioliteOptimiser(QWidget):
                 
                 # Consistent with fixed subplots_adjust, we do not call execute_constrained_layout
 
-                # Use unified rescaling logic if enabled to ensure consistent 10% margins from first draw
-                chk_rescale = getattr(self, 'chk_rescale', None)
-                
                 # --- APPLY THEME-STABLE SCALING ---
                 if (preserve_zoom or preserve_x_only) and self._opt_axis_limits:
                     ax.set_xlim(self._opt_axis_limits[0])
@@ -8941,16 +8921,6 @@ class ioliteOptimiser(QWidget):
                 try:
                     IoLog.information(f"Calling Logic.generate_pulse_train_v3 for {iso}...")
                     
-                    # Calculate dt from the composite dataframe (scaled SPR resolution)
-                    comp_t = composite_df['Relative Time (s)'].values
-                    dt_scaled = np.median(np.diff(comp_t)) if len(comp_t) > 1 else 1e-3
-                    
-                    # Ensure dt_s is fine enough to:
-                    # 1. Resolve the shape of the peak itself without aliasing (at least 80 steps per peak duration)
-                    # 2. Resolve the minimum active dwell (at least 10 steps per dwell)
-                    pulse_duration = comp_t.max() - comp_t.min() if len(comp_t) > 0 else 0.1
-                    active_dwells = [spec['dwell'] for spec in channel_specs if spec['dwell'] > 0]
-                    min_dwell = min(active_dwells) if active_dwells else 0.01
                     # Lock to a fine resolution of 1e-5 s (10 µs) for maximum integration accuracy
                     dt_s_calc = 1e-5
                     
@@ -9111,7 +9081,7 @@ class ioliteOptimiser(QWidget):
                 all_signal_plateau_y = []
                 
                 # Measured (normalized to 1.0 locally)
-                for i_iso, (iso, (_, m_df)) in enumerate(self.pulse_results.items()):
+                for iso, (_, m_df) in self.pulse_results.items():
                     tm = m_df['Time'].values
                     ym = m_df['Intensity'].values
                     
@@ -9292,17 +9262,6 @@ class ioliteOptimiser(QWidget):
 
 
 
-
-
-    def _on_pulse_rescale_toggled(self, checked):
-        if checked:
-            self.chk_y_zoom_pulse.setChecked(False)
-            if hasattr(self, 'pulse_figure') and self.pulse_figure.axes:
-                 self.rescale_to_visible(ax=self.pulse_figure.axes[0], canvas=self.pulse_canvas)
-
-    def _on_pulse_y_zoom_toggled(self, checked):
-        if checked:
-            self.chk_rescale_pulse.setChecked(False)
 
 # --- UI SETUP ---
 widget = None
