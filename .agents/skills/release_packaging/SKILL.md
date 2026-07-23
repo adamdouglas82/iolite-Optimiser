@@ -33,10 +33,11 @@ Before tagging any commit or pushing a release:
 * **Preserve `VERSION = "dev"`**:
   > [!IMPORTANT]
   > Do **NOT** manually update the `VERSION` constant in `iolite Optimiser.py`. Leave it set to `VERSION = "dev"`. The GitHub Actions release workflow dynamically injects the target version number from the Git tag (`v<version>`) during CI/CD packaging.
-* **Draft Release Notes**:
-  * Summarize all features and fixes into a structured commit message.
+* **Draft Multi-Line Release Notes**:
+  > [!IMPORTANT]
+  > The GitHub Actions workflow (`package-release.yml`) uses `git log -1 --pretty=format:"%B"` to extract the GitHub release notes body. Always commit with a **full multi-line commit message** (subject + section headers + bullet points) so the GitHub release displays complete release notes.
 * **Create Release Commit**:
-  * Stage all modified codebase files and commit with standard commit message format (e.g. `feat: add mode-dependent resolution options (v1.0.5)`).
+  * Stage all modified codebase files and commit using a file or multi-line string containing the full release notes structure.
 
 ---
 
