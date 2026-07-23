@@ -75,7 +75,7 @@ try:
         from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
         
     from matplotlib.figure import Figure
-    from matplotlib.ticker import MaxNLocator, EngFormatter, ScalarFormatter
+    from matplotlib.ticker import MaxNLocator, EngFormatter
     from cycler import cycler
     from matplotlib.lines import Line2D
     import matplotlib.colors as mcolors
@@ -88,11 +88,11 @@ except Exception as e:
 from iolite.QtGui import (QAction, QSizePolicy, QWidget, QLabel, QDoubleSpinBox, QSpinBox, QCheckBox, 
                           QComboBox, QGridLayout, QHBoxLayout, QVBoxLayout, QGroupBox, QFormLayout, 
                           QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QMenu, 
-                          QColorDialog, QDialog, QPushButton, QScrollArea, QSplitter, QFrame, 
+                          QDialog, QPushButton, QScrollArea, QSplitter, QFrame, 
                           QLineEdit, QTabWidget, QStackedWidget, QApplication, QPalette, QColor,
-                          QListWidget, QListWidgetItem, QTextEdit, QInputDialog, QMessageBox,
+                          QListWidget, QTextEdit, QInputDialog, QMessageBox,
                           QFileDialog, QDesktopServices)
-from iolite.QtCore import Qt, QTimer, QSize, QEvent, QUrl
+from iolite.QtCore import Qt, QTimer, QUrl
 
 try:
     data
@@ -212,12 +212,7 @@ LASER_PLATFORMS = {
     }
 }
 
-PLOT_COLORS = [
-    "#1f77b4", "#aec7e8", "#ff7f0e", "#ffbb78", "#2ca02c", "#98df8a",
-    "#d62728", "#ff9896", "#9467bd", "#c5b0d5", "#8c564b", "#c49c94",
-    "#e377c2", "#f7b6d2", "#7f7f7f", "#c7c7c7", "#bcbd22", "#dbdb8d",
-    "#17becf", "#9edae5"
-]
+
 
 def get_settings_dir():
     try:
@@ -737,107 +732,7 @@ class Logic:
             return None, None
 
     @staticmethod
-    def generate_pulse_train_v2(composite_df, rep_rate_hz, pulses, acq_time_s, background_s=5.0, signal_s=30.0, dt_s=1e-5):
-        """
-        Generates a simulated pulse train based on the composite peak shape.
-        Returns:
-            theoretical_df: High-res instantaneous signal
-            measured_df: Signal integrated over Acquisition Time buckets
-        """
-        try:
-            if composite_df is None or composite_df.empty:
-                return None, None
-                
-            IoLog.information("Logic.generate_pulse_train: Starting...")
-                
-            # 1. Prepare Composite Pulse (Interpolant)
-            comp_t = composite_df['Relative Time (s)'].values
-            comp_i = composite_df['Normalised Intensity'].values
-            
-            # Shift comp_t so it starts at 0 for easier handling
-            t_min = comp_t.min()
-            comp_t_shifted = comp_t - t_min 
-            pulse_duration = comp_t_shifted.max()
-            
-            # 2. Setup Time Axis
-            IoLog.information("Logic.generate_pulse_train: Step 2 - Setup Time Axis")
-            # User requested equivalent background at rear
-            total_duration = background_s + signal_s + background_s
-            t_axis = np.arange(0, total_duration, dt_s)
-            y_theoretical = np.zeros_like(t_axis)
-            
-            # 3. Generate Pulse Train
-            IoLog.information("Logic.generate_pulse_train: Step 3 - Generate Pulses")
-            # Start firing after background_s
-            start_time = background_s
-            
-            # Calculate number of pulses to fire based on signal duration and rep rate
-            if rep_rate_hz > 0:
-                period = 1.0 / rep_rate_hz
-                num_pulses = int(signal_s * rep_rate_hz)
-                
-                # Vectorized Pulse Addition
-                # We add the pulse shape to the y_theoretical array at calculated start indices
-                
-                # Interpolate composite to the simulation grid resolution (dt_s) once
-                # This works if dt_s is finer than composite resolution, which it should be (10us)
-                pulse_grid_t = np.arange(0, pulse_duration + dt_s, dt_s)
-                pulse_grid_y = np.interp(pulse_grid_t, comp_t_shifted, comp_i, left=0, right=0)
-                
-                n_pulse_samples = len(pulse_grid_y)
-                n_total_samples = len(y_theoretical)
-                
-                for i in range(num_pulses):
-                    t_fire = start_time + i * period
-                    idx_start = int(t_fire / dt_s)
-                    idx_end = idx_start + n_pulse_samples
-                    
-                    if idx_start >= n_total_samples: break
-                    
-                    # Clip if end extends beyond buffer
-                    if idx_end > n_total_samples:
-                        valid_len = n_total_samples - idx_start
-                        y_theoretical[idx_start:n_total_samples] += pulse_grid_y[:valid_len]
-                    else:
-                        y_theoretical[idx_start:idx_end] += pulse_grid_y
-                        
-            # 4. Generate Measured (Integrated) Signal
-            IoLog.information("Logic.generate_pulse_train: Step 4 - Generate Measured")
-            # Integration buckets of size acq_time_s
-            n_buckets = int(total_duration / acq_time_s)
-            if n_buckets == 0: n_buckets = 1
-            measured_t = np.arange(n_buckets) * acq_time_s
-            measured_y = np.zeros(n_buckets)
-            
-            # Reshape theoretical into chunks of acq_time (approx)
-            # Note: This is an approximation. For exact sync logic, we'd need to be careful with sample boundaries.
-            # But for visualization, this is sufficient.
-            samples_per_bucket = int(acq_time_s / dt_s)
-            
-            if samples_per_bucket > 0:
-                # fast sum using reshape if length matches perfectly, else loop
-                # Loop is safer for edge cases
-                for i in range(n_buckets):
-                    s_idx = i * samples_per_bucket
-                    e_idx = s_idx + samples_per_bucket
-                    if s_idx >= len(y_theoretical): break
-                    # Sum * dt gives Area (Integrated Intensity)
-                    # But mass spec usually reports Counts or CPS.
-                    # If we assume y_theoretical is "Intensity/sec (CPS equivalent of pulse)", then
-                    # this integration gives Counts. 
-                    # Let's normalize it so max is somewhat relatable or just return raw integration.
-                    chunk = y_theoretical[s_idx:min(e_idx, len(y_theoretical))]
-                    measured_y[i] = np.sum(chunk)
-            
-            IoLog.information("Logic.generate_pulse_train: Step 5 - Return DataFrame")
-            return pd.DataFrame({'Time': t_axis, 'Intensity': y_theoretical}), pd.DataFrame({'Time': measured_t, 'Intensity': measured_y})
 
-        except Exception as e:
-            IoLog.error(f"Logic.generate_pulse_train CRASH: {e}")
-            IoLog.error(traceback.format_exc())
-            return None, None
-
-    @staticmethod
     def calculate_constrained_at(inputs):
         """Helper to determine constrained Acquisition Time and synchronized rep rate."""
         fw_s = inputs['washout_ms'] / 1000.0
@@ -4849,7 +4744,7 @@ class ioliteOptimiser(QWidget):
         self.canvas.mpl_connect('button_release_event', self.on_release)
         self.canvas.mpl_connect('motion_notify_event', self.on_drag)
         self.canvas.mpl_connect('pick_event', self.on_pick)
-        self.plot_panning = False; self.press_x = None
+        self.plot_panning = False
         
         h_ctrl1 = QHBoxLayout()
         h_ctrl2 = QHBoxLayout()
