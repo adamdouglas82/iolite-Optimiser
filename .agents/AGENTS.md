@@ -36,9 +36,10 @@ These rules and guidelines help Antigravity and other AI coding assistants under
   * This repository follows a Gitflow/feature-branch workflow.
   * Do not make or push commits directly to the `main` branch unless explicitly instructed.
   * Always check current branch status (`git status`, `git branch`) before editing or proposing commits.
-* **Review & Confirmations**:
-  * **Before Pushing**: Always check with the user and get explicit approval before pushing any changes to GitHub.
-  * **Commit Messages**: Always show the user the proposed commit message before committing.
+* **Release Versioning & Packaging Workflow**:
+  * **Keep `VERSION = "dev"`**: Do not manually change `VERSION` in `iolite Optimiser.py`. The GitHub Actions CI/CD workflow dynamically handles versioning based on the Git release tag (`v<version>`).
+  * **Conditional PDF Compilation**: Only run `convert_docs.py` if source `.md` files in `docs/` have been modified. If no Markdown documentation files were changed, do not run `convert_docs.py` or commit unneeded PDF binary diffs.
+  * **Release Tagging**: Always tag release commits with semantic versioning (`git tag -a v<version> -m "Release v<version>"`) and push the tag (`git push origin v<version>`) after explicit user approval to trigger GitHub Actions release packaging.
 
 ---
 

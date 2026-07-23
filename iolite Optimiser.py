@@ -1192,9 +1192,22 @@ class Logic:
 
         # Derived parameters (CALCULATED LAST)
         actual_pulses = rr_actual * at_actual_s
-        speed = (bs * rr_actual) / n_dose if n_dose > 0 else 0
-        overlap_um = bs - (speed / rr_actual) if rr_actual > 0 else 0
-        overlap_pct = (overlap_um / bs) * 100 if bs > 0 else 0
+        mode = inputs.get('mode', 'Imaging')
+        speed_dps = inputs.get('speed_dps', 0 if mode == "Line" else 2)
+        overlap_dps = inputs.get('overlap_dps', 2)
+
+        if mode == "Imaging":
+            raw_overlap = bs - (bs / n_dose) if n_dose > 0 else 0.0
+            overlap_um = round(raw_overlap, overlap_dps)
+            raw_speed = rr_actual * (bs - overlap_um)
+            speed = round(raw_speed, speed_dps) if speed_dps is not None else raw_speed
+        else:
+            raw_speed = (bs * rr_actual) / n_dose if n_dose > 0 else 0.0
+            speed = round(raw_speed, speed_dps) if speed_dps is not None else raw_speed
+            raw_overlap = bs - (speed / rr_actual) if rr_actual > 0 else 0.0
+            overlap_um = round(raw_overlap, overlap_dps)
+
+        overlap_pct = (overlap_um / bs) * 100.0 if bs > 0 else 0.0
         
         # Consistent dwell budget calculation (Net measurement time)
         # For MC/TOF: This is the individual integration time.
@@ -1248,8 +1261,22 @@ class Logic:
             res['dwell_budget_s'] = max(0.0, config['override_at_s'] - (config['overhead_ms'] / 1000.0))
             res['optimised_n'] = res['rr_actual'] * res['at_actual_s']
             res['n_dose'] = config['dosage'] if not config.get('sync_dosage', True) else res['optimised_n']
-            res['speed'] = (spot_size * res['rr_actual']) / res['n_dose'] if res['n_dose'] > 0 else 0.0
-            res['overlap_um'] = spot_size - (res['speed'] / res['rr_actual']) if res['rr_actual'] > 0 else spot_size
+            mode = config.get('mode', 'Imaging')
+            speed_dps = config.get('speed_dps', 0 if mode == "Line" else 2)
+            overlap_dps = config.get('overlap_dps', 2)
+
+            if mode == "Imaging":
+                raw_overlap = spot_size - (spot_size / res['n_dose']) if res['n_dose'] > 0 else 0.0
+                res['overlap_um'] = round(raw_overlap, overlap_dps)
+                raw_speed = res['rr_actual'] * (spot_size - res['overlap_um'])
+                res['speed'] = round(raw_speed, speed_dps) if speed_dps is not None else raw_speed
+            else:
+                raw_speed = (spot_size * res['rr_actual']) / res['n_dose'] if res['n_dose'] > 0 else 0.0
+                res['speed'] = round(raw_speed, speed_dps) if speed_dps is not None else raw_speed
+                raw_overlap = spot_size - (res['speed'] / res['rr_actual']) if res['rr_actual'] > 0 else spot_size
+                res['overlap_um'] = round(raw_overlap, overlap_dps)
+
+            res['overlap_pct'] = (res['overlap_um'] / spot_size) * 100.0 if spot_size > 0 else 0.0
             res['actual_pulses'] = res['rr_actual'] * res['at_actual_s']
             n_target = config['pulses_per_pixel']
             sync_error = res['actual_pulses'] - n_target
@@ -2306,6 +2333,10 @@ class ioliteOptimiser(QWidget):
         self.allowed_rr = None
         self.allowed_dwells = None
         self.max_speed = 20000
+        self.speed_dps_imaging = 2
+        self.speed_dps_line = 0
+        self.overlap_dps = 2
+        self.dosage_dps = 2
         
         try:
             ol_path = get_settings_dir()
@@ -5628,6 +5659,21 @@ class ioliteOptimiser(QWidget):
         if prec <= 0.1: return 1
         return 0
 
+    def _get_speed_precision_dps(self):
+        """Returns number of decimal places for Stage Speed based on current mode and settings."""
+        mode = self._get(self.cmb_mode, 'currentText')
+        if mode == "Line":
+            return getattr(self, 'speed_dps_line', 0)
+        return getattr(self, 'speed_dps_imaging', 2)
+
+    def _get_overlap_precision_dps(self):
+        """Returns number of decimal places for Overlap based on current settings."""
+        return getattr(self, 'overlap_dps', 2)
+
+    def _get_dosage_precision_dps(self):
+        """Returns number of decimal places for Dosage/Pulses based on current settings."""
+        return getattr(self, 'dosage_dps', 2)
+
     def _get_dwell_unit_info(self):
         """Returns (unit_str, scaler_to_ms, display_dps) based on hardware and user preference."""
         mfr = self._get(self.cmb_mfr, 'currentText')
@@ -5667,6 +5713,12 @@ class ioliteOptimiser(QWidget):
             self.spin_pulse_at.setDecimals(icp_dps)
             self.spin_pulse_at.setSingleStep(getattr(self, 'precision', 0.1))
             
+        dosage_dps = self._get_dosage_precision_dps()
+        if hasattr(self, 'spin_pulses'):
+            self.spin_pulses.setDecimals(dosage_dps)
+        if hasattr(self, 'spin_dosage'):
+            self.spin_dosage.setDecimals(dosage_dps)
+            
         # Update Target Panel if needed (e.g. if we had RR related there)
         # Note: Pulses and Sigma are usually not bound to hardware RR precision steps. 
         # But we ensure they are at least readable.
@@ -5681,6 +5733,10 @@ class ioliteOptimiser(QWidget):
             if os.path.exists(self.settings_json_path):
                 with open(self.settings_json_path, 'r') as f:
                     s_data = json.load(f)
+                    self.speed_dps_imaging = s_data.get('speed_dps_imaging', 2)
+                    self.speed_dps_line = s_data.get('speed_dps_line', 0)
+                    self.overlap_dps = s_data.get('overlap_dps', 2)
+                    self.dosage_dps = s_data.get('dosage_dps', 2)
                     # IoLog.information("iolite Optimiser: Settings loaded successfully") # Silent
                     return s_data
             else:
@@ -5742,6 +5798,10 @@ class ioliteOptimiser(QWidget):
                 'line_length': self._get(self.spin_line_len, 'value') if hasattr(self, 'spin_line_len') else 1000.0,
                 'avoid_gaps': self._get(self.chk_avoid_gaps, 'isChecked'),
                 'prefer_exact_pulses': self._get(self.chk_prefer_exact_pulses, 'isChecked') if hasattr(self, 'chk_prefer_exact_pulses') else False,
+                'speed_dps_imaging': getattr(self, 'speed_dps_imaging', 2),
+                'speed_dps_line': getattr(self, 'speed_dps_line', 0),
+                'overlap_dps': getattr(self, 'overlap_dps', 2),
+                'dosage_dps': getattr(self, 'dosage_dps', 2),
                 
                 # New Persistence Keys
                 'theme': self._get(self.combo_theme, 'currentText'),
@@ -7642,6 +7702,8 @@ class ioliteOptimiser(QWidget):
                 'target_rsd': rsd_val,
                 'dosage': self._get(self.spin_dosage, 'value'),
                 'mode': self._get(self.cmb_mode, 'currentText'),
+                'speed_dps': self._get_speed_precision_dps(),
+                'overlap_dps': self._get_overlap_precision_dps(),
                 'img_height': self._get(self.spin_height, 'value') if hasattr(self, 'spin_height') else 1000.0,
                 'img_width': self._get(self.spin_width, 'value') if hasattr(self, 'spin_width') else 1000.0,
                 'line_length': self._get(self.spin_line_len, 'value') if hasattr(self, 'spin_line_len') else 1000.0,
@@ -8047,7 +8109,10 @@ class ioliteOptimiser(QWidget):
             self.table.horizontalHeader().setSectionResizeMode(self.col_map['Mode'], QHeaderView.ResizeToContents)
 
             self.lbl_opt_rr.setText(f"<b>{sync['rr_actual']:.{laser_dps}f}</b> Hz")
-            self.lbl_opt_speed.setText(f"<b>{sync['speed']:.1f}</b> µm s⁻¹")
+            speed_dps = self._get_speed_precision_dps()
+            overlap_dps = self._get_overlap_precision_dps()
+            dosage_dps = self._get_dosage_precision_dps()
+            self.lbl_opt_speed.setText(f"<b>{sync['speed']:.{speed_dps}f}</b> µm s⁻¹")
             
             unit_val_at = val_at_ms / scaler
             unit_val_budget = val_budget_ms / scaler
@@ -8083,12 +8148,12 @@ class ioliteOptimiser(QWidget):
 
             if not self._get(self.chk_avoid_gaps, 'isChecked'):
                  # "Avoid Gaps" OFF -> Floor Strategy.
-                 self.lbl_opt_pulses.setText(f"<b>{sync['n_dose']:.1f}</b> Shots")
+                 self.lbl_opt_pulses.setText(f"<b>{sync['n_dose']:.{dosage_dps}f}</b> Shots")
             else:
                  # "Avoid Gaps" ON -> Ceil Strategy (Overlap).
-                 self.lbl_opt_pulses.setText(f"<b>{sync['n_dose']:.1f}</b> Shots")
+                 self.lbl_opt_pulses.setText(f"<b>{sync['n_dose']:.{dosage_dps}f}</b> Shots")
 
-            self.lbl_opt_overlap.setText(f"<b>{sync['overlap_um']:.1f}</b> µm")
+            self.lbl_opt_overlap.setText(f"<b>{sync['overlap_um']:.{overlap_dps}f}</b> µm")
 
             # Estimated Scan Time
             # Mode Logic
