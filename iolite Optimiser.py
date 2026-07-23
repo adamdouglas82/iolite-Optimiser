@@ -614,7 +614,7 @@ class Logic:
         # Standard snap to hardware precision
         return round(target_at / precision_s) * precision_s
     @staticmethod
-    def generate_pulse_train_v3(composite_df, rep_rate_hz, pulses_per_cycle, cycle_time_s, channel_specs, background_s=5.0, signal_s=10.0, dt_s=1e-5):
+    def generate_pulse_train_v3(composite_df, rep_rate_hz, pulses_per_cycle, cycle_time_s, channel_specs, background_s=5.0, signal_s=30.0, dt_s=1e-5):
         """
         Generates simulated pulse train with sequential sampling support.
         
@@ -737,7 +737,7 @@ class Logic:
             return None, None
 
     @staticmethod
-    def generate_pulse_train_v2(composite_df, rep_rate_hz, pulses, acq_time_s, background_s=5.0, signal_s=10.0, dt_s=1e-5):
+    def generate_pulse_train_v2(composite_df, rep_rate_hz, pulses, acq_time_s, background_s=5.0, signal_s=30.0, dt_s=1e-5):
         """
         Generates a simulated pulse train based on the composite peak shape.
         Returns:
@@ -8653,7 +8653,7 @@ class ioliteOptimiser(QWidget):
         grid_settings.addWidget(self.spin_pulse_bg, 0, 1)
         
         self.spin_pulse_sig = QDoubleSpinBox()
-        self.spin_pulse_sig.setRange(0, 9999)
+        self.spin_pulse_sig.setRange(15, 9999)
         self.spin_pulse_sig.setValue(30.0)
         self.spin_pulse_sig.setSuffix(" s")
         grid_settings.addWidget(QLabel("Signal Duration:"), 0, 2)
@@ -9157,8 +9157,8 @@ class ioliteOptimiser(QWidget):
             show_bg = self.chk_show_bg.isChecked()
             bg_s = self.spin_pulse_bg.value
             sig_s = self.spin_pulse_sig.value
-            t_min_crop = bg_s + 1.0
-            t_max_crop = bg_s + sig_s - 1.0
+            t_min_crop = bg_s + 5.0
+            t_max_crop = bg_s + sig_s - 5.0
 
             if not show_bg:
                 # Normalise to max within signal window for overlay
@@ -9307,8 +9307,8 @@ class ioliteOptimiser(QWidget):
             try:
                 bg_s = self.spin_pulse_bg.value
                 sig_s = self.spin_pulse_sig.value
-                t_min = bg_s + 1.0
-                t_max = bg_s + sig_s - 1.0
+                t_min = bg_s + 5.0
+                t_max = bg_s + sig_s - 5.0
                 
                 # Helper for SI Formatting
                 def _si_pulse(val):
