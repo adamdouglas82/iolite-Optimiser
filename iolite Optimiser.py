@@ -2586,14 +2586,14 @@ class ioliteOptimiser(QWidget):
         self.spin_spr_prom.setDecimals(0)
         self.spin_spr_prom.setValue(100.0)
         self.spin_spr_prom.setSingleStep(100.0)
-        self.spin_spr_prom.setToolTip("Minimum peak height. Prevents detecting noise as peaks. Auto sets to 10 % of maximum data point.")
+        self.spin_spr_prom.setToolTip("Minimum peak height. Prevents detecting noise as peaks. Auto sets to 30 % of maximum data point.")
         self.spin_spr_prom.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.spin_spr_prom.valueChanged.connect(self._on_spr_prom_changed)
         l_prom.addWidget(self.spin_spr_prom)
         
         self.chk_spr_auto_prom = QCheckBox("Auto", self)
         self.chk_spr_auto_prom.setChecked(True)
-        self.chk_spr_auto_prom.setToolTip("Minimum peak height. Prevents detecting noise as peaks. Auto sets to 10 % of maximum data point.")
+        self.chk_spr_auto_prom.setToolTip("Minimum peak height. Prevents detecting noise as peaks. Auto sets to 30 % of maximum data point.")
         self.chk_spr_auto_prom.toggled.connect(self._on_spr_auto_prom_toggled)
         l_prom.addWidget(self.chk_spr_auto_prom)
         # self.spin_spr_prom.setEnabled(False) # Removed: User wants always clickable
@@ -3672,22 +3672,22 @@ class ioliteOptimiser(QWidget):
         if len(y) < 2:
             return
             
-        # Strategy: Use robust background noise estimation (similar to region auto-detect)
+        # Strategy: Set to 30% of maximum peak height (after background subtraction if enabled)
         try:
-            # 1. Estimate baseline noise from the beginning (typically gas blank)
-            init_window = max(10, int(len(y) * 0.05))
-            bg_est = y[:init_window]
-            bg_mean = np.nanmean(bg_est)
-            bg_std = np.nanstd(bg_est) if len(bg_est) > 1 else 0
-            
-            y_max = np.nanmax(y)
-            y_range = y_max - bg_mean
-            
-            # 2. Robust threshold: 10% of total range OR 10 sigma (to clear noise floor)
-            # This prevents picking up noise spikes as valid peaks
-            auto_val = max(y_range * 0.1, 10 * bg_std)
-            
-            auto_val = round(auto_val, 0)
+            y_proc = y.copy()
+            if self._get(getattr(self, 'chk_spr_bg_sub', None), 'isChecked') and 'Time' in self.spr_df.columns:
+                t_orig = self.spr_df['Time'].values
+                if len(t_orig) > 0:
+                    t_zeroed = t_orig - t_orig[0]
+                    bg_s = self._get(self.spin_spr_bg_start, 'value')
+                    bg_e = self._get(self.spin_spr_bg_end, 'value')
+                    if bg_s is not None and bg_e is not None:
+                        bg_mask = (t_zeroed >= bg_s) & (t_zeroed <= bg_e)
+                        if bg_mask.any():
+                            y_proc = np.clip(y_proc - np.nanmean(y_proc[bg_mask]), 0, None)
+
+            y_max = np.nanmax(y_proc)
+            auto_val = round(max(1.0, float(y_max) * 0.3), 0)
                 
             self._block_signals(self.spin_spr_prom, True)
             self.spin_spr_prom.setValue(auto_val)
@@ -3919,14 +3919,16 @@ class ioliteOptimiser(QWidget):
                     if len(y) < 2:
                         prominence = 100
                     else:
-                        init_window = max(10, int(len(y) * 0.05))
-                        bg_est = y[:init_window]
-                        bg_mean = np.nanmean(bg_est)
-                        bg_std = np.nanstd(bg_est) if len(bg_est) > 1 else 0
-                        y_max = np.nanmax(y)
-                        y_range = y_max - bg_mean
-                        prominence = max(y_range * 0.1, 10 * bg_std)
-                        prominence = round(prominence, 0)
+                        y_proc = y.copy()
+                        if bg_sub and 'Time' in self.spr_df.columns:
+                            t_orig = self.spr_df['Time'].values
+                            if len(t_orig) > 0:
+                                t_zeroed = t_orig - t_orig[0]
+                                bg_mask = (t_zeroed >= bg_start_s) & (t_zeroed <= bg_end_s)
+                                if bg_mask.any():
+                                    y_proc = np.clip(y_proc - np.nanmean(y_proc[bg_mask]), 0, None)
+                        y_max = np.nanmax(y_proc)
+                        prominence = round(max(1.0, float(y_max) * 0.3), 0)
                         if hasattr(self, 'spr_channel_prominence'):
                             self.spr_channel_prominence[iso] = prominence
 
