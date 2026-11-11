@@ -3407,6 +3407,24 @@ class ioliteOptimiser(QWidget):
         # Plot individual channel (Always seconds X)
         # Uses first color from palette (now Purple)
         line, = ax.plot(t_zeroed, y_plot, lw=1.5, alpha=0.9, label=iso)
+
+        # --- PEAK CUTOFF THRESHOLD LINE & FLOATING TEXT ---
+        import matplotlib.transforms as mtransforms
+        y_Transform = mtransforms.blended_transform_factory(ax.transAxes, ax.transData)
+        self.spr_cutoff_line = ax.axhline(
+            y=prominence, color=fg_col, linestyle='--', linewidth=1.2, alpha=0.75, zorder=4
+        )
+        self.spr_cutoff_line._exclude_from_rescale = True
+
+        s_prom, p_prom = _si(prominence)
+        prom_str = f"{prominence:.0f}" if prominence < 1000 else f"{s_prom}{p_prom}".strip()
+        self.spr_cutoff_text = ax.annotate(
+            f"Peak Cutoff: {prom_str}",
+            xy=(0.01, prominence), xycoords=y_Transform,
+            xytext=(0, 4), textcoords="offset points",
+            color=fg_col, fontsize=8, fontweight='bold',
+            va='bottom', ha='left', clip_on=True, zorder=5
+        )
         
         # Peak Index Labels (Always seconds X)
         self.spr_peak_label_map = {}
@@ -6321,6 +6339,8 @@ class ioliteOptimiser(QWidget):
             # Lines (Signal)
             if hasattr(ax, 'get_lines'):
                 for line in ax.get_lines():
+                    if getattr(line, '_exclude_from_rescale', False):
+                        continue
                     if line.get_visible():
                         ydata = line.get_ydata()
                         if ydata is not None and len(ydata) > 0:
@@ -6534,52 +6554,78 @@ class ioliteOptimiser(QWidget):
             
             self.press_region = 'y_axis' if over_y_axis else ('x_axis' if over_x_axis else 'plot')
 
-            # 1. Handle Region Edge Picking (Opt and SPR Plots)
+            # 1. Handle Region Edge & Cutoff Line Picking (Opt and SPR Plots)
             is_opt_canvas = canvas == getattr(self, 'canvas', None)
             is_spr_canvas = canvas == getattr(self, 'spr_canvas', None)
-            if is_shift and (is_opt_canvas or is_spr_canvas):
-                if event.xdata is not None:
-                    xlim = ax.get_xlim()
-                    # Permissive threshold: 1% of plot width
-                    threshold = (xlim[1] - xlim[0]) * 0.01
-                    t_shift = getattr(self, 't_start', 0)
-                    
-                    found_edge = None
-                    if is_opt_canvas:
+            if is_opt_canvas or is_spr_canvas:
+                xdata = event.xdata
+                ydata = event.ydata
+                if xdata is None or ydata is None:
+                    try:
+                        xdata, ydata = ax.transData.inverted().transform((event.x, event.y))
+                    except Exception:
+                        pass
+
+                xlim = ax.get_xlim()
+                # Permissive threshold: 1% of plot width
+                threshold = (xlim[1] - xlim[0]) * 0.01
+                t_shift = getattr(self, 't_start', 0)
+                
+                found_edge = None
+                if is_spr_canvas and over_plot and ydata is not None:
+                    # Direct hover + click-and-drag on Peak Cutoff horizontal line (2% of Y-axis height tolerance)
+                    ylim = ax.get_ylim()
+                    y_threshold = abs(ylim[1] - ylim[0]) * 0.02
+                    prom_val = self._get(getattr(self, 'spin_spr_prom', None), 'value')
+                    if prom_val is not None and abs(ydata - prom_val) < y_threshold:
+                        found_edge = 'spr_cutoff'
+
+                if not found_edge and is_shift:
+                    if is_opt_canvas and xdata is not None:
                         if hasattr(self, 'bg_times') and self.bg_times:
                             s_bg, e_bg = self.bg_times[0] - t_shift, self.bg_times[1] - t_shift
-                            if abs(event.xdata - s_bg) < threshold: found_edge = 'bg_start'
-                            elif abs(event.xdata - e_bg) < threshold: found_edge = 'bg_end'
+                            if abs(xdata - s_bg) < threshold: found_edge = 'bg_start'
+                            elif abs(xdata - e_bg) < threshold: found_edge = 'bg_end'
                             
                         if not found_edge and hasattr(self, 'sig_times') and self.sig_times:
                             s_sig, e_sig = self.sig_times[0] - t_shift, self.sig_times[1] - t_shift
-                            if abs(event.xdata - s_sig) < threshold: found_edge = 'sig_start'
-                            elif abs(event.xdata - e_sig) < threshold: found_edge = 'sig_end'
-                    elif is_spr_canvas:
+                            if abs(xdata - s_sig) < threshold: found_edge = 'sig_start'
+                            elif abs(xdata - e_sig) < threshold: found_edge = 'sig_end'
+                    elif is_spr_canvas and xdata is not None:
                         if self._get(getattr(self, 'chk_spr_bg_sub', None), 'isChecked'):
                             s_bg = self._get(getattr(self, 'spin_spr_bg_start', None), 'value')
                             e_bg = self._get(getattr(self, 'spin_spr_bg_end', None), 'value')
                             if s_bg is not None and e_bg is not None:
-                                if abs(event.xdata - s_bg) < threshold: found_edge = 'spr_bg_start'
-                                elif abs(event.xdata - e_bg) < threshold: found_edge = 'spr_bg_end'
-                        
-                    if found_edge:
-                        self.dragged_edge = found_edge
-                        if found_edge.startswith('spr_'):
-                            if hasattr(self, 'chk_spr_auto_bg'):
-                                self._block_signals(self.chk_spr_auto_bg, True)
-                                self.chk_spr_auto_bg.setChecked(False)
-                                self._block_signals(self.chk_spr_auto_bg, False)
-                                try:
-                                    self.spin_spr_bg_start.setEnabled(True)
-                                    self.spin_spr_bg_end.setEnabled(True)
-                                except: pass
-                        else:
-                            if hasattr(self, 'chk_auto'):
-                                self._block_signals(self.chk_auto, True)
-                                self.chk_auto.setChecked(False)
-                                self._block_signals(self.chk_auto, False)
-                        return # Edge dragging takes precedence
+                                if abs(xdata - s_bg) < threshold: found_edge = 'spr_bg_start'
+                                elif abs(xdata - e_bg) < threshold: found_edge = 'spr_bg_end'
+                    
+                if found_edge:
+                    self.dragged_edge = found_edge
+                    self.press_ax = ax
+                    if found_edge == 'spr_cutoff':
+                        if hasattr(self, 'chk_spr_auto_prom'):
+                            self._block_signals(self.chk_spr_auto_prom, True)
+                            self.chk_spr_auto_prom.setChecked(False)
+                            self._block_signals(self.chk_spr_auto_prom, False)
+                            self.spin_spr_prom.setEnabled(True)
+                        curr_iso = self._get(self.cmb_spr_iso, 'currentText')
+                        if curr_iso and hasattr(self, 'spr_channel_auto_prom'):
+                            self.spr_channel_auto_prom[curr_iso] = False
+                    elif found_edge.startswith('spr_'):
+                        if hasattr(self, 'chk_spr_auto_bg'):
+                            self._block_signals(self.chk_spr_auto_bg, True)
+                            self.chk_spr_auto_bg.setChecked(False)
+                            self._block_signals(self.chk_spr_auto_bg, False)
+                            try:
+                                self.spin_spr_bg_start.setEnabled(True)
+                                self.spin_spr_bg_end.setEnabled(True)
+                            except: pass
+                    else:
+                        if hasattr(self, 'chk_auto'):
+                            self._block_signals(self.chk_auto, True)
+                            self.chk_auto.setChecked(False)
+                            self._block_signals(self.chk_auto, False)
+                    return # Edge dragging takes precedence
             
             # 2. Initiate Panning (Standard or SPR) - STORE STARTING STATE
             self.plot_panning = True
@@ -6605,6 +6651,35 @@ class ioliteOptimiser(QWidget):
 
         # 1. Handle Edge Dragging (Priority)
         if self.dragged_edge:
+            if self.dragged_edge == 'spr_cutoff':
+                ydata = event.ydata
+                if ydata is None:
+                    try: ydata = ax.transData.inverted().transform((event.x, event.y))[1]
+                    except: return
+                val = round(max(0.0, float(ydata)), 0)
+                self._block_signals(self.spin_spr_prom, True)
+                self.spin_spr_prom.setValue(val)
+                self._block_signals(self.spin_spr_prom, False)
+
+                curr_iso = self._get(self.cmb_spr_iso, 'currentText')
+                if curr_iso and hasattr(self, 'spr_channel_prominence'):
+                    self.spr_channel_prominence[curr_iso] = val
+                    self.spr_channel_auto_prom[curr_iso] = False
+
+                # Fast visual update of line and floating label during drag
+                if hasattr(self, 'spr_cutoff_line') and self.spr_cutoff_line is not None:
+                    self.spr_cutoff_line.set_ydata([val, val])
+                if hasattr(self, 'spr_cutoff_text') and self.spr_cutoff_text is not None:
+                    self.spr_cutoff_text.xy = (0.01, val)
+                    if val >= 1e9: prom_str = f"{val/1e9:.2f} G"
+                    elif val >= 1e6: prom_str = f"{val/1e6:.2f} M"
+                    elif val >= 1e3: prom_str = f"{val/1e3:.2f} k"
+                    else: prom_str = f"{val:.0f}"
+                    self.spr_cutoff_text.set_text(f"Peak Cutoff: {prom_str}")
+                if getattr(self, 'spr_canvas', None):
+                    self.spr_canvas.draw()
+                return
+
             # For edge dragging, we need xdata. If it's None, try to compute it from pixels.
             xdata = event.xdata
             if xdata is None:
@@ -6703,28 +6778,40 @@ class ioliteOptimiser(QWidget):
                    
         is_opt_canvas = event.canvas == getattr(self, 'canvas', None)
         is_spr_canvas = event.canvas == getattr(self, 'spr_canvas', None)
-        if is_shift and (is_opt_canvas or is_spr_canvas) and event.inaxes:
+        if (is_opt_canvas or is_spr_canvas) and event.inaxes and event.inaxes != getattr(self, 'spr_ax_comp', None):
             xlim = event.inaxes.get_xlim()
             threshold = (xlim[1] - xlim[0]) * 0.01
             t_shift = getattr(self, 't_start', 0)
             
             near_edge = False
-            if is_opt_canvas:
-                for times in [self.bg_times, self.sig_times]:
-                    if times:
-                        if abs(event.xdata - (times[0]-t_shift)) < threshold or \
-                           abs(event.xdata - (times[1]-t_shift)) < threshold:
-                            near_edge = True
-                            break
-            elif is_spr_canvas:
-                if self._get(getattr(self, 'chk_spr_bg_sub', None), 'isChecked'):
-                    s_bg = self._get(getattr(self, 'spin_spr_bg_start', None), 'value')
-                    e_bg = self._get(getattr(self, 'spin_spr_bg_end', None), 'value')
-                    if s_bg is not None and e_bg is not None:
-                        if abs(event.xdata - s_bg) < threshold or abs(event.xdata - e_bg) < threshold:
-                            near_edge = True
+            near_cutoff = False
+
+            if is_spr_canvas and event.ydata is not None:
+                ylim = event.inaxes.get_ylim()
+                y_threshold = abs(ylim[1] - ylim[0]) * 0.02
+                prom_val = self._get(getattr(self, 'spin_spr_prom', None), 'value')
+                if prom_val is not None and abs(event.ydata - prom_val) < y_threshold:
+                    near_cutoff = True
+
+            if not near_cutoff and is_shift and event.xdata is not None:
+                if is_opt_canvas:
+                    for times in [self.bg_times, self.sig_times]:
+                        if times:
+                            if abs(event.xdata - (times[0]-t_shift)) < threshold or \
+                               abs(event.xdata - (times[1]-t_shift)) < threshold:
+                                near_edge = True
+                                break
+                elif is_spr_canvas:
+                    if self._get(getattr(self, 'chk_spr_bg_sub', None), 'isChecked'):
+                        s_bg = self._get(getattr(self, 'spin_spr_bg_start', None), 'value')
+                        e_bg = self._get(getattr(self, 'spin_spr_bg_end', None), 'value')
+                        if s_bg is not None and e_bg is not None:
+                            if abs(event.xdata - s_bg) < threshold or abs(event.xdata - e_bg) < threshold:
+                                near_edge = True
             
-            if near_edge:
+            if near_cutoff:
+                event.canvas.setCursor(Qt.SizeVerCursor)
+            elif near_edge:
                 event.canvas.setCursor(Qt.SizeHorCursor)
             else:
                 event.canvas.setCursor(Qt.ArrowCursor)
@@ -6755,7 +6842,7 @@ class ioliteOptimiser(QWidget):
                  self._opt_axis_limits = (ax.get_xlim(), ax.get_ylim())
 
             if edged and edged.startswith('spr_'):
-                self.run_spr_analysis(rescale=False)
+                self.run_spr_analysis(rescale=False, force_refresh=(edged == 'spr_cutoff'))
             else:
                 # Trigger final optimization and sync
                 self.on_region_edited()
