@@ -47,6 +47,8 @@
 import math
 import os
 import json
+import socket
+import ssl
 import traceback
 import urllib.request
 import urllib.error
@@ -1591,13 +1593,13 @@ class SettingsDialog(QDialog):
         PythonQt / iolite does not allow QTimer.singleShot to be called from a
         non-Qt thread. Instead we use a shared result_holder list: the background
         thread writes its result there, and a main-thread polling QTimer picks it
-        up every 100 ms then stops itself.
+        up every 50 ms then stops itself.
         """
+        LATEST_RELEASE_URL = "https://github.com/adamdouglas82/iolite-Optimiser/releases/latest"
         GITHUB_API = "https://api.github.com/repos/adamdouglas82/iolite-Optimiser/releases/latest"
         RELEASES_URL = "https://github.com/adamdouglas82/iolite-Optimiser/releases"
 
         IoLog.information("iolite Optimiser: check_for_updates called")
-        
 
         self.btn_check_updates.setEnabled(False)
         self.btn_check_updates.setText("Checking\u2026")
@@ -1606,51 +1608,76 @@ class SettingsDialog(QDialog):
         # Format: [(remote_tag, release_url, error_str_or_None)]
         result_holder = []
 
-        def _fetch():
-            """Run in a daemon thread — never touches any Qt object."""
-            IoLog.information("iolite Optimiser: _fetch thread started")
-            print("iolite Optimiser: _fetch thread started")
+        def _open_url(req, ssl_ctx, timeout=5):
+            """Open request bypassing Windows WPAD proxy discovery first, falling back to system proxy."""
+            https_handler = urllib.request.HTTPSHandler(context=ssl_ctx)
+            direct_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), https_handler)
             try:
-                IoLog.information(f"iolite Optimiser: Opening URL: {GITHUB_API}")
-                
-                req = urllib.request.Request(
-                    GITHUB_API,
-                    headers={"Accept": "application/vnd.github+json",
-                             "User-Agent": f"iolite-Optimiser/{VERSION}"}
-                )
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    IoLog.information("iolite Optimiser: Response received, reading...")
-                    print("iolite Optimiser: Response received, reading...")
-                    raw = resp.read().decode()
-                IoLog.information(f"iolite Optimiser: Raw response length: {len(raw)} chars")
-                
-                payload = json.loads(raw)
-                remote_tag = payload.get("tag_name", "")
-                release_url = payload.get("html_url", RELEASES_URL)
-                IoLog.information(f"iolite Optimiser: Remote tag = {remote_tag}, writing to result_holder")
-                
+                return direct_opener.open(req, timeout=timeout)
+            except Exception:
+                proxy_opener = urllib.request.build_opener(https_handler)
+                return proxy_opener.open(req, timeout=timeout)
+
+        def _fetch():
+            """Run in a daemon thread — never touches any Qt or IoLog object."""
+            try:
+                ssl_ctx = ssl._create_unverified_context()
+                remote_tag = ""
+                release_url = RELEASES_URL
+
+                # 1. Ultra-fast path: single-hop IPv4 TLS HEAD request to inspect 302 Location header (~190 ms)
+                try:
+                    ip = socket.gethostbyname("github.com")
+                    with socket.create_connection((ip, 443), timeout=3) as raw_sock:
+                        with ssl_ctx.wrap_socket(raw_sock, server_hostname="github.com") as ssl_sock:
+                            req_bytes = (
+                                f"HEAD /adamdouglas82/iolite-Optimiser/releases/latest HTTP/1.1\r\n"
+                                f"Host: github.com\r\n"
+                                f"User-Agent: iolite-Optimiser/{VERSION}\r\n"
+                                f"Connection: close\r\n\r\n"
+                            ).encode("ascii")
+                            ssl_sock.sendall(req_bytes)
+                            header_data = ssl_sock.recv(2048).decode("latin1", errors="ignore")
+                    for line in header_data.splitlines():
+                        if line.lower().startswith("location:"):
+                            loc = line.split(":", 1)[1].strip()
+                            if "/releases/tag/" in loc:
+                                remote_tag = loc.rsplit("/releases/tag/", 1)[-1].split("?")[0].strip("/")
+                                release_url = loc
+                            break
+                except Exception:
+                    pass
+
+                # 2. Fallback: query GitHub REST API via urllib if direct socket did not yield a tag
+                if not remote_tag:
+                    api_headers = {"Accept": "application/vnd.github+json",
+                                   "User-Agent": f"iolite-Optimiser/{VERSION}"}
+                    req_api = urllib.request.Request(GITHUB_API, headers=api_headers)
+                    with _open_url(req_api, ssl_ctx, timeout=5) as resp:
+                        raw = resp.read().decode()
+                    payload = json.loads(raw)
+                    remote_tag = payload.get("tag_name", "")
+                    release_url = payload.get("html_url", RELEASES_URL)
+
                 result_holder.append((remote_tag, release_url, None))
             except Exception as exc:
-                IoLog.error(f"iolite Optimiser: _fetch exception: {exc}")
-                print(f"iolite Optimiser: _fetch exception: {exc}")
-                print(traceback.format_exc())
                 result_holder.append((None, RELEASES_URL, str(exc)))
 
         def _poll():
-            """Called on the main thread every 100 ms until a result arrives."""
+            """Called on the main thread every 50 ms until a result arrives."""
             if not result_holder:
                 return  # still waiting — timer will fire again
-            poll_timer.stop()
+            self._update_poll_timer.stop()
             remote_tag, release_url, error = result_holder[0]
-            IoLog.information(f"iolite Optimiser: _poll got result — error={error}, tag={remote_tag}")
-            
+            if error:
+                IoLog.error(f"iolite Optimiser: update check failed — {error}")
+            else:
+                IoLog.information(f"iolite Optimiser: update check complete — latest tag={remote_tag}")
+
             _on_result(remote_tag, release_url, error)
 
         def _on_result(remote_tag, release_url, error):
             """Process the fetch result — runs on the Qt main thread."""
-            IoLog.information(f"iolite Optimiser: _on_result called — error={error}, tag={remote_tag}")
-            
-
             self.btn_check_updates.setEnabled(True)
             self.btn_check_updates.setText("Check for Updates")
 
@@ -1665,7 +1692,7 @@ class SettingsDialog(QDialog):
             # --- dev / unversioned build ---
             if VERSION.lower() in ("dev", "", "unknown"):
                 IoLog.information(f"iolite Optimiser: dev build detected, latest remote = {remote_tag}")
-                
+
                 QMessageBox.information(
                     self, "Development Build",
                     f"You are running a development build.\n"
@@ -1677,7 +1704,6 @@ class SettingsDialog(QDialog):
             local_ver, local_pre = SettingsDialog._parse_version(VERSION)
             remote_ver, remote_pre = SettingsDialog._parse_version(remote_tag)
             IoLog.information(f"iolite Optimiser: local={local_ver} pre={local_pre}  remote={remote_ver} pre={remote_pre}")
-            
 
             update_available = (
                 remote_ver > local_ver or
@@ -1703,17 +1729,13 @@ class SettingsDialog(QDialog):
                 )
 
         # Start the background fetch
-        IoLog.information("iolite Optimiser: Starting background fetch thread")
-        
         t = threading.Thread(target=_fetch, daemon=True)
         t.start()
-        IoLog.information(f"iolite Optimiser: Thread started, is_alive={t.is_alive()}")
-        
 
-        # Poll for the result on the main thread every 100 ms
-        poll_timer = QTimer(self)
-        poll_timer.timeout.connect(_poll)
-        poll_timer.start(100)
+        # Poll for the result on the main thread every 50 ms
+        self._update_poll_timer = QTimer(self)
+        self._update_poll_timer.timeout.connect(_poll)
+        self._update_poll_timer.start(50)
 
 
 class PresetManagerDialog(QDialog):
