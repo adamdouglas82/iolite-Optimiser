@@ -3129,13 +3129,13 @@ class ioliteOptimiser(QWidget):
             old_xlim = old_ax.get_xlim()
             old_ylim = old_ax.get_ylim()
             
-        # Auto-detect prominence if enabled
-        if self._get(self.chk_spr_auto_prom, 'isChecked'):
-            self._auto_detect_spr_prominence()
-            
         # Auto-detect background if enabled
         if self._get(getattr(self, 'chk_spr_auto_bg', None), 'isChecked'):
             self._auto_detect_spr_bg()
+
+        # Auto-detect prominence if enabled (after background region is resolved)
+        if self._get(self.chk_spr_auto_prom, 'isChecked'):
+            self._auto_detect_spr_prominence()
             
         iso = self._get(self.cmb_spr_iso, 'currentText')
         prominence = self._get(self.spin_spr_prom, 'value')
@@ -3699,24 +3699,77 @@ class ioliteOptimiser(QWidget):
             # IoLog.error(f"iolite Optimiser: Error in auto-prominence detection: {e}")
             pass
 
-    def _auto_detect_spr_bg(self, iso=None):
-        if self.spr_df is None: return
+    def _auto_detect_spr_bg(self, iso=None, check_availability=False):
+        if self.spr_df is None:
+            return False
         t_orig = self.spr_df['Time'].values
-        if len(t_orig) == 0: return
+        if len(t_orig) < 2:
+            return False
         t0 = t_orig[0]
-        
+        t_rel = t_orig - t0
+        total_dur = float(t_rel[-1])
+
         try:
-            (bg_s, bg_e), _ = Logic.auto_detect_regions(self.spr_df)
-            bg_s_rel = max(0.0, float(bg_s - t0))
-            bg_e_rel = max(0.0, float(bg_e - t0))
-            self._block_signals(self.spin_spr_bg_start, True)
-            self._block_signals(self.spin_spr_bg_end, True)
-            self.spin_spr_bg_start.setValue(bg_s_rel)
-            self.spin_spr_bg_end.setValue(bg_e_rel)
-            self._block_signals(self.spin_spr_bg_start, False)
-            self._block_signals(self.spin_spr_bg_end, False)
-        except:
-            pass
+            numeric_cols = [c for c in self.spr_df.columns if c != 'Time' and np.issubdtype(self.spr_df[c].dtype, np.number)]
+            if not numeric_cols:
+                return False
+
+            y = self.spr_df[numeric_cols].sum(axis=1).values
+            # Robust baseline estimation using lower quartile (immune to pulses at start or end)
+            p25 = np.nanpercentile(y, 25)
+            low_pts = y[y <= p25]
+            bg_med = np.nanmedian(low_pts) if len(low_pts) > 0 else p25
+            y_max = np.nanmax(y)
+            thresh = bg_med + (y_max - bg_med) * 0.05
+
+            sig_indices = np.where(y > thresh)[0]
+            if len(sig_indices) == 0:
+                return False
+
+            first_pulse_t = float(t_rel[sig_indices[0]])
+            last_pulse_t = float(t_rel[sig_indices[-1]])
+            tail_gap_t = total_dur - last_pulse_t
+
+            MIN_BG_DURATION_S = 5.0
+            bg_s_rel, bg_e_rel = None, None
+
+            if first_pulse_t >= MIN_BG_DURATION_S:
+                # Valid gas blank at the start of the file (crop 5% at start, pull back 15% before first pulse)
+                bg_s_rel = round(first_pulse_t * 0.05, 2)
+                bg_e_rel = round(first_pulse_t * 0.85, 2)
+            elif tail_gap_t >= MIN_BG_DURATION_S:
+                # Valid gas blank at the end of the file (pull forward 15% after last pulse, crop 5% before end)
+                bg_s_rel = round(last_pulse_t + tail_gap_t * 0.15, 2)
+                bg_e_rel = round(total_dur - tail_gap_t * 0.05, 2)
+
+            if bg_s_rel is not None and bg_e_rel is not None and bg_e_rel > bg_s_rel:
+                self._block_signals(self.spin_spr_bg_start, True)
+                self._block_signals(self.spin_spr_bg_end, True)
+                self.spin_spr_bg_start.setValue(max(0.0, bg_s_rel))
+                self.spin_spr_bg_end.setValue(max(0.0, bg_e_rel))
+                self._block_signals(self.spin_spr_bg_start, False)
+                self._block_signals(self.spin_spr_bg_end, False)
+                if check_availability and hasattr(self, 'chk_spr_bg_sub'):
+                    self._block_signals(self.chk_spr_bg_sub, True)
+                    self.chk_spr_bg_sub.setChecked(self.persistent_settings.get('spr_bg_sub', True))
+                    self._block_signals(self.chk_spr_bg_sub, False)
+                    vis = self._get(self.chk_spr_bg_sub, 'isChecked')
+                    for w in ('chk_spr_auto_bg', 'lbl_bg_prefix', 'spin_spr_bg_start', 'lbl_bg_to', 'spin_spr_bg_end'):
+                        if hasattr(self, w):
+                            getattr(self, w).setVisible(vis)
+                return True
+            else:
+                # Neither start nor end has >= 5 seconds of background: uncheck Subtract Background (ephemeral)
+                if check_availability and hasattr(self, 'chk_spr_bg_sub'):
+                    self._block_signals(self.chk_spr_bg_sub, True)
+                    self.chk_spr_bg_sub.setChecked(False)
+                    self._block_signals(self.chk_spr_bg_sub, False)
+                    for w in ('chk_spr_auto_bg', 'lbl_bg_prefix', 'spin_spr_bg_start', 'lbl_bg_to', 'spin_spr_bg_end'):
+                        if hasattr(self, w):
+                            getattr(self, w).setVisible(False)
+                return False
+        except Exception:
+            return False
 
     def _on_spr_bg_changed(self):
         # 1. Turn off Auto if manually adjusted
@@ -6025,6 +6078,9 @@ class ioliteOptimiser(QWidget):
                              self.cmb_spr_iso.clear()
                              self.cmb_spr_iso.addItems(cols)
                              self._block_signals(self.cmb_spr_iso, False)
+
+                             # Detect whether a >= 5s background exists at start or end of file
+                             self._auto_detect_spr_bg(check_availability=True)
                              
                              # Force refresh to wipe internal caches in run_spr_analysis
                              self.run_spr_analysis(force_refresh=True)
