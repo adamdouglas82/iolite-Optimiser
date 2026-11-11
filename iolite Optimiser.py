@@ -102,9 +102,36 @@ except NameError:
     from iolite import data
 
 try:
-    IoLog
+    _RawIoLog = IoLog
 except NameError:
-    from iolite import IoLog
+    from iolite import IoLog as _RawIoLog
+
+
+class _ConditionalIoLog:
+    """Wrapper around iolite's IoLog that only emits log entries when enabled in Settings."""
+    enabled = False
+
+    @classmethod
+    def information(cls, msg):
+        if cls.enabled:
+            _RawIoLog.information(msg)
+
+    @classmethod
+    def warning(cls, msg):
+        if cls.enabled:
+            _RawIoLog.warning(msg)
+
+    @classmethod
+    def error(cls, msg):
+        if cls.enabled:
+            _RawIoLog.error(msg)
+
+    @staticmethod
+    def saveLogToFile(path):
+        return _RawIoLog.saveLogToFile(path)
+
+
+IoLog = _ConditionalIoLog
 
 # Backward-compatible alias for trapezoidal integration (NumPy 1.x vs 2.x)
 trapz = getattr(np, 'trapezoid', getattr(np, 'trapz', None))
@@ -622,8 +649,6 @@ class Logic:
             if composite_df is None or composite_df.empty:
                 return None, None
                 
-            IoLog.information("Logic.generate_pulse_train_v3: Starting...")
-                
             # 1. Prepare Composite Pulse (Interpolant)
             comp_t = composite_df['Relative Time (s)'].values
             comp_y = composite_df['Normalised Intensity'].values
@@ -722,8 +747,6 @@ class Logic:
                 # Store Dwell in DF for plotting
                 dwells = [dwell] * len(m_times)
                 channel_results[name] = pd.DataFrame({'Time': m_times, 'Intensity': m_y, 'Dwell': dwells})
-
-            IoLog.information("Logic.generate_pulse_train_v3: Complete")
             
             theo_df = pd.DataFrame({'Time': t_axis, 'Intensity': y_theoretical})
             return theo_df, channel_results
@@ -1433,8 +1456,7 @@ class Logic:
                     rec_bg = (time_vals[0], time_vals[max(1, s_idx // 2)])
                 
                 return rec_bg, rec_sig
-        except Exception as e:
-            # IoLog.warning(f"iolite Optimiser: Auto-detect error: {e}")
+        except Exception:
             pass
             
         t = df['Time'].values
@@ -1448,7 +1470,6 @@ class CopyableTableWidget(QTableWidget):
         return getattr(obj, attr)() if callable(getattr(obj, attr)) else getattr(obj, attr)
 
     def keyPressEvent(self, event):
-        # IoLog.information(f"Key Press: {event.key()} Mod: {event.modifiers()}")
         if (event.key() == Qt.Key_C and (event.modifiers() & Qt.ControlModifier)):
             self.copy_selection()
             event.accept()
@@ -1492,7 +1513,6 @@ class CopyableTableWidget(QTableWidget):
                 
                 final_text = "\n".join(text_grid)
                 QApplication.clipboard().setText(final_text)
-                IoLog.information(f"Copied {len(rows)} rows to clipboard.")
         except Exception as e:
             IoLog.error(f"Copy Error: {e}")
 
@@ -1518,8 +1538,12 @@ class SettingsDialog(QDialog):
         bottom_box.setSpacing(5)
         bottom_box.setContentsMargins(0, 0, 0, 0)
 
-        # Row 1: GitHub actions
+        # Row 1: Diagnostic Logging toggle and GitHub actions
         row1 = QHBoxLayout()
+        self.chk_enable_logging = QCheckBox("Enable Logging")
+        self.chk_enable_logging.setChecked(False)
+        self.chk_enable_logging.setToolTip("When enabled, diagnostic messages and warnings are written to the iolite Messages log.")
+        row1.addWidget(self.chk_enable_logging)
         row1.addStretch()
 
         self.btn_visit_repo = QPushButton("GitHub Repo")
@@ -1563,13 +1587,11 @@ class SettingsDialog(QDialog):
     def visit_repo(self):
         """Open the main repository page in the user's browser."""
         REPO_URL = "https://github.com/adamdouglas82/iolite-Optimiser"
-        IoLog.information("iolite Optimiser: visit_repo called")
         QDesktopServices.openUrl(QUrl(REPO_URL))
 
     def report_issue(self):
         """Open the GitHub issues page in the user's browser."""
         ISSUES_URL = "https://github.com/adamdouglas82/iolite-Optimiser/issues"
-        IoLog.information("iolite Optimiser: report_issue called")
         QDesktopServices.openUrl(QUrl(ISSUES_URL))
 
     @staticmethod
@@ -2263,9 +2285,17 @@ class ioliteOptimiser(QWidget):
             self.persistent_settings = {}
             IoLog.warning(f"iolite Optimiser: Error creating settings path: {e}")
 
-        # Create Hardware Settings Dialog early
+        # Create Hardware Settings Dialog early and sync logging checkbox
         self.settings_dlg = SettingsDialog(self)
+        if hasattr(self.settings_dlg, 'chk_enable_logging'):
+            self.settings_dlg.chk_enable_logging.setChecked(bool(self.persistent_settings.get('enable_logging', False)))
+            self.settings_dlg.chk_enable_logging.toggled.connect(self._on_logging_toggled)
         self.ui_initialized = False
+
+    def _on_logging_toggled(self, checked):
+        _ConditionalIoLog.enabled = bool(checked)
+        self.persistent_settings['enable_logging'] = bool(checked)
+        self.save_persistent_settings()
 
     def _get(self, obj, attr):
         if not obj or not hasattr(obj, attr): return None
@@ -2311,7 +2341,6 @@ class ioliteOptimiser(QWidget):
             # &lt; 128 is usually dark
             lightness = bg_color.lightness()
             is_dark = lightness < 128
-            # IoLog.information(f"Theme Detect: App Lightness={lightness}, IsDark={is_dark}")
             return is_dark
         except:
             return False
@@ -2341,7 +2370,6 @@ class ioliteOptimiser(QWidget):
                     except:
                         pass
                     self._block_signals(cb, False)
-        IoLog.information(f"iolite Optimiser: apply_theme called with text='{text}'")
         
         # 1. Determine System Theme (Table/UI)
         self.system_is_dark = self.detect_theme()
@@ -2436,7 +2464,6 @@ class ioliteOptimiser(QWidget):
         
         # Tab 3: Pulse Train Simulator
         if SHOW_PULSE_TRAIN_SIMULATOR:
-            IoLog.information("iolite Optimiser: Adding Pulse Train Tab...")
             self.tab_pulse = QWidget()
             self.init_pulse_train_tab()
             self.tabs.addTab(self.tab_pulse, "Pulse Train Simulator")
@@ -3696,8 +3723,7 @@ class ioliteOptimiser(QWidget):
             # Save the auto-detected baseline so it is respected as a default by the global table
             self.spr_channel_prominence[iso] = auto_val
         except Exception as e:
-            # IoLog.error(f"iolite Optimiser: Error in auto-prominence detection: {e}")
-            pass
+            IoLog.error(f"iolite Optimiser: Error in auto-prominence detection: {e}")
 
     def _auto_detect_spr_bg(self, iso=None, check_availability=False):
         if self.spr_df is None:
@@ -4140,8 +4166,7 @@ class ioliteOptimiser(QWidget):
                     self.spr_all_stats_table.setItem(i, 10, _it(f"{s_a001}{p_a001}"))
 
         except Exception as e:
-            # IoLog.error(f"iolite Optimiser: Error in All Channel Stats update: {e}")
-            pass
+            IoLog.error(f"iolite Optimiser: Error in All Channel Stats update: {e}")
 
     def _on_spr_apply_max_clicked(self, mode):
         # mode can be 'avg', 'max', 'comp' (applying the 1% values of the winning channel)
@@ -4938,14 +4963,12 @@ class ioliteOptimiser(QWidget):
         
         
         # 1. Sync internal state with loaded settings (Silent population)
-        IoLog.information("iolite Optimiser: Applying hardware settings...")
         self._handle_mfr_changed(self._get(self.cmb_mfr, 'currentText'))
         self._handle_laser_mfr_changed(self._get(self.cmb_laser_mfr, 'currentText'))
         self._update_hw_summary()
         self._update_ui_precisions()
 
         # 2. Connect signals after initial population to prevent startup save/opt spam
-        IoLog.information("iolite Optimiser: Connecting interactive signals...")
         self.cmb_mfr.currentTextChanged.connect(self._handle_mfr_changed)
         self.cmb_mfr.currentTextChanged.connect(self._on_ui_change)
         
@@ -5012,23 +5035,10 @@ class ioliteOptimiser(QWidget):
         self.apply_theme(trigger_opt=False)
 
         # 3. Initial Data Loading & Optimization
-        IoLog.information("iolite Optimiser: Starting initial data load...")
         self.refresh_data()
-        
-        if self.opt_df is not None:
-            if self.bg_times is not None and self.sig_times is not None:
-                IoLog.information("iolite Optimiser: Initial regions valid. Optimisation triggered by refresh_data.")
-                # self.run_optimisation(refresh=False) -> HANDLED BY refresh_data()
-            else:
-                IoLog.information("iolite Optimiser: Initial regions empty (Auto-Detect required).")
-        else:
-            IoLog.information("iolite Optimiser: No data found on startup.")
-            
-        IoLog.information("iolite Optimiser: UI initialization complete.")
     
     def _on_result_link_clicked(self, link):
         if link == "#set_dwells":
-            IoLog.information("iolite Optimiser: User clicked 'Set Dwell Times' link.")
             # Determine missing channels again or just force open for all
             if hasattr(self, 'opt_df') and self.opt_df is not None:
                 self.resolve_dwell_times(set(self.opt_df.columns) - {'Time'})
@@ -5706,19 +5716,17 @@ class ioliteOptimiser(QWidget):
 
 
     def load_persistent_settings(self):
-        IoLog.information(f"iolite Optimiser: Loading settings from {self.settings_json_path}")
         try:
             if os.path.exists(self.settings_json_path):
                 with open(self.settings_json_path, 'r') as f:
                     s_data = json.load(f)
+                    _ConditionalIoLog.enabled = bool(s_data.get('enable_logging', False))
+                    IoLog.information(f"iolite Optimiser: Loading settings from {self.settings_json_path}")
                     self.speed_dps_imaging = s_data.get('speed_dps_imaging', 2)
                     self.speed_dps_line = s_data.get('speed_dps_line', 0)
                     self.overlap_dps = s_data.get('overlap_dps', 2)
                     self.dosage_dps = s_data.get('dosage_dps', 2)
-                    # IoLog.information("iolite Optimiser: Settings loaded successfully") # Silent
                     return s_data
-            else:
-                IoLog.information("iolite Optimiser: No settings file found")
         except Exception as e:
             IoLog.error(f"iolite Optimiser: Error loading settings: {e}")
         return {}
@@ -5793,12 +5801,11 @@ class ioliteOptimiser(QWidget):
                 # 'opt_rescale_y': Ephemeral
                 'spr_y_zoom': self._get(self.chk_y_zoom_spr, 'isChecked'),
                 'sync_strategy': self._get(self.cmb_sync_strategy, 'currentText'),
+                'enable_logging': self._get(self.settings_dlg.chk_enable_logging, 'isChecked') if hasattr(self, 'settings_dlg') and hasattr(self.settings_dlg, 'chk_enable_logging') else False,
             })
             if self.settings_json_path:
                 with open(self.settings_json_path, 'w') as f:
                     json.dump(self.persistent_settings, f, indent=4)
-                # Log success only once or rarely to avoid spam, but for now we log it:
-                # IoLog.information(f"iolite Optimiser: Settings saved to {self.settings_json_path}")
         except Exception as e:
             IoLog.error(f"iolite Optimiser: Error saving settings: {e}")
 
@@ -6036,8 +6043,6 @@ class ioliteOptimiser(QWidget):
                 QMessageBox.warning(self, "Import Failed", msg)
         except Exception as e:
             msg = f"Failed to import/load file: {e}"
-            print(msg)
-            print(traceback.format_exc())
             IoLog.error(f"iolite Optimiser: {msg}")
             log_err = self.check_timestamp_error_in_log()
             if log_err:
@@ -6133,7 +6138,6 @@ class ioliteOptimiser(QWidget):
                              self.run_optimisation(refresh=False)
         except Exception as e:
             msg = f"Refresh Error: {e}"
-            print(msg)
             IoLog.error(f"iolite Optimiser: {msg}")
 
     def resolve_dwell_times(self, channel_names, tab=None):
@@ -7415,8 +7419,7 @@ class ioliteOptimiser(QWidget):
                 self.canvas.repaint() # Force Qt repaint
         except Exception as e:
             msg = f"Plot Error: {e}"
-            print(msg)
-            print(traceback.format_exc())
+            IoLog.error(f"iolite Optimiser: {msg}")
             self.lbl_result.setText(msg)
 
     def get_input_dataframe(self, tab=None, file_path=None):
@@ -7669,10 +7672,8 @@ class ioliteOptimiser(QWidget):
             preserve_zoom = False
             
         if refresh:
-            IoLog.information("iolite Optimiser: Refreshing data...")
             self.lbl_result.setText("Refreshing Data...")
             self.refresh_data(tab="opt")
-            IoLog.information(f"iolite Optimiser: Data refreshed. Data frame is {'None' if self.opt_df is None else 'Valid'}")
 
         # Cache theme for the entire run to ensure consistency
         # Uses cached value from showEvent/apply_theme instead of re-detecting
@@ -7695,8 +7696,6 @@ class ioliteOptimiser(QWidget):
              self.lbl_est_time_hms.setText("-")
              self.lbl_est_time_sec.setText("-")
              self.lbl_est_datapoints.setText("-")
-             if not silent:
-                 IoLog.information("iolite Optimiser: UI Cleared (No Data)")
              QApplication.processEvents()
              return
 
@@ -8448,8 +8447,6 @@ class ioliteOptimiser(QWidget):
             self.lbl_result.setText(msg)
 
     def _on_mode_changed(self, iso_name, text):
-        IoLog.information(f"iolite Optimiser: Mode Changed: {iso_name} -> {text}")
-        
         if iso_name in self.isotope_configs:
             # If switching to Custom, try to seed with the current result from the table
             if text == "Custom":
@@ -8511,8 +8508,6 @@ class ioliteOptimiser(QWidget):
             new_val = float(val_text)
             
             unit, scaler, _ = self._get_dwell_unit_info()
-            
-            IoLog.information(f"iolite Optimiser: Custom Dwell Adjusted (Text): {iso_name} -> {new_val} {unit}")
             
             # Convert UI value to seconds (internal storage unit)
             self.isotope_configs[iso_name]["custom_time_s"] = (new_val * scaler) / 1000.0
@@ -8657,7 +8652,6 @@ class ioliteOptimiser(QWidget):
 
     # --- Pulse Train Simulator Methods ---
     def init_pulse_train_tab(self):
-        IoLog.information("iolite Optimiser: init_pulse_train_tab starting...")
         main_layout = QHBoxLayout()
         left_layout = QVBoxLayout()
         right_layout = QVBoxLayout()
@@ -8931,7 +8925,6 @@ class ioliteOptimiser(QWidget):
             return
         
         try:
-            IoLog.information("iolite Optimiser: run_pulse_simulation called")
             # 1. Gather Inputs
             if not hasattr(self, 'last_sync') or self.last_sync is None:
                 IoLog.warning("Pulse Train: No sync data found yet. Using current or default parameters.")
@@ -8940,7 +8933,6 @@ class ioliteOptimiser(QWidget):
             # Get Selected Isotope (for composite peak)
             try:
                 iso = self._get(self.cmb_spr_iso, 'currentText')
-                IoLog.information(f"iolite Optimiser: Selected ISO: {iso}")
             except: iso = None
             
             shape_pref = self._get(self.cmb_pulse_shape, 'currentText')
@@ -9032,8 +9024,6 @@ class ioliteOptimiser(QWidget):
                     'dwell': at_s,
                     'offset': 0.0
                 })
-            
-            IoLog.information(f"iolite Optimiser: Channel Specs (First 3): {channel_specs[:3]}")
 
             # Generate peak based on preference
             target_washout = self.spin_pulse_washout.value
@@ -9086,12 +9076,8 @@ class ioliteOptimiser(QWidget):
             
             if composite_df is not None:
                 try:
-                    IoLog.information(f"Calling Logic.generate_pulse_train_v3 for {iso}...")
-                    
                     # Lock to a fine resolution of 1e-5 s (10 µs) for maximum integration accuracy
                     dt_s_calc = 1e-5
-                    
-                    IoLog.information(f"iolite Optimiser: Using high-resolution simulator step dt_s = {dt_s_calc:.6f} s")
                     
                     # Use v3
                     theo_df, channel_results = Logic.generate_pulse_train_v3(
@@ -9105,8 +9091,6 @@ class ioliteOptimiser(QWidget):
                         
                         for ch_name, meas_df in channel_results.items():
                              self.pulse_results[ch_name] = (theo_df, meas_df)
-                            
-                        IoLog.information(f"Simulation valid. Channels: {len(channel_results)}")
                         
                 except Exception as e:
                     IoLog.error(f"Logic.generate_pulse_train FAILED for {iso}: {e}")
@@ -9139,7 +9123,6 @@ class ioliteOptimiser(QWidget):
 
 
     def update_pulse_plot(self, preserve_zoom=False):
-        IoLog.information("iolite Optimiser: update_pulse_plot called")
         if not hasattr(self, 'pulse_results') or not self.pulse_results: 
              IoLog.warning("iolite Optimiser: No pulse_results to plot")
              return
@@ -9330,7 +9313,6 @@ class ioliteOptimiser(QWidget):
                  
             self._update_smart_margins(self.pulse_canvas)
             self.pulse_canvas.draw()
-            IoLog.information("iolite Optimiser: pulse_canvas.draw() called successfully")
             
             # --- Update RSD Stats Table ---
             self.pulse_table.setRowCount(0)
@@ -9436,7 +9418,6 @@ widget = None
 def createUIElements():
     # 'ui' is a global object provided by iolite for UI plugins
     global widget
-    IoLog.information("iolite Optimiser: createUIElements called")
     
     try:
         widget = ioliteOptimiser()
