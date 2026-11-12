@@ -458,7 +458,10 @@ class Logic:
             'Area 10% Mean': results_df['Area 10%'].mean(),
             'Area 10% RSD': (results_df['Area 10%'].std() / results_df['Area 10%'].mean() * 100) if len(results_df) > 1 else 0.0,
             'Area 1% Mean': results_df['Area 1%'].mean(),
-            'Area 1% RSD': (results_df['Area 1%'].std() / results_df['Area 1%'].mean() * 100) if len(results_df) > 1 else 0.0
+            'Area 1% RSD': (results_df['Area 1%'].std() / results_df['Area 1%'].mean() * 100) if len(results_df) > 1 else 0.0,
+            'Max Intensity Mean': results_df['Max Intensity'].mean(),
+            'Max Intensity RSD': (results_df['Max Intensity'].std() / results_df['Max Intensity'].mean() * 100) if len(results_df) > 1 else 0.0,
+            'Max Intensity Max': results_df['Max Intensity'].max()
         }
         return stats
 
@@ -2834,7 +2837,27 @@ class ioliteOptimiser(QWidget):
         grid_res_10.addWidget(lbl_area_rsd10_label, 1, 2)
         grid_res_10.addWidget(self.lbl_spr_area_rsd10, 1, 3)
         
-        # Row 2: Max (Left) & Composite (Right)
+        # Row 2: Intensity & Intensity RSD
+        lbl_int10_label = QLabel("Intensity:")
+        lbl_int10_label.setStyleSheet("font-size: 8 pt;")
+        lbl_int10_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.lbl_spr_int10 = QLabel("- CPS")
+        self.lbl_spr_int10.setStyleSheet("font-size: 8 pt;")
+        self.lbl_spr_int10.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        
+        lbl_int_rsd10_label = QLabel("RSD:")
+        lbl_int_rsd10_label.setStyleSheet("font-size: 8 pt;")
+        lbl_int_rsd10_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.lbl_spr_int_rsd10 = QLabel("- %")
+        self.lbl_spr_int_rsd10.setStyleSheet("font-size: 8 pt;")
+        self.lbl_spr_int_rsd10.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        
+        grid_res_10.addWidget(lbl_int10_label, 2, 0)
+        grid_res_10.addWidget(self.lbl_spr_int10, 2, 1)
+        grid_res_10.addWidget(lbl_int_rsd10_label, 2, 2)
+        grid_res_10.addWidget(self.lbl_spr_int_rsd10, 2, 3)
+        
+        # Row 3: Max (Left) & Composite (Right)
         lbl_max10_label = QLabel("Max:")
         lbl_max10_label.setStyleSheet("font-size: 8 pt;")
         lbl_max10_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -2849,10 +2872,10 @@ class ioliteOptimiser(QWidget):
         self.lbl_spr_fw_comp10.setStyleSheet("font-size: 8 pt;")
         self.lbl_spr_fw_comp10.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         
-        grid_res_10.addWidget(lbl_max10_label, 2, 0)
-        grid_res_10.addWidget(self.lbl_spr_fw_max10, 2, 1)
-        grid_res_10.addWidget(lbl_comp10_label, 2, 2)
-        grid_res_10.addWidget(self.lbl_spr_fw_comp10, 2, 3)
+        grid_res_10.addWidget(lbl_max10_label, 3, 0)
+        grid_res_10.addWidget(self.lbl_spr_fw_max10, 3, 1)
+        grid_res_10.addWidget(lbl_comp10_label, 3, 2)
+        grid_res_10.addWidget(self.lbl_spr_fw_comp10, 3, 3)
         
         h_btns_10 = QHBoxLayout()
         self.btn_apply10_avg = QPushButton("Apply Average")
@@ -2931,7 +2954,27 @@ class ioliteOptimiser(QWidget):
         grid_res_1.addWidget(lbl_area_rsd1_label, 1, 2)
         grid_res_1.addWidget(self.lbl_spr_area_rsd1, 1, 3)
         
-        # Row 2: Max (Left) & Composite (Right)
+        # Row 2: Intensity & Intensity RSD
+        lbl_int1_label = QLabel("Intensity:")
+        lbl_int1_label.setStyleSheet("font-size: 8 pt;")
+        lbl_int1_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.lbl_spr_int1 = QLabel("- CPS")
+        self.lbl_spr_int1.setStyleSheet("font-size: 8 pt;")
+        self.lbl_spr_int1.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        
+        lbl_int_rsd1_label = QLabel("RSD:")
+        lbl_int_rsd1_label.setStyleSheet("font-size: 8 pt;")
+        lbl_int_rsd1_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.lbl_spr_int_rsd1 = QLabel("- %")
+        self.lbl_spr_int_rsd1.setStyleSheet("font-size: 8 pt;")
+        self.lbl_spr_int_rsd1.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        
+        grid_res_1.addWidget(lbl_int1_label, 2, 0)
+        grid_res_1.addWidget(self.lbl_spr_int1, 2, 1)
+        grid_res_1.addWidget(lbl_int_rsd1_label, 2, 2)
+        grid_res_1.addWidget(self.lbl_spr_int_rsd1, 2, 3)
+        
+        # Row 3: Max (Left) & Composite (Right)
         lbl_max1_label = QLabel("Max:")
         lbl_max1_label.setStyleSheet("font-size: 8 pt;")
         lbl_max1_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
@@ -2946,10 +2989,10 @@ class ioliteOptimiser(QWidget):
         self.lbl_spr_fw_comp1.setStyleSheet("font-size: 8 pt;")
         self.lbl_spr_fw_comp1.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         
-        grid_res_1.addWidget(lbl_max1_label, 2, 0)
-        grid_res_1.addWidget(self.lbl_spr_fw_max1, 2, 1)
-        grid_res_1.addWidget(lbl_comp1_label, 2, 2)
-        grid_res_1.addWidget(self.lbl_spr_fw_comp1, 2, 3)
+        grid_res_1.addWidget(lbl_max1_label, 3, 0)
+        grid_res_1.addWidget(self.lbl_spr_fw_max1, 3, 1)
+        grid_res_1.addWidget(lbl_comp1_label, 3, 2)
+        grid_res_1.addWidget(self.lbl_spr_fw_comp1, 3, 3)
         
         h_btns_1 = QHBoxLayout()
         self.btn_apply1_avg = QPushButton("Apply Average")
@@ -3319,22 +3362,28 @@ class ioliteOptimiser(QWidget):
         if has_peaks:
             # Forced "cts" unit for Area
             area_unit_label = " cts"
+            int_unit_label = "CPS" if is_cps else "cts"
 
             self.lbl_spr_fw10.setText(f"<b>{_adap(stats['FW0.1M Mean']*mult)}</b> {unit_label}")
             self.lbl_spr_rsd10.setText(f"{stats['FW0.1M RSD']:.1f} %")
             self.lbl_spr_fw_max10.setText(f"<b>{_adap(stats['FW0.1M Max']*mult)}</b> {unit_label}")
-            # Use SI formatting for Area
+            # Use SI formatting for Area & Intensity
             s_mean10, p_mean10 = _si(stats['Area 10% Mean'])
             self.lbl_spr_area10.setText(f"<b>{s_mean10}</b>{p_mean10.rstrip()}{area_unit_label}")
             self.lbl_spr_area_rsd10.setText(f"{stats['Area 10% RSD']:.1f} %")
+            s_int, p_int = _si(stats['Max Intensity Mean'])
+            self.lbl_spr_int10.setText(f"<b>{s_int}</b>{p_int.rstrip()} {int_unit_label}")
+            self.lbl_spr_int_rsd10.setText(f"{stats['Max Intensity RSD']:.1f} %")
 
             self.lbl_spr_fw1.setText(f"<b>{_adap(stats['FW0.01M Mean']*mult)}</b> {unit_label}")
             self.lbl_spr_rsd1.setText(f"{stats['FW0.01M RSD']:.1f} %")
             self.lbl_spr_fw_max1.setText(f"<b>{_adap(stats['FW0.01M Max']*mult)}</b> {unit_label}")
-            # Use SI formatting for Area
+            # Use SI formatting for Area & Intensity
             s_mean1, p_mean1 = _si(stats['Area 1% Mean'])
             self.lbl_spr_area1.setText(f"<b>{s_mean1}</b>{p_mean1.rstrip()}{area_unit_label}")
             self.lbl_spr_area_rsd1.setText(f"{stats['Area 1% RSD']:.1f} %")
+            self.lbl_spr_int1.setText(f"<b>{s_int}</b>{p_int.rstrip()} {int_unit_label}")
+            self.lbl_spr_int_rsd1.setText(f"{stats['Max Intensity RSD']:.1f} %")
             
             # Store for "Apply" logic (rounded to matching UI precision)
             self._last_spr_fw10_avg_ms = _adap_round(stats['FW0.1M Mean'] * 1000.0)
@@ -3345,8 +3394,12 @@ class ioliteOptimiser(QWidget):
              # Ensure labels that weren't set in the error block are cleared
              if self.lbl_spr_area10.text != "-": self.lbl_spr_area10.setText("-")
              if self.lbl_spr_area_rsd10.text != "-": self.lbl_spr_area_rsd10.setText("-")
+             if self.lbl_spr_int10.text != "-": self.lbl_spr_int10.setText("-")
+             if self.lbl_spr_int_rsd10.text != "-": self.lbl_spr_int_rsd10.setText("-")
              if self.lbl_spr_area1.text != "-": self.lbl_spr_area1.setText("-")
              if self.lbl_spr_area_rsd1.text != "-": self.lbl_spr_area_rsd1.setText("-")
+             if self.lbl_spr_int1.text != "-": self.lbl_spr_int1.setText("-")
+             if self.lbl_spr_int_rsd1.text != "-": self.lbl_spr_int_rsd1.setText("-")
 
         # Update Table (Dynamic Units)
         headers = [
@@ -3638,17 +3691,22 @@ class ioliteOptimiser(QWidget):
                 
                 s_c10, p_c10 = _si(comp_areas.get(0.1, 0.0))
                 s_c1, p_c1 = _si(comp_areas.get(0.01, 0.0))
+                comp_int = float(np.max(comp_y_raw)) if len(comp_y_raw) > 0 else 0.0
+                s_cint, p_cint = _si(comp_int)
+                int_unit_str = "CPS" if is_cps else "cts"
                 label_10 = (
                     f"FW0.1M (10%)\n"
                     f"Comp: {_adap(val_10*mult)} {unit_label}\n"
                     f"Max:  {_adap(f10.max()*mult)} {unit_label}\n"
-                    f"Area: {s_c10}{p_c10.rstrip()} cts"
+                    f"Area: {s_c10}{p_c10.rstrip()} cts\n"
+                    f"Int:  {s_cint}{p_cint.rstrip()} {int_unit_str}"
                 )
                 label_1 = (
                     f"FW0.01M (1%)\n"
                     f"Comp: {_adap(val_1*mult)} {unit_label}\n"
                     f"Max:  {_adap(f1.max()*mult)} {unit_label}\n"
-                    f"Area: {s_c1}{p_c1.rstrip()} cts"
+                    f"Area: {s_c1}{p_c1.rstrip()} cts\n"
+                    f"Int:  {s_cint}{p_cint.rstrip()} {int_unit_str}"
                 )
                 
                 h10 = Line2D([0], [0], linestyle='None', marker='s', markersize=4, color='C6', label=label_10)
