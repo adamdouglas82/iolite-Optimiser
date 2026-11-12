@@ -2235,31 +2235,31 @@ class ioliteOptimiser(QWidget):
         self.system_is_dark = self.detect_theme()
         
         # Debounce timer for auto-refresh
-        self.refresh_timer = QTimer()
+        self.refresh_timer = QTimer(self)
         self.refresh_timer.setSingleShot(True)
         self.refresh_timer.setInterval(500)
         self.refresh_timer.timeout.connect(self._perform_auto_refresh)
 
         # Delayed click detection for legend (ensures double-click works with large datasets)
-        self._legend_click_timer = QTimer()
+        self._legend_click_timer = QTimer(self)
         self._legend_click_timer.setSingleShot(True)
         self._legend_click_timer.setInterval(300)  # 300ms window for double-click
         self._legend_click_timer.timeout.connect(self._execute_legend_single_click)
         self._pending_legend_click = None  # Stores (target_obj, target_list, canvas, ax, l_map, l_chk_rescale)
         
         # Debounce timer for SPR peak detection
-        self.spr_debounce_timer = QTimer()
+        self.spr_debounce_timer = QTimer(self)
         self.spr_debounce_timer.setSingleShot(True)
         self.spr_debounce_timer.timeout.connect(self._run_spr_analysis_forced)
 
         # Debounce timer for Pulse Train Simulation
-        self.pulse_debounce_timer = QTimer()
+        self.pulse_debounce_timer = QTimer(self)
         self.pulse_debounce_timer.setSingleShot(True)
         self.pulse_debounce_timer.setInterval(500)
         self.pulse_debounce_timer.timeout.connect(self.run_pulse_simulation)
 
         # Debounce timer for saving persistent settings
-        self.save_timer = QTimer()
+        self.save_timer = QTimer(self)
         self.save_timer.setSingleShot(True)
         self.save_timer.setInterval(1000)
         self.save_timer.timeout.connect(self.save_persistent_settings)
@@ -2325,8 +2325,10 @@ class ioliteOptimiser(QWidget):
     def save_settings(self):
         try:
             if self.settings_json_path:
+                clean_settings = {k: v for k, v in self.persistent_settings.items() if v is not None}
+                self.persistent_settings = clean_settings
                 with open(self.settings_json_path, 'w') as f:
-                    json.dump(self.persistent_settings, f)
+                    json.dump(self.persistent_settings, f, indent=4)
         except Exception as e:
             IoLog.warning(f"Failed to save settings: {e}")
 
@@ -2434,6 +2436,7 @@ class ioliteOptimiser(QWidget):
         if not getattr(self, 'ui_initialized', False):
             self.ui_initialized = True
             self.initUI()
+            self.ui_ready = True
             self._on_strategy_changed(self._get(self.cmb_sync_strategy, 'currentText'))
         QWidget.showEvent(self, event)
 
@@ -5719,7 +5722,8 @@ class ioliteOptimiser(QWidget):
         try:
             if os.path.exists(self.settings_json_path):
                 with open(self.settings_json_path, 'r') as f:
-                    s_data = json.load(f)
+                    raw_data = json.load(f)
+                    s_data = {k: v for k, v in raw_data.items() if v is not None} if isinstance(raw_data, dict) else {}
                     _ConditionalIoLog.enabled = bool(s_data.get('enable_logging', False))
                     IoLog.information(f"iolite Optimiser: Loading settings from {self.settings_json_path}")
                     self.speed_dps_imaging = s_data.get('speed_dps_imaging', 2)
@@ -5733,76 +5737,81 @@ class ioliteOptimiser(QWidget):
 
     def save_persistent_settings(self):
         try:
-            # Update existing persistent settings with current UI state
-            self.persistent_settings.update({
-                'mfr': self._get(self.cmb_mfr, 'currentText'),
-                'model': self._get(self.cmb_model, 'currentText'),
-                'dwell_unit_pref': self._get(self.cmb_dwell_unit, 'currentText'),
-                'mode': self._get(self.cmb_mode, 'currentText'),
-                'laser_mfr': self._get(self.cmb_laser_mfr, 'currentText'),
-                'laser_model': self._get(self.cmb_laser_mod, 'currentText'),
-                'shots': self._get(self.spin_shots, 'value'),
-                'spot_size': self._get(self.spin_spot, 'value'),
-                'num_analytes': self._get(self.spin_num_analytes, 'value'),
-                'washout': self._get(self.spin_wash, 'value'),
-                'init_rr': self._get(self.spin_init_rr, 'value'),
-                'scale_signal': self._get(self.chk_scale, 'isChecked'),
-                'pulses': self._get(self.spin_pulses, 'value'),
-                'target_rsd': self._get(self.spin_rsd, 'value') if hasattr(self, 'spin_rsd') else 5.0,
-                'dosage': self._get(self.spin_dosage, 'value'),
-                'sync_dosage': self._get(self.chk_sync_dosage, 'isChecked'),
-                'target_sigma': self._get(self.spin_sigma, 'value'),
-                'min_snr': self._get(self.spin_snr, 'value'),
-                'min_duty': self._get(self.spin_duty, 'value'),
-                'tof_margin': self._get(self.spin_tof_margin, 'value') if hasattr(self, 'spin_tof_margin') else 10.0,
-                'cell_type': self._get(self.cmb_cell, 'currentText'),
-                # 'auto_detect': self._get(self.chk_auto, 'isChecked'), # Not saved
-                # 'normalise': self._get(self.chk_norm, 'isChecked'), # Not saved
-                # 'y_zoom': self._get(self.chk_y_zoom, 'isChecked'), # Not saved
-                # Add internal states that are expensive or complex to derive
-                'icp_tech': self.icp_tech,
-                'min_dwell': self.min_dwell,
-                'precision': self.precision,
-                'max_rr': self.max_rr,
-                'max_speed': self.max_speed,
-                'cust_min': self._get(self.spin_cust_min, 'value'),
-                'cust_prec': self._get(self.spin_cust_prec, 'value'),
-                'cust_type': self._get(self.cmb_cust_type, 'currentText'),
-                'cust_dwell_list': self._get(self.edit_cust_dwells, 'text'),
-                'cust_rr': self._get(self.spin_cust_rr, 'value'),
-                'cust_rr_prec': self._get(self.spin_cust_rr_prec, 'value'),
-                'cust_speed': self._get(self.spin_cust_speed, 'value'),
-                'cust_rr_type': self._get(self.cmb_cust_rr_type, 'currentText'),
-                'cust_rr_list': self._get(self.edit_cust_rr_list, 'text'),
-                
-                # Plot Options
-                'limit_vis': self._get(self.chk_limit_vis, 'isChecked'),
-                'max_vis': self._get(self.spin_max_vis, 'value'),
-                
-                'img_height': self._get(self.spin_height, 'value'),
-                'img_width': self._get(self.spin_width, 'value'),
-                'line_length': self._get(self.spin_line_len, 'value') if hasattr(self, 'spin_line_len') else 1000.0,
-                'avoid_gaps': self._get(self.chk_avoid_gaps, 'isChecked'),
-                'prefer_exact_pulses': self._get(self.chk_prefer_exact_pulses, 'isChecked') if hasattr(self, 'chk_prefer_exact_pulses') else False,
-                'speed_dps_imaging': getattr(self, 'speed_dps_imaging', 2),
-                'speed_dps_line': getattr(self, 'speed_dps_line', 0),
-                'overlap_dps': getattr(self, 'overlap_dps', 2),
-                'dosage_dps': getattr(self, 'dosage_dps', 2),
-                
-                # New Persistence Keys
-                'theme': self._get(self.combo_theme, 'currentText'),
-                'opt_y_zoom': self._get(self.chk_y_zoom, 'isChecked'),
-                'normalise': self._get(self.chk_norm, 'isChecked'),
-                'spr_time_unit': self._get(self.cmb_spr_unit, 'currentText'),
-                'spr_min_distance': self._get(self.spin_spr_dist, 'value'),
-                'spr_baseline_window': self._get(self.spin_spr_baseline_window, 'value'),
-                'spr_apply_smooth': self._get(self.chk_spr_smooth, 'isChecked'),
-                'spr_smooth_window': self._get(self.spin_spr_smooth_window, 'value'),
-                # 'opt_rescale_y': Ephemeral
-                'spr_y_zoom': self._get(self.chk_y_zoom_spr, 'isChecked'),
-                'sync_strategy': self._get(self.cmb_sync_strategy, 'currentText'),
-                'enable_logging': self._get(self.settings_dlg.chk_enable_logging, 'isChecked') if hasattr(self, 'settings_dlg') and hasattr(self.settings_dlg, 'chk_enable_logging') else False,
-            })
+            if getattr(self, 'ui_ready', False) and self._get(getattr(self, 'cmb_mfr', None), 'currentText') is not None:
+                # Update existing persistent settings with current UI state
+                updates = {
+                    'mfr': self._get(self.cmb_mfr, 'currentText'),
+                    'model': self._get(self.cmb_model, 'currentText'),
+                    'dwell_unit_pref': self._get(self.cmb_dwell_unit, 'currentText'),
+                    'mode': self._get(self.cmb_mode, 'currentText'),
+                    'laser_mfr': self._get(self.cmb_laser_mfr, 'currentText'),
+                    'laser_model': self._get(self.cmb_laser_mod, 'currentText'),
+                    'shots': self._get(self.spin_shots, 'value'),
+                    'spot_size': self._get(self.spin_spot, 'value'),
+                    'num_analytes': self._get(self.spin_num_analytes, 'value'),
+                    'washout': self._get(self.spin_wash, 'value'),
+                    'init_rr': self._get(self.spin_init_rr, 'value'),
+                    'scale_signal': self._get(self.chk_scale, 'isChecked'),
+                    'pulses': self._get(self.spin_pulses, 'value'),
+                    'target_rsd': self._get(self.spin_rsd, 'value') if hasattr(self, 'spin_rsd') else 5.0,
+                    'dosage': self._get(self.spin_dosage, 'value'),
+                    'sync_dosage': self._get(self.chk_sync_dosage, 'isChecked'),
+                    'target_sigma': self._get(self.spin_sigma, 'value'),
+                    'min_snr': self._get(self.spin_snr, 'value'),
+                    'min_duty': self._get(self.spin_duty, 'value'),
+                    'tof_margin': self._get(self.spin_tof_margin, 'value') if hasattr(self, 'spin_tof_margin') else 10.0,
+                    'cell_type': self._get(self.cmb_cell, 'currentText'),
+                    # Add internal states that are expensive or complex to derive
+                    'icp_tech': self.icp_tech,
+                    'min_dwell': self.min_dwell,
+                    'precision': self.precision,
+                    'max_rr': self.max_rr,
+                    'max_speed': self.max_speed,
+                    'cust_min': self._get(self.spin_cust_min, 'value'),
+                    'cust_prec': self._get(self.spin_cust_prec, 'value'),
+                    'cust_type': self._get(self.cmb_cust_type, 'currentText'),
+                    'cust_dwell_list': self._get(self.edit_cust_dwells, 'text'),
+                    'cust_rr': self._get(self.spin_cust_rr, 'value'),
+                    'cust_rr_prec': self._get(self.spin_cust_rr_prec, 'value'),
+                    'cust_speed': self._get(self.spin_cust_speed, 'value'),
+                    'cust_rr_type': self._get(self.cmb_cust_rr_type, 'currentText'),
+                    'cust_rr_list': self._get(self.edit_cust_rr_list, 'text'),
+                    
+                    # Plot Options
+                    'limit_vis': self._get(self.chk_limit_vis, 'isChecked'),
+                    'max_vis': self._get(self.spin_max_vis, 'value'),
+                    
+                    'img_height': self._get(self.spin_height, 'value'),
+                    'img_width': self._get(self.spin_width, 'value'),
+                    'line_length': self._get(self.spin_line_len, 'value') if hasattr(self, 'spin_line_len') else 1000.0,
+                    'avoid_gaps': self._get(self.chk_avoid_gaps, 'isChecked'),
+                    'prefer_exact_pulses': self._get(self.chk_prefer_exact_pulses, 'isChecked') if hasattr(self, 'chk_prefer_exact_pulses') else False,
+                    'speed_dps_imaging': getattr(self, 'speed_dps_imaging', 2),
+                    'speed_dps_line': getattr(self, 'speed_dps_line', 0),
+                    'overlap_dps': getattr(self, 'overlap_dps', 2),
+                    'dosage_dps': getattr(self, 'dosage_dps', 2),
+                    
+                    # New Persistence Keys
+                    'theme': self._get(self.combo_theme, 'currentText'),
+                    'opt_y_zoom': self._get(self.chk_y_zoom, 'isChecked'),
+                    'normalise': self._get(self.chk_norm, 'isChecked'),
+                    'spr_time_unit': self._get(self.cmb_spr_unit, 'currentText'),
+                    'spr_min_distance': self._get(self.spin_spr_dist, 'value'),
+                    'spr_baseline_window': self._get(self.spin_spr_baseline_window, 'value'),
+                    'spr_apply_smooth': self._get(self.chk_spr_smooth, 'isChecked'),
+                    'spr_smooth_window': self._get(self.spin_spr_smooth_window, 'value'),
+                    # 'opt_rescale_y': Ephemeral
+                    'spr_y_zoom': self._get(self.chk_y_zoom_spr, 'isChecked'),
+                    'sync_strategy': self._get(self.cmb_sync_strategy, 'currentText'),
+                }
+                self.persistent_settings.update({k: v for k, v in updates.items() if v is not None})
+
+            if hasattr(self, 'settings_dlg') and hasattr(self.settings_dlg, 'chk_enable_logging'):
+                log_chk = self._get(self.settings_dlg.chk_enable_logging, 'isChecked')
+                if log_chk is not None:
+                    self.persistent_settings['enable_logging'] = bool(log_chk)
+
+            self.persistent_settings = {k: v for k, v in self.persistent_settings.items() if v is not None}
             if self.settings_json_path:
                 with open(self.settings_json_path, 'w') as f:
                     json.dump(self.persistent_settings, f, indent=4)
