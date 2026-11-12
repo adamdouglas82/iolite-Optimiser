@@ -4209,6 +4209,7 @@ class ioliteOptimiser(QWidget):
         self.settings_scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         
         scroll_content = QWidget()
+        scroll_content.setMaximumWidth(460)
         l_settings = QVBoxLayout(scroll_content)
         l_settings.setContentsMargins(5, 2, 5, 2)
         l_settings.setSpacing(1) # Tightened spacing
@@ -4749,11 +4750,30 @@ class ioliteOptimiser(QWidget):
 
         # Row 0: Spot Size, Rep-Rate, Acq Time
         grid_sync.addWidget(QLabel("Spot Size (µm):"), 0, 0)
-        self.spin_opt_spot = QSpinBox()
-        self.spin_opt_spot.setRange(0, 500); self.spin_opt_spot.setFixedWidth(55)
-        self.spin_opt_spot.setSpecialValueText("Auto")
+        h_opt_spot = QHBoxLayout()
+        h_opt_spot.setContentsMargins(0, 0, 0, 0)
+        h_opt_spot.setSpacing(2)
+        h_opt_spot.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.spin_opt_spot = QSpinBox(self)
+        self.spin_opt_spot.setRange(1, 500)
+        self.spin_opt_spot.setValue(30)
+        self.spin_opt_spot.setFixedWidth(45)
+        self.spin_opt_spot.setToolTip("Optimised Spot Size (µm). Adjust manually or click the lock button to hold constant.")
         self.spin_opt_spot.valueChanged.connect(self._on_opt_spot_changed)
-        grid_sync.addWidget(self.spin_opt_spot, 0, 1)
+        h_opt_spot.addWidget(self.spin_opt_spot)
+
+        self.btn_lock_spot = QPushButton("🔓", self)
+        self.btn_lock_spot.setCheckable(True)
+        self.btn_lock_spot.setChecked(False)
+        self.btn_lock_spot.setFixedSize(20, 20)
+        self.btn_lock_spot.setStyleSheet(
+            "QPushButton { min-width: 0px; max-width: 20px; min-height: 0px; max-height: 20px; padding: 0px; margin: 0px; font-size: 8pt; border: 1px solid rgba(128, 128, 128, 0.4); border-radius: 3px; }"
+            "QPushButton:checked { background-color: rgba(255, 152, 0, 0.25); border: 1px solid #FF9800; }"
+        )
+        self._update_spot_lock_ui(False)
+        self.btn_lock_spot.toggled.connect(self._on_spot_lock_toggled)
+        h_opt_spot.addWidget(self.btn_lock_spot)
+        grid_sync.addLayout(h_opt_spot, 0, 1)
 
         grid_sync.addWidget(QLabel("Rep-Rate:"), 0, 2)
         self.lbl_opt_rr = QLabel("- Hz")
@@ -4806,12 +4826,13 @@ class ioliteOptimiser(QWidget):
         grid_sync.addWidget(self.lbl_opt_duty, 3, 5)
 
         # Set stretch and minimum widths for all columns to prevent layout shifting when toggling modes/labels
-        grid_sync.setColumnMinimumWidth(0, 85)
-        grid_sync.setColumnMinimumWidth(1, 60)
+        grid_sync.setHorizontalSpacing(3)
+        grid_sync.setColumnMinimumWidth(0, 75)
+        grid_sync.setColumnMinimumWidth(1, 65)
         grid_sync.setColumnMinimumWidth(2, 45)
-        grid_sync.setColumnMinimumWidth(3, 85)
-        grid_sync.setColumnMinimumWidth(4, 65)
-        grid_sync.setColumnMinimumWidth(5, 60)
+        grid_sync.setColumnMinimumWidth(3, 68)
+        grid_sync.setColumnMinimumWidth(4, 55)
+        grid_sync.setColumnMinimumWidth(5, 48)
         grid_sync.setColumnStretch(1, 1)
         grid_sync.setColumnStretch(3, 1)
         v_sync.addLayout(grid_sync)
@@ -5622,7 +5643,35 @@ class ioliteOptimiser(QWidget):
         self._handle_laser_mod_changed(self._get(self.cmb_laser_mod, 'currentText'))
         self._handle_cell_changed(self._get(self.cmb_cell, 'currentText'))
 
+    def _update_spot_lock_ui(self, locked):
+        if not hasattr(self, 'btn_lock_spot'):
+            return
+        if locked:
+            self.btn_lock_spot.setText("🔒")
+            self.btn_lock_spot.setToolTip(
+                "Spot Size Locked: Maintaining the current spot size while adjusting other parameters.\n"
+                "Click to unlock and automatically recalculate the minimum required spot size."
+            )
+        else:
+            self.btn_lock_spot.setText("🔓")
+            self.btn_lock_spot.setToolTip(
+                "Lock Spot Size: Click to maintain the currently selected spot size when adjusting other parameters."
+            )
+
+    def _on_spot_lock_toggled(self, checked):
+        self._update_spot_lock_ui(checked)
+        if checked:
+            cur_spot = self._get(self.spin_opt_spot, 'value')
+            self.run_optimisation(refresh=False, fixed_spot_um=cur_spot, preserve_zoom=True)
+        else:
+            self.run_optimisation(refresh=False, fixed_spot_um=None, preserve_zoom=True)
+
     def _on_opt_spot_changed(self, val):
+        if hasattr(self, 'btn_lock_spot'):
+            self._block_signals(self.btn_lock_spot, True)
+            self.btn_lock_spot.setChecked(True)
+            self._block_signals(self.btn_lock_spot, False)
+            self._update_spot_lock_ui(True)
         self.run_optimisation(refresh=False, fixed_spot_um=val, preserve_zoom=True)
 
     def _parse_rr_list(self, text):
@@ -7675,6 +7724,10 @@ class ioliteOptimiser(QWidget):
     def run_optimisation(self, refresh=False, silent=False, fixed_spot_um=None, preserve_zoom=False):
         if fixed_spot_um == 0:
             fixed_spot_um = None
+        elif fixed_spot_um is None and hasattr(self, 'btn_lock_spot') and self._get(self.btn_lock_spot, 'isChecked'):
+            locked_spot = self._get(self.spin_opt_spot, 'value')
+            if locked_spot and locked_spot > 0:
+                fixed_spot_um = locked_spot
             
         if refresh:
             # Force reset zoom on fresh data load
@@ -7955,16 +8008,19 @@ class ioliteOptimiser(QWidget):
             
             final_notes = []
             if fixed_spot_um is not None:
-                # Manual Override
+                # Manual Override / Locked Spot Size
                 best_spot = fixed_spot_um
+                self._block_signals(self.spin_opt_spot, True)
+                self.spin_opt_spot.setValue(best_spot)
+                self._block_signals(self.spin_opt_spot, False)
                 # Re-calculate table for this specific spot
                 _, df_res, sync = Logic.calculate_sigma_for_spot(best_spot, c, isotope_data)
                 final_notes.append(f"Optimum Spot Size <b>{optimum_spot}</b> µm - Overridden to <b>{best_spot}</b> µm")
             else:
                 # Update Spinbox (Block signals to prevent recursion)
-                self.spin_opt_spot.blockSignals(True)
+                self._block_signals(self.spin_opt_spot, True)
                 self.spin_opt_spot.setValue(best_spot)
-                self.spin_opt_spot.blockSignals(False)
+                self._block_signals(self.spin_opt_spot, False)
                 final_notes.append(f"Optimum Spot Size <b>{best_spot}</b> µm - Based on Minimum SNR of <b>{limiting_iso}</b>")
             # 4. Step 2: Laser Sync for that spot size
             c['spot_size_um'] = best_spot
