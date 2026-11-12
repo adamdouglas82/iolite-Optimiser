@@ -1364,7 +1364,7 @@ class Logic:
         return temp_data
 
     @staticmethod
-    def prepare_rows_for_optimization(edited_stats_df, iso_status_map, iso_custom_dt_map, df, bg_range, sig_range, is_raw_counts):
+    def prepare_rows_for_optimisation(edited_stats_df, iso_status_map, iso_custom_dt_map, df, bg_range, sig_range, is_raw_counts):
         df_sig = df[(df["Time"] >= sig_range[0]) & (df["Time"] <= sig_range[1])]
         df_blk = df[(df["Time"] >= bg_range[0]) & (df["Time"] <= bg_range[1])]
         rows = []
@@ -4228,11 +4228,11 @@ class ioliteOptimiser(QWidget):
         h_hw_cols.setContentsMargins(2, 2, 2, 2)
         h_hw_cols.setSpacing(15)
         
-        self.lbl_icp_sum = QLabel("Initializing ICP...")
+        self.lbl_icp_sum = QLabel("Initialising ICP...")
         self.lbl_icp_sum.setWordWrap(True)
         self.lbl_icp_sum.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         
-        self.lbl_las_sum = QLabel("Initializing Laser...")
+        self.lbl_las_sum = QLabel("Initialising Laser...")
         self.lbl_las_sum.setWordWrap(True)
         self.lbl_las_sum.setAlignment(Qt.AlignLeft | Qt.AlignTop)
         
@@ -4573,14 +4573,14 @@ class ioliteOptimiser(QWidget):
             "Combined Integer Sync (Auto)"
         ])
         self.cmb_sync_strategy.setToolTip(
-            "Select how the laser repetition rate and acquisition time are optimized:\n\n"
+            "Select how the laser repetition rate and acquisition time are optimised:\n\n"
             "• Adaptive Integer Sync (Auto): Automatically sweeps rep-rates and acquisition times "
             "to guarantee a perfect integer pulse count sync (0% rounding error) close to your target.\n"
             "• Strict Pulse Target (Manual): Directly calculates acquisition times for your exact pulse target. "
-            "Note: Hardware rounding may result in non-integer pulse counts (unsynchronized).\n"
+            "Note: Hardware rounding may result in non-integer pulse counts (unsynchronised).\n"
             "• Oversampling (Time-Driven): Focuses purely on meeting the washout-time and target RSD constraints "
             "for steady-state oversampling, ignoring integer pulse snapping.\n"
-            "• Combined Integer Sync (Auto): Combines both behaviors. It sweeps rep-rates above the oversampling minimum "
+            "• Combined Integer Sync (Auto): Combines both behaviours. It sweeps rep-rates above the oversampling minimum "
             "to find and guarantee a perfect integer pulse count sync."
         )
         saved_strat = self.persistent_settings.get('sync_strategy', 'Adaptive Integer Sync (Auto)')
@@ -4677,7 +4677,7 @@ class ioliteOptimiser(QWidget):
 
         # Row 4: Sync Dosage Checkbox and Dosage Input (UI elements commented out but preserved)
         self.chk_sync_dosage = QCheckBox("Sync Dosage")
-        self.chk_sync_dosage.setToolTip("Synchronize Dosage with Pulses per Acq. Time")
+        self.chk_sync_dosage.setToolTip("Synchronise Dosage with Pulses per Acq. Time")
         self.chk_sync_dosage.setChecked(True) # Leave sync enabled by default in code
         # self.grid_qual.addWidget(self.chk_sync_dosage, 4, 0, 1, 2)
 
@@ -8024,7 +8024,7 @@ class ioliteOptimiser(QWidget):
                     final_notes.append((f"The following channels cannot be set lower than the hardware minimum&nbsp;({min_dwell_ms}&nbsp;ms):", ", ".join(min_icp_isos), "blue"))
                 
                 if zero_bg_isos:
-                    final_notes.append(("The following channels had zero counts in the background. The detection limit (L<sub>c</sub>) has been calculated using the Square Root Transform rule for variance stabilization:", ", ".join(zero_bg_isos), "gray"))
+                    final_notes.append(("The following channels had zero counts in the background. The detection limit (L<sub>c</sub>) has been calculated using the Square Root Transform rule for variance stabilisation:", ", ".join(zero_bg_isos), "gray"))
             
 
             
@@ -8051,8 +8051,8 @@ class ioliteOptimiser(QWidget):
             # Save final status base
             self.final_status_base = summary
             
-            # --- SYNCHRONIZATION ADVISOR DISPLAY ---
-            advisor_html = "<br><b>Synchronization Advisor:</b><br>"
+            # --- SYNCHRONISATION ADVISOR DISPLAY ---
+            advisor_html = "<br><b>Synchronisation Advisor:</b><br>"
             
             # Check if perfect sync (within 1e-9 tolerance)
             F = sync['rr_actual']
@@ -8802,7 +8802,7 @@ class ioliteOptimiser(QWidget):
         self.combo_theme_pulse.setCurrentText(self.persistent_settings.get('theme', 'Auto'))
         self.combo_theme_pulse.currentTextChanged.connect(self.apply_theme)
         
-        self.chk_norm_pulse = QCheckBox("Normalize")
+        self.chk_norm_pulse = QCheckBox("Normalise")
         self.chk_norm_pulse.setChecked(False)
         self.chk_norm_pulse.toggled.connect(lambda: self.update_pulse_plot(preserve_zoom=True))
         
