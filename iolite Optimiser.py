@@ -3436,9 +3436,47 @@ class ioliteOptimiser(QWidget):
         else:
             self.spr_bg_span = None
 
-        # Plot individual channel (Always seconds X)
-        # Uses first color from palette (now Purple)
-        line, = ax.plot(t_zeroed, y_plot, lw=1.5, alpha=0.9, label=iso)
+        # Plot individual channel (Always seconds X) with tightly-spaced micro-dotted 2.5% lead-in and tail extensions
+        line, = ax.plot(t_zeroed, y_plot, color=safe_palette[0], lw=1.5, alpha=0.9, label=iso)
+        self._spr_ext_lines = []
+        self._spr_default_xlim = None
+        if len(t_zeroed) > 1:
+            t_span = float(t_zeroed[-1] - t_zeroed[0]) or 1.0
+            self._spr_full_x_span = t_span * 1.05
+            x_pad = t_span * 0.025
+            t0_d, t1_d = float(t_zeroed[0]), float(t_zeroed[-1])
+            self._spr_data_bounds = (t0_d, t1_d)
+            self._spr_default_xlim = (t0_d - x_pad, t1_d + x_pad)
+            base_y = float(np.nanpercentile(y_plot, 10)) if len(y_plot) > 0 else 0.0
+            ext_l, = ax.plot([t0_d - x_pad, t0_d], [base_y, float(y_plot[0])],
+                             color=safe_palette[0], lw=1.5, linestyle=(0, (1.5, 0.45)), alpha=0.85, label='_nolegend_')
+            ext_r, = ax.plot([t1_d, t1_d + x_pad], [float(y_plot[-1]), base_y],
+                             color=safe_palette[0], lw=1.5, linestyle=(0, (1.5, 0.45)), alpha=0.85, label='_nolegend_')
+            ext_l._exclude_from_rescale = True
+            ext_r._exclude_from_rescale = True
+            self._spr_ext_lines = [ext_l, ext_r]
+
+            def _update_spr_ext_dash(target_ax):
+                try:
+                    xl = target_ax.get_xlim()
+                    cur_span = abs(xl[1] - xl[0]) or 1.0
+                    full_span = getattr(self, '_spr_full_x_span', cur_span) or 1.0
+                    zoom_factor = max(1.0, full_span / cur_span)
+                    gap = min(3.5, 0.45 * (zoom_factor ** 0.55))
+                    dash = min(2.0, 1.5 / (zoom_factor ** 0.15))
+                    el_list = getattr(self, '_spr_ext_lines', [])
+                    if len(el_list) == 2 and hasattr(self, '_spr_data_bounds'):
+                        d0, d1 = self._spr_data_bounds
+                        left_edge = min(xl[0], d0)
+                        right_edge = max(xl[1], d1)
+                        el_list[0].set_xdata([left_edge, d0])
+                        el_list[1].set_xdata([d1, right_edge])
+                    for el in el_list:
+                        el.set_linestyle((0, (dash, gap)))
+                except Exception:
+                    pass
+
+            ax.callbacks.connect('xlim_changed', _update_spr_ext_dash)
 
         # --- PEAK CUTOFF THRESHOLD LINE & FLOATING TEXT ---
         import matplotlib.transforms as mtransforms
@@ -3503,6 +3541,8 @@ class ioliteOptimiser(QWidget):
         self._spr_comp_t_ms = None
         self._spr_comp_y = None
         self._spr_comp_line = None
+        self._spr_comp_ext_left = None
+        self._spr_comp_ext_right = None
         if show_composite and self.spr_ax_comp:
             comp_df = Logic.generate_composite_peak(self.spr_df, iso, filtered_df, bg_sub=bg_sub, bg_start_s=bg_start_s, bg_end_s=bg_end_s)
             if comp_df is not None:
@@ -3511,6 +3551,8 @@ class ioliteOptimiser(QWidget):
                 self._spr_comp_t_ms = comp_df['Relative Time (s)'].values * 1000.0
                 self._spr_comp_y = comp_df['Normalised Intensity'].values
                 self._spr_comp_line, = self.spr_ax_comp.plot(self._spr_comp_t_ms, self._spr_comp_y, color=safe_palette[0], lw=2)
+                self._spr_comp_ext_left, = self.spr_ax_comp.plot([], [], color=safe_palette[0], lw=2, linestyle=(0, (1.5, 0.45)), alpha=0.85)
+                self._spr_comp_ext_right, = self.spr_ax_comp.plot([], [], color=safe_palette[0], lw=2, linestyle=(0, (1.5, 0.45)), alpha=0.85)
                 self.spr_ax_comp.set_xlabel("Rel. Time (ms)", fontsize='medium', color=fg_col)
                 # Stable composite title anchored to axis top
                 self.spr_ax_comp.set_title("Composite Peak", fontsize='medium', color=fg_col, y=1.0, pad=10)
@@ -3673,7 +3715,7 @@ class ioliteOptimiser(QWidget):
             self.spr_ax_comp.minorticks_on()
             self.spr_ax_comp.grid(True, which='both', alpha=0.2, color=fg_col)
 
-        # Force tight borders
+        # Snap X axis to the padded baseline endpoints
         ax.margins(x=0)
         
         # Consistent layout management
@@ -6453,6 +6495,7 @@ class ioliteOptimiser(QWidget):
         if t_max_nat <= t_data_min:
             return
 
+        # Guarantee at least 12% of pulse width as lead-in before 0 ms (using dotted extension if beyond measured data)
         pulse_span_ms = max(10.0, t_max_nat)
         t_min = min(t_data_min, -0.12 * pulse_span_ms)
 
@@ -6460,8 +6503,18 @@ class ioliteOptimiser(QWidget):
         y_min_nat = -0.10
         y_max_nat = 1.10
 
+        ext_left = getattr(self, '_spr_comp_ext_left', None)
+        ext_right = getattr(self, '_spr_comp_ext_right', None)
+        if ext_left is not None:
+            if t_min < t_data_min:
+                ext_left.set_data([t_min, t_data_min], [float(y_norm[0]), float(y_norm[0])])
+            else:
+                ext_left.set_data([], [])
+
         leg = getattr(self, 'spr_stats_legend', None)
         if leg is None or not leg.get_visible():
+            if ext_right is not None:
+                ext_right.set_data([], [])
             ax_comp.set_xlim(t_min, t_max_nat)
             ax_comp.set_ylim(y_min_nat, y_max_nat)
             return
@@ -6472,6 +6525,8 @@ class ioliteOptimiser(QWidget):
             box_obj = getattr(leg, '_legend_box', leg)
             leg_bbox = box_obj.get_window_extent(renderer)
             if ax_bbox.width <= 0 or ax_bbox.height <= 0:
+                if ext_right is not None:
+                    ext_right.set_data([], [])
                 ax_comp.set_xlim(t_min, t_max_nat)
                 ax_comp.set_ylim(y_min_nat, y_max_nat)
                 return
@@ -6499,6 +6554,7 @@ class ioliteOptimiser(QWidget):
         y_max_use = y_max_nat
         if np.any(under_leg_mask):
             y_peak_under_leg = float(np.max(y_norm[under_leg_mask]))
+            # Keep y_min_use proportional to y_max_use (-0.10 / 1.10) so y=0 stays at the exact same vertical fraction
             zero_frac = 0.10 / 1.20
             if y_bot_frac > zero_frac:
                 y_needed = y_peak_under_leg * (1.0 - zero_frac) / (y_bot_frac - zero_frac)
@@ -6506,6 +6562,13 @@ class ioliteOptimiser(QWidget):
                     y_max_use = y_needed
 
         y_min_use = -y_max_use * (0.10 / 1.10)
+
+        # Extend the composite baseline line to t_max_use with a dotted segment so there is no blank gap on the right
+        if ext_right is not None:
+            if t_max_use > t_max_nat:
+                ext_right.set_data([t_max_nat, t_max_use], [float(y_norm[-1]), float(y_norm[-1])])
+            else:
+                ext_right.set_data([], [])
 
         ax_comp.set_xlim(t_min, t_max_use)
         ax_comp.set_ylim(y_min_use, y_max_use)
@@ -6526,8 +6589,11 @@ class ioliteOptimiser(QWidget):
         
         # 1. Rescale X to full data range
         if rescale_x:
-            ax.relim()
-            ax.autoscale(axis='x', tight=True)
+            if is_spr and ax != getattr(self, 'spr_ax_comp', None) and getattr(self, '_spr_default_xlim', None):
+                ax.set_xlim(self._spr_default_xlim)
+            else:
+                ax.relim()
+                ax.autoscale(axis='x', tight=True)
             # Ensure we don't zoom out too far if there's no data
             xlim = ax.get_xlim()
             if xlim[0] == xlim[1]:
