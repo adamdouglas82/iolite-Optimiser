@@ -86,7 +86,7 @@ The analytical targets for the optimisation algorithm:
 
 Displays the recommended instrument parameters:
 
-* **Spot Size (µm)**: Recommended beam diameter (`Auto` by default; enter a non-zero value to lock a manual spot size override).
+* **Spot Size (µm)**: Recommended beam diameter (defaults to `30 µm` before data is loaded). Click the adjacent lock button (**🔓** / **🔒**) or adjust the value manually to lock the spot size so it stays constant while adjusting other optimisation parameters; click **🔒** to unlock and automatically recalculate the minimum required spot size.
 * **Rep-Rate (Hz)**: Optimised laser firing frequency.
 * **Acq Time (ms / s)**: Total mass spectrometer integration cycle time (dwell budget plus hardware overhead).
 * **Speed (µm s⁻¹)**: *(Line / Imaging modes)* Optimised stage scan speed, derived from `Speed = Rep-Rate * (Spot Size - Overlap)`. Click the blue **`(int)` / `(1 dp)` / `(2 dp)`** link in the label to cycle speed rounding precision; the displayed Overlap and Dosage automatically adjust to reflect the rounded stage speed.

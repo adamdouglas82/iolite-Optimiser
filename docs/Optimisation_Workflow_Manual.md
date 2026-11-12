@@ -95,8 +95,8 @@ The optimiser recalculates automatically whenever any parameter changes:
    * **Orange Rows**: Channels that cannot reach **Minimum SNR** (forced to minimum dwell on sequential systems).
    * **Blue Rows**: High-intensity channels constrained by the hardware minimum dwell time.
    * Change any channel's **Mode** (`Auto`, `Even`, `Exclude`, `Set to Min`, `Custom`) to tailor how the cycle budget is allocated.
-4. **Manual Spot Size Override**:
-   * To lock a specific beam diameter (e.g., `20 µm`), set the **Spot Size (µm)** spin box in the **Optimised Settings** panel to `20`. Set it back to `0` (`Auto`) to resume automatic spot size optimisation.
+4. **Locking / Overriding Spot Size**:
+   * To maintain the currently selected spot size while adjusting other parameters, click the lock button (**🔓** -> **🔒**) next to **Spot Size (µm)** in the **Optimised Settings** panel (or adjust the spin box to a manual diameter, which engages the lock automatically). Click **🔒** to unlock and resume automatic minimum spot size calculation.
 
 ### Step 4.3: Verify in the Pulse Train Simulator
 
