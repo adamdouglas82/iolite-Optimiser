@@ -544,7 +544,7 @@ class Logic:
             mx = row['Max Intensity']
             if mx > 0:
                 seg_y_norm = seg_y / mx
-                peak_segments.append((seg_t, seg_y_norm))
+                peak_segments.append((seg_t, seg_y_norm, seg_y))
 
         if not peak_segments:
             return None
@@ -553,14 +553,18 @@ class Logic:
         # Grid covers from -b_left to b_right
         grid_t = np.arange(-b_left, b_right + dt, dt)
         sum_y = np.zeros_like(grid_t)
+        sum_y_raw = np.zeros_like(grid_t)
         count_y = np.zeros_like(grid_t)
         
-        for seg_t, seg_y in peak_segments:
+        for seg_t, seg_y, seg_y_raw in peak_segments:
             interp_y = np.interp(grid_t, seg_t, seg_y, left=0, right=0)
+            interp_y_raw = np.interp(grid_t, seg_t, seg_y_raw, left=0, right=0)
             sum_y += interp_y
+            sum_y_raw += interp_y_raw
             count_y += 1
             
         avg_y = sum_y / count_y if len(peak_segments) > 0 else sum_y
+        avg_y_raw = sum_y_raw / count_y if len(peak_segments) > 0 else sum_y_raw
         
         # Shift X-axis so that 0 represents the 1% rise (FW0.01M left edge)
         # This preserves the highest-point alignment between all pulses, but normalizes the visual start time.
@@ -574,7 +578,11 @@ class Logic:
                 t_l = grid_t[idx_l]
             grid_t = grid_t - t_l
         
-        return pd.DataFrame({'Relative Time (s)': grid_t, 'Normalised Intensity': avg_y})
+        return pd.DataFrame({
+            'Relative Time (s)': grid_t,
+            'Normalised Intensity': avg_y,
+            'Mean Intensity': avg_y_raw
+        })
 
     @staticmethod
     def get_isotope_stats(name, df_sig, df_blk, dwell_s, is_raw_counts):
@@ -2810,7 +2818,7 @@ class ioliteOptimiser(QWidget):
         lbl_area10_label = QLabel("Area:")
         lbl_area10_label.setStyleSheet("font-size: 8 pt;")
         lbl_area10_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.lbl_spr_area10 = QLabel("- Counts")
+        self.lbl_spr_area10 = QLabel("- cts")
         self.lbl_spr_area10.setStyleSheet("font-size: 8 pt;")
         self.lbl_spr_area10.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         
@@ -2907,7 +2915,7 @@ class ioliteOptimiser(QWidget):
         lbl_area1_label = QLabel("Area:")
         lbl_area1_label.setStyleSheet("font-size: 8 pt;")
         lbl_area1_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.lbl_spr_area1 = QLabel("- Counts")
+        self.lbl_spr_area1 = QLabel("- cts")
         self.lbl_spr_area1.setStyleSheet("font-size: 8 pt;")
         self.lbl_spr_area1.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         
@@ -3309,15 +3317,15 @@ class ioliteOptimiser(QWidget):
             self._last_spr_fw1_max_ms = 0
 
         if has_peaks:
-            # Forced "Counts" unit for Area
-            area_unit_label = " Counts"
+            # Forced "cts" unit for Area
+            area_unit_label = " cts"
 
             self.lbl_spr_fw10.setText(f"<b>{_adap(stats['FW0.1M Mean']*mult)}</b> {unit_label}")
             self.lbl_spr_rsd10.setText(f"{stats['FW0.1M RSD']:.1f} %")
             self.lbl_spr_fw_max10.setText(f"<b>{_adap(stats['FW0.1M Max']*mult)}</b> {unit_label}")
             # Use SI formatting for Area
             s_mean10, p_mean10 = _si(stats['Area 10% Mean'])
-            self.lbl_spr_area10.setText(f"<b>{s_mean10}</b>{p_mean10}{area_unit_label}")
+            self.lbl_spr_area10.setText(f"<b>{s_mean10}</b>{p_mean10.rstrip()}{area_unit_label}")
             self.lbl_spr_area_rsd10.setText(f"{stats['Area 10% RSD']:.1f} %")
 
             self.lbl_spr_fw1.setText(f"<b>{_adap(stats['FW0.01M Mean']*mult)}</b> {unit_label}")
@@ -3325,7 +3333,7 @@ class ioliteOptimiser(QWidget):
             self.lbl_spr_fw_max1.setText(f"<b>{_adap(stats['FW0.01M Max']*mult)}</b> {unit_label}")
             # Use SI formatting for Area
             s_mean1, p_mean1 = _si(stats['Area 1% Mean'])
-            self.lbl_spr_area1.setText(f"<b>{s_mean1}</b>{p_mean1}{area_unit_label}")
+            self.lbl_spr_area1.setText(f"<b>{s_mean1}</b>{p_mean1.rstrip()}{area_unit_label}")
             self.lbl_spr_area_rsd1.setText(f"{stats['Area 1% RSD']:.1f} %")
             
             # Store for "Apply" logic (rounded to matching UI precision)
@@ -3569,8 +3577,10 @@ class ioliteOptimiser(QWidget):
                 # Draw FW Markers for Composite
                 comp_t = comp_df['Relative Time (s)'].values
                 comp_y = comp_df['Normalised Intensity'].values
+                comp_y_raw = comp_df['Mean Intensity'].values if 'Mean Intensity' in comp_df.columns else comp_y
                 
                 comp_widths = {0.1: 0.0, 0.01: 0.0} # Store for stats box
+                comp_areas = {0.1: 0.0, 0.01: 0.0}
                 
                 for lvl, mkr, col in [(0.1, 's', 'C6'), (0.01, 'd', 'C9')]:
                     above = np.where(comp_y >= lvl)[0]
@@ -3587,6 +3597,15 @@ class ioliteOptimiser(QWidget):
                         
                         # Store width
                         comp_widths[lvl] = t_r - t_l
+                        
+                        # Calculate Composite Peak Area matching analyse_washout_peaks
+                        idx_start = max(0, idx_l - 1)
+                        idx_end = min(len(comp_t), idx_r + 1)
+                        if idx_end > idx_start:
+                            if is_cps:
+                                comp_areas[lvl] = float(trapz(comp_y_raw[idx_start:idx_end], x=comp_t[idx_start:idx_end]))
+                            else:
+                                comp_areas[lvl] = float(np.sum(comp_y_raw[idx_start:idx_end]))
                         
                         # Plot in ms
                         self.spr_ax_comp.plot([t_l * 1000.0, t_r * 1000.0], [lvl, lvl], linestyle='None', marker=mkr, markersize=5, color=col, alpha=0.8)
@@ -3617,8 +3636,20 @@ class ioliteOptimiser(QWidget):
                 if hasattr(self, 'lbl_spr_fw_comp1'):
                     self.lbl_spr_fw_comp1.setText(f"<b>{_adap(val_1*mult)}</b> {unit_label}")
                 
-                label_10 = f"FW0.1M (10%)\nComp: {_adap(val_10*mult)} {unit_label}\nMax:  {_adap(f10.max()*mult)} {unit_label}"
-                label_1 = f"FW0.01M (1%)\nComp: {_adap(val_1*mult)} {unit_label}\nMax:  {_adap(f1.max()*mult)} {unit_label}"
+                s_c10, p_c10 = _si(comp_areas.get(0.1, 0.0))
+                s_c1, p_c1 = _si(comp_areas.get(0.01, 0.0))
+                label_10 = (
+                    f"FW0.1M (10%)\n"
+                    f"Comp: {_adap(val_10*mult)} {unit_label}\n"
+                    f"Max:  {_adap(f10.max()*mult)} {unit_label}\n"
+                    f"Area: {s_c10}{p_c10.rstrip()} cts"
+                )
+                label_1 = (
+                    f"FW0.01M (1%)\n"
+                    f"Comp: {_adap(val_1*mult)} {unit_label}\n"
+                    f"Max:  {_adap(f1.max()*mult)} {unit_label}\n"
+                    f"Area: {s_c1}{p_c1.rstrip()} cts"
+                )
                 
                 h10 = Line2D([0], [0], linestyle='None', marker='s', markersize=4, color='C6', label=label_10)
                 h1 = Line2D([0], [0], linestyle='None', marker='d', markersize=4, color='C9', label=label_1)
