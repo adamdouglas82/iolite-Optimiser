@@ -496,15 +496,17 @@ class Logic:
         core_fw = core_left + core_right
         
         # 2. Asymmetric baseline buffers
+        lead_margin = max(2.0 * dt, 0.15 * core_fw)
+        tail_margin = max(2.0 * dt, 0.20 * core_fw)
         if len(peaks_df) > 1:
             pdf = peaks_df.sort_values('Peak Time (s)')
             gaps = pdf['l001'].values[1:] - pdf['r001'].values[:-1]
             median_gap = max(0, np.median(gaps))
             p2p = np.median(np.diff(pdf['Peak Time (s)'].values))
             
-            # 10 % Margin Left, 20 % Margin 
-            b_left = core_left + (0.1 * core_fw)
-            b_right = core_right + (0.20 * core_fw)
+            # 15 % Margin Left, 20 % Margin Right
+            b_left = core_left + lead_margin
+            b_right = core_right + tail_margin
             
             # Safety 1: Ensure we don't clip adjacent peaks via gap allocation
             b_left = min(b_left, core_left + (0.4 * median_gap))
@@ -515,8 +517,8 @@ class Logic:
             b_right = min(b_right, 0.45 * p2p)
         else:
             # Single peak fallbacks
-            b_left = core_left + (0.1 * core_fw)
-            b_right = core_right + (0.20 * core_fw)
+            b_left = core_left + lead_margin
+            b_right = core_right + tail_margin
             
         # Global minimums (0.1ms / 0.1ms) - Fixes "needle" peaks
         b_left = max(b_left, 0.0001)
@@ -3498,16 +3500,21 @@ class ioliteOptimiser(QWidget):
             self.spr_peak_label_map[h1] = p_idx
             
         # Composite Peak Plotting
+        self._spr_comp_t_ms = None
+        self._spr_comp_y = None
+        self._spr_comp_line = None
         if show_composite and self.spr_ax_comp:
             comp_df = Logic.generate_composite_peak(self.spr_df, iso, filtered_df, bg_sub=bg_sub, bg_start_s=bg_start_s, bg_end_s=bg_end_s)
             if comp_df is not None:
                 # Use the anchor color (Index 0 of safe_palette)
                 # Switch to ms for X-axis readability (User Request)
-                self.spr_ax_comp.plot(comp_df['Relative Time (s)'] * 1000.0, comp_df['Normalised Intensity'], color=safe_palette[0], lw=2)
+                self._spr_comp_t_ms = comp_df['Relative Time (s)'].values * 1000.0
+                self._spr_comp_y = comp_df['Normalised Intensity'].values
+                self._spr_comp_line, = self.spr_ax_comp.plot(self._spr_comp_t_ms, self._spr_comp_y, color=safe_palette[0], lw=2)
                 self.spr_ax_comp.set_xlabel("Rel. Time (ms)", fontsize='medium', color=fg_col)
                 # Stable composite title anchored to axis top
                 self.spr_ax_comp.set_title("Composite Peak", fontsize='medium', color=fg_col, y=1.0, pad=10)
-                self.spr_ax_comp.set_ylim(-0.02, 1.05) # Tighter Y limit
+                self.spr_ax_comp.set_ylim(-0.10, 1.10) # Matches 10% bottom/top margin of main plot so y=0 aligns
                 self.spr_ax_comp.set_yticklabels([])    # Hide Y numbers
                 self.spr_ax_comp.set_yticks([])         # Hide Y ticks
                 self.spr_ax_comp.margins(x=0)         # Snap X axis to data
@@ -3574,10 +3581,13 @@ class ioliteOptimiser(QWidget):
                 h10 = Line2D([0], [0], linestyle='None', marker='s', markersize=4, color='C6', label=label_10)
                 h1 = Line2D([0], [0], linestyle='None', marker='d', markersize=4, color='C9', label=label_1)
                 
-                self.spr_stats_legend = self.spr_ax_comp.legend(handles=[h10, h1], loc='upper right', 
-                                                    fontsize=8.5, handletextpad=0.5, labelspacing=1.0,
-                                                    frameon=True, facecolor=plt.rcParams['axes.facecolor'],
-                                                    edgecolor=fg_col)
+                self.spr_stats_legend = self.spr_ax_comp.legend(
+                    handles=[h10, h1], loc='upper right',
+                    fontsize=8.0, handletextpad=0.35, labelspacing=0.65,
+                    borderpad=0.35, borderaxespad=0.35, handlelength=1.0,
+                    frameon=True, facecolor=plt.rcParams['axes.facecolor'],
+                    edgecolor=fg_col
+                )
                 self.spr_stats_legend.get_frame().set_alpha(0.6)
                 for text in self.spr_stats_legend.get_texts():
                     text.set_color(fg_col)
@@ -3685,6 +3695,7 @@ class ioliteOptimiser(QWidget):
 
         # Force margin update to ensure axis doesn't collapse (especially if rescale=False)
         self._update_smart_margins(self.spr_canvas)
+        self._adjust_spr_comp_limits()
 
         self.spr_canvas.draw()
 
@@ -3900,6 +3911,7 @@ class ioliteOptimiser(QWidget):
         # Toggle visibility without re-running analysis (Preserves Zoom)
         if hasattr(self, 'spr_stats_legend') and self.spr_stats_legend:
             self.spr_stats_legend.set_visible(not checked)
+            self._adjust_spr_comp_limits()
             # Efficient redraw if available
             if hasattr(self.spr_canvas, 'draw_idle'):
                 self.spr_canvas.draw_idle()
@@ -6426,6 +6438,77 @@ class ioliteOptimiser(QWidget):
             top = 1.0 - (t_px / h),
             bottom = b_px / h
         )
+        if canvas == getattr(self, 'spr_canvas', None):
+            self._adjust_spr_comp_limits()
+
+    def _adjust_spr_comp_limits(self):
+        ax_comp = getattr(self, 'spr_ax_comp', None)
+        t_ms = getattr(self, '_spr_comp_t_ms', None)
+        y_norm = getattr(self, '_spr_comp_y', None)
+        if ax_comp is None or t_ms is None or y_norm is None or len(t_ms) < 2:
+            return
+
+        t_data_min = float(t_ms[0])
+        t_max_nat = float(t_ms[-1])
+        if t_max_nat <= t_data_min:
+            return
+
+        pulse_span_ms = max(10.0, t_max_nat)
+        t_min = min(t_data_min, -0.12 * pulse_span_ms)
+
+        # Match the 10% bottom/top margin ratio of rescale_to_visible so y=0 aligns with the main SPR plot
+        y_min_nat = -0.10
+        y_max_nat = 1.10
+
+        leg = getattr(self, 'spr_stats_legend', None)
+        if leg is None or not leg.get_visible():
+            ax_comp.set_xlim(t_min, t_max_nat)
+            ax_comp.set_ylim(y_min_nat, y_max_nat)
+            return
+
+        try:
+            renderer = self.spr_canvas.get_renderer()
+            ax_bbox = ax_comp.get_window_extent(renderer)
+            box_obj = getattr(leg, '_legend_box', leg)
+            leg_bbox = box_obj.get_window_extent(renderer)
+            if ax_bbox.width <= 0 or ax_bbox.height <= 0:
+                ax_comp.set_xlim(t_min, t_max_nat)
+                ax_comp.set_ylim(y_min_nat, y_max_nat)
+                return
+
+            leg_w_frac = max(0.0, min(0.92, (leg_bbox.width + 6.0) / ax_bbox.width))
+            leg_h_frac = max(0.0, min(0.85, (leg_bbox.height + 6.0) / ax_bbox.height))
+        except Exception:
+            leg_w_frac = 0.70
+            leg_h_frac = 0.38
+
+        y_bot_frac = max(0.15, 1.0 - leg_h_frac - 0.04)
+        x_left_frac = 1.0 - leg_w_frac - 0.05
+
+        y_thresh = y_min_nat + y_bot_frac * (y_max_nat - y_min_nat)
+        conflict_mask = y_norm >= y_thresh
+        t_max_use = t_max_nat
+
+        if np.any(conflict_mask) and x_left_frac >= 0.16:
+            t_conflict = float(np.max(t_ms[conflict_mask]))
+            t_max_req = t_min + (t_conflict - t_min) / x_left_frac
+            t_max_use = min(max(t_max_nat, t_max_req), t_max_nat * 2.2)
+
+        x_leg_start_ms = t_min + max(0.0, (1.0 - leg_w_frac - 0.03)) * (t_max_use - t_min)
+        under_leg_mask = t_ms >= x_leg_start_ms
+        y_max_use = y_max_nat
+        if np.any(under_leg_mask):
+            y_peak_under_leg = float(np.max(y_norm[under_leg_mask]))
+            zero_frac = 0.10 / 1.20
+            if y_bot_frac > zero_frac:
+                y_needed = y_peak_under_leg * (1.0 - zero_frac) / (y_bot_frac - zero_frac)
+                if y_needed > y_max_nat:
+                    y_max_use = y_needed
+
+        y_min_use = -y_max_use * (0.10 / 1.10)
+
+        ax_comp.set_xlim(t_min, t_max_use)
+        ax_comp.set_ylim(y_min_use, y_max_use)
         
         # Force redraw if needed? No, subplots_adjust usually triggers draw if in event loop
         # But update_geometry might be needed
