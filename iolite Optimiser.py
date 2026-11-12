@@ -1404,13 +1404,20 @@ class Logic:
             y = df[numeric_cols].sum(axis=1).values
             time_vals = df['Time'].values
             
-            # 1. Very sensitive baseline estimation
+            # 1. Baseline estimation across start, end, and rolling windows (immune to signal at start of file)
             init_window = max(10, int(len(y) * 0.05))
-            bg_est = y[:init_window]
-            bg_mean = np.mean(bg_est)
-            bg_std = np.std(bg_est) if len(bg_est) > 1 else 0
+            if len(y) > init_window:
+                candidates = [y[:init_window], y[-init_window:]]
+                step = max(1, init_window // 2)
+                for start_i in range(0, len(y) - init_window + 1, step):
+                    candidates.append(y[start_i:start_i + init_window])
+                bg_est = min(candidates, key=lambda seg: float(np.nanmean(seg)))
+            else:
+                bg_est = y
+            bg_mean = float(np.nanmean(bg_est))
+            bg_std = float(np.nanstd(bg_est)) if len(bg_est) > 1 else 0.0
             
-            y_max = np.max(y)
+            y_max = float(np.nanmax(y))
             # Threshold: 10.0 sigma above noise, or 10% of max range (User Request: Stricter filtering)
             thresh = max(bg_mean + 10.0 * bg_std, bg_mean + (y_max - bg_mean) * 0.1)
             
@@ -1456,17 +1463,29 @@ class Logic:
                 sig_crop = int(sig_len * 0.05)
                 rec_sig = (time_vals[s_idx + sig_crop], time_vals[e_idx - sig_crop])
                 
-                # Background Region: Asymmetric crop to ensure clearing
-                # We pull back significantly (15%) from the detected signal start
-                gap_len = s_idx
-                bg_start_idx = int(gap_len * 0.05)
-                bg_end_idx = s_idx - int(gap_len * 0.15)
-                
-                if bg_end_idx > bg_start_idx + 2:
-                    rec_bg = (time_vals[bg_start_idx], time_vals[bg_end_idx])
+                # Background Region: Prefer >= 5s gas blank at start, otherwise check end of file
+                pre_dur_s = float(time_vals[s_idx] - time_vals[0])
+                post_dur_s = float(time_vals[-1] - time_vals[e_idx])
+                MIN_BG_DURATION_S = 5.0
+
+                if pre_dur_s >= MIN_BG_DURATION_S or (post_dur_s < MIN_BG_DURATION_S and pre_dur_s >= post_dur_s):
+                    # Gas blank before signal (crop 5% at start, pull back 15% before signal start)
+                    gap_len = s_idx
+                    bg_start_idx = int(gap_len * 0.05)
+                    bg_end_idx = s_idx - int(gap_len * 0.15)
+                    if bg_end_idx > bg_start_idx + 2:
+                        rec_bg = (time_vals[bg_start_idx], time_vals[bg_end_idx])
+                    else:
+                        rec_bg = (time_vals[0], time_vals[max(1, s_idx // 2)])
                 else:
-                    # Fallback if space is very tight
-                    rec_bg = (time_vals[0], time_vals[max(1, s_idx // 2)])
+                    # Gas blank after signal (pull forward 15% after signal end, crop 5% before end of file)
+                    tail_len = (len(time_vals) - 1) - e_idx
+                    bg_start_idx = e_idx + int(tail_len * 0.15)
+                    bg_end_idx = (len(time_vals) - 1) - int(tail_len * 0.05)
+                    if bg_end_idx > bg_start_idx + 2:
+                        rec_bg = (time_vals[bg_start_idx], time_vals[bg_end_idx])
+                    else:
+                        rec_bg = (time_vals[min(len(time_vals) - 2, e_idx + max(1, tail_len // 2))], time_vals[-1])
                 
                 return rec_bg, rec_sig
         except Exception:
