@@ -2,16 +2,16 @@
 
 [![GitHub Release](https://img.shields.io/github/v/release/adamdouglas82/iolite-Optimiser?label=Version)](https://github.com/adamdouglas82/iolite-Optimiser/releases/latest)
 
-An advanced optimization and simulation plugin for **iolite 4** to determine the best combination of **Spot Size**, **Laser Repetition Rate**, and **Scan Speed** (or Dwell/Acquisition Times) for laser ablation ICP-MS analyses.
+An advanced optimisation and simulation plugin for **iolite 4** to determine the best combination of **Spot Size**, **Laser Repetition Rate**, **Stage Scan Speed**, and **Dwell / Acquisition Times** for laser ablation ICP-MS analyses.
 
 ---
 
 ## Features
 
-- **Single Pulse Response (SPR) Characterization**: Analyze washout curves and composite peak shapes.
-- **PreScan Suggestions**: Calculate suggested conditions for pre optimisation scan.
-- **Instrument Setup Optimization**: Sync laser firing frequencies with mass spectrometer integration cycles using multiple sync strategies.
-- **Pulse Train Simulator**: Model sequential sweeps, washout scaling, and detector carryover.
+* **Single Pulse Response (SPR) Characterisation**: Analyse washout curves, interactive peak cutoffs, and composite pulse profiles.
+* **PreScan Suggestions**: Calculate recommended initial conditions for a pre-optimisation test scan.
+* **Instrument Setup Optimisation**: Synchronise laser firing frequencies with mass spectrometer integration cycles across Quadrupole, Sector-Field, Multi-Collector, and TOF instruments.
+* **Pulse Train Simulator**: Model sequential sweeps, real composite pulse profiles, washout scaling, and steady-state detector stability.
 
 ---
 
@@ -39,7 +39,7 @@ Follow these steps to install the plugin in iolite 4:
 
 ### Step 4: Select the Plugin File
 
-1. In the file browser that appears, navigate to your extracted folder (e.g. `iolite-Optimiser-v1.0.0`).
+1. In the file browser that appears, navigate to your extracted folder (e.g., `iolite-Optimiser-v1.0.6`).
 2. Select **`iolite Optimiser.py`** and click **Open**.
 
 ![Select Python Plugin File](docs/images/select_plugin_file.png)
@@ -55,7 +55,8 @@ Follow these steps to install the plugin in iolite 4:
 1. The **iolite Optimiser** icon will now appear in your left sidebar in iolite. Click it to open the main window.
 
 ![iolite Optimiser Sidebar Layout](docs/images/optimiser_sidebar.png)
-2. Open the **Settings** (Hardware Configuration) dialog to configure your instrumentation, the version number of the plugin is also show heren (`Version: 1.0.0`).
+
+2. Open the **Settings** (Hardware Configuration) dialog to configure your instrumentation; the version number of the plugin is also shown here (`Version: 1.0.6`), alongside **Check for Updates**.
 
 ![Hardware Configuration Dialog](docs/images/hardware_config_dialog.png)
 
@@ -65,7 +66,7 @@ Follow these steps to install the plugin in iolite 4:
 
 For details on configuration and workflow steps, refer to the manuals in the `docs` folder:
 
-- [Advanced Optimiser Tab Manual](docs/Optimiser_Manual.md)
-- [Single Pulse Response (SPR) Tab Manual](docs/SPR_Manual.md)
-- [Pulse Train Simulator Tab Manual](docs/Pulse_Train_Simulator_Manual.md)
-- [Optimisation Workflow Manual](docs/Optimisation_Workflow_Manual.md)
+* [Method Optimiser Tab Manual](docs/Optimiser_Manual.md)
+* [Single Pulse Response (SPR) Tab Manual](docs/SPR_Manual.md)
+* [Pulse Train Simulator Tab Manual](docs/Pulse_Train_Simulator_Manual.md)
+* [Optimisation Workflow Manual](docs/Optimisation_Workflow_Manual.md)

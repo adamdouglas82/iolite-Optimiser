@@ -2,119 +2,103 @@
 
 ## Overview
 
-This guide provides a comprehensive, step-by-step workflow for using the **iolite Optimiser**. It combines the **Single Pulse Response (SPR)** analysis with the **Optimiser** to ensure your laser ablation parameters are perfectly tuned for your specific hardware and analytical goals.
+This guide provides a step-by-step workflow for using the **iolite Optimiser**. It combines **Single Pulse Response (SPR)** washout characterisation, **PreScan** parameter calculation, **Method Optimisation**, and **Pulse Train Simulation** to tune your laser ablation ICP-MS method for your hardware and analytical goals.
 
 ---
 
-## Phase 1: Determine Washout (SPR Tab)
+## Phase 1: Determine Washout (Determine SPR Tab)
 
-Before optimising spot size or scan speed, you must characterise your system's Single Pulse Response (SPR) to determine the washout time.
+Before optimising spot size or scan speed, characterise your system's Single Pulse Response (SPR) to measure its washout time.
 
 ### Step 1.1: Acquire and Load SPR Test Data
 
-1. **Acquire Test Data**: Run a single-pulse test ablaton on your instrument using a low laser repetition rate of **1 Hz** and a **10 ms** integration time measuring a single mass (isotope). This ensures you record cleanly separated, high-resolution profiles of individual laser pulses.
-2. Open the **iolite Optimiser** plugin from the *Tools* menu in iolite.
-3. Go to the **SPR Tab**.
+1. **Acquire Test Data**: Run a single-pulse test ablation on your instrument using a low laser repetition rate of **1 Hz** and a **10 ms** integration time measuring a single high-abundance mass (or a short list of masses). This records cleanly separated, high-resolution profiles of individual laser pulses.
+2. Open the **iolite Optimiser** plugin from the left sidebar or *Tools* menu in iolite.
+3. Select the **Determine SPR** tab.
 4. Click **Import SPR File** and select your SPR data file.
 
 ### Step 1.2: Select & Optimise Peak Detection
 
-1. **Select Channel**: Choose the high-abundance isotope channel (e.g. `U238`, `Th232`) used during the single-pulse run.
-2. **Verify Detection**: Look at the **SPR Plot**. Valid pulses should be marked with an orange `X`.
-    - *Too much noise?* Increase **Peak Cutoff** (uncheck Auto) or **Min. Distance**.
-    - *Missed peaks?* Decrease **Peak Cutoff**.
-3. **Clean Data**: If you see double-peaks or artifacts, click on them in the plot to **Exclude** them from the calculation.
-4. **Apply Washout**:
-    - Review the **FW 0.1M (10%)** statistics in the left panel.
-    - Click **Apply Average, Max, or Composite to Optimiser**.
-    - *Tip*: The **Composite** value is often the most stable representative of your system's washout.
+1. **Select Channel**: Choose a high-abundance isotope channel (e.g., `U238` or `Th232`), or check the **Maximum Observed SPR** panel to see which channel exhibits the longest washout.
+2. **Verify Detection**: Inspect the **SPR Plot**. Valid pulses are marked with an orange `X`, and the active threshold is shown by the horizontal dashed **Peak Cutoff** line.
+   * *Too much noise detected as peaks?* Hover over and drag the dashed **Peak Cutoff** line up on the plot (or uncheck **Auto** and increase the value), or increase **Min. Peak Spacing** (default `900 ms`).
+   * *Missed peaks?* Drag the dashed **Peak Cutoff** line down.
+3. **Verify Background Subtraction**: If your file has at least `5 seconds` of gas blank at the start or end of the recording, **Subtract Background** automatically selects that baseline region. If no `>= 5 s` gas blank is present, **Subtract Background** is automatically unchecked.
+4. **Clean Data**: Click on any outlier peak marker or number label on the plot (or enable **Auto-Exclude Wide Outliers**) to exclude it from the statistics.
+5. **Apply Washout**:
+   * Review the **FW 0.1M (10%)**, **FW 0.01M (1%)**, or **Maximum Observed SPR** statistics in the left panel.
+   * Click **Apply Average**, **Apply Composite**, or **Apply Max** to send that washout time directly to the **Method Optimiser** tab.
+   * *Tip*: **Apply Composite** uses the stacked average pulse shape and is typically the most representative value for system washout.
 
 ---
 
 ## Phase 2: Determine PreScan Parameters (Setting Initial Conditions)
 
-Once the Single Pulse Response washout is determined, you can use the advisor tool to set up the initial conditions for your instrument PreScan.
+Once the system washout time is known, you can calculate ideal conditions for a quick PreScan over your sample or reference material.
 
 ### Step 2.1: Calculate Suggestions
 
-1. Switch to the **Optimiser Tab** of the plugin.
+1. Switch to the **Method Optimiser** tab and click **Settings** to select your **ICP-MS** and **Laser** hardware models.
 2. In the **Input Parameters** group:
-   - Enter your target **Initial Spot Size** (e.g. 15µm) and the **Washout** decay time applied from Phase 1.
-   - Enter the **Number of Analytes** representing the total number of isotopes in your proposed mass spectrometer method.
-3. Click the **Suggest PreScan Params** button.
-4. The suggestions dialog will display:
-   - **Dwell Time per Isotope**: Bounded by hardware minimums and rounded to the instrument's resolution.
-   - **Target Cycle Time**: Overall integration loop time.
-   - **Suggested Rep-Rate**: Firing frequency that achieves low statistical fluctuation ($\le 5\%$ RSD) under steady-state oversampling.
-   - **Suggested Stage Speed** and **Overlap**: Recommended values to prevent striping.
-5. Apply these settings to your instrument's control software to execute the PreScan and generate the primary calibration/tuning data file.
+   * Enter your desired **Initial Spot Size (µm)** (e.g., `15 µm`) and verify the **Washout (ms)** value applied from Phase 1.
+   * Enter the **Number of Analytes** in your proposed mass spectrometer method.
+3. Click **Suggest PreScan Params**.
+4. The dialog displays:
+   * **Dwell Time per Analyte**: Bounded by hardware minimums and rounded to your instrument's dwell resolution.
+   * **Target Cycle Time**: Total integration sweep time.
+   * **Suggested Rep-Rate**: Lowest valid laser frequency achieving `<= 5%` steady-state Lockwood RSD under oversampling.
+   * **Suggested Stage Speed**, **Dosage**, and **Overlap**: Recommended scan parameters (capped at the cell's maximum stage speed).
+5. Run your PreScan on the instrument using these parameters to record a representative baseline and ablation signal.
 
 ---
 
-## Phase 3: Optimiser Setup (Optimiser Tab)
+## Phase 3: Load Sensitivity Data (Method Optimiser Tab)
 
-### Step 3.1: Hardware Configuration
+### Step 3.1: Import PreScan / Tuning File
 
-1. Switch to the **Optimiser Tab**.
-2. Click the **Settings** button.
-3. **ICP-MS**: Select your Manufacturer and Model.
-    - *Custom?* Choose "Custom Model" and enter your **Min Dwell Time** and **Dwell Resolution** (e.g., for TOF or generic Quad).
-4. **Laser**: Select your Platform and Cell Type.
-    - *Custom?* Choose "Custom Laser" and manually limit the **Max Rep Rate**, **Max Speed**, and **Rep-Rate Resolution**.
-
-### Step 3.2: Load Sensitivity Data
-
-1. Ensure your iolite session has a representative ablation signal (e.g., a "Tuning" line or standard block).
-2. Click **Import Optimisation File** and select your data file.
-3. **Dwell Time Check**:
-    - If your data lacks dwell time metadata, a dialog will appear.
-    - Choose **Set to Global** (e.g., 10ms) or enter **Individual** times per channel to match your instrument method.
-4. **Region Selection**:
-    - Check the Signal Plot.
-    - Ensure the **Background (Blue)** region covers the gas blank.
-    - Ensure the **Signal (Red)** region covers the steady ablation signal.
-    - **Quick Adjustment**: Hold **Shift** and drag the region lines directly on the plot. The software will automatically swap start/end points if you cross them.
-    - Use **Auto Select Regions** if they are incorrect.
+1. On the **Method Optimiser** tab, click **Import File** and select your PreScan or tuning data file.
+2. **Dwell Time Check**:
+   * If the file format does not contain embedded dwell time metadata, the **Configure Channel Dwell Times** dialog appears.
+   * Enter a **Global Dwell Time** (or individual channel dwell times), select the channels to include (or load a saved channel preset), and click **OK**.
+3. **Verify Background & Signal Regions**:
+   * Inspect the signal plot to confirm the **Background (Blue)** region covers the gas blank and the **Signal (Red)** region covers the steady ablation plateau.
+   * **Quick Adjustment**: Hold **Shift** and **Left-Click & Drag** the vertical region edges directly on the plot, or edit the **Background (s)** and **Signal (s)** spin boxes.
 
 ---
 
-## Phase 4: Run Optimization
+## Phase 4: Run Optimisation & Verify Stability
 
 ### Step 4.1: Define Analytical Goals
 
-1. **Mode**: Select your analysis type (usually **Imaging** or **Line**).
-2. **Washout**: Verify this matches the value you applied from the SPR tab (Phase 1).
-3. **Parameters**:
-    - **Sync Strategy**: Choose how rep-rates and integration times are optimised:
-      - **Adaptive Integer Sync (Auto)**: Sweeps frequencies to guarantee integer pulses per cycle.
-      - **Strict Pulse Target (Manual)**: Hard-locks to the target pulses.
-      - **Oversampling (Time-Driven)**: Prioritizes steady-state oversampling without snapping.
-      - **Combined Integer Sync (Auto)**: Sweeps above the oversampling minimum to find a perfect integer sync count.
-    - **Sync Target (Pulses)**: Set the strict integration synchronisation requirement (e.g., 10 shots/dwell).
-    - **Sync Target (RSD %)**: Set the target stability margin (e.g. 5%) under oversampling modes.
-    - **Prefer Exact Pulses per Acq**: Check this box to force the algorithm to search only for the exact integer target.
-    - **Dosage**: Set the spatial density requirement (e.g., 10 shots/pixel).
-        - Keep **Sync Dosage** checked for square pixels where Dosage = Pulses/Dwell.
-        - Uncheck **Sync Dosage** to manually decouple the scan speed from the mass spectrometer's integration rate (e.g., for rectangular pixels or TOF instruments).
-    - **Target SNR**: Set the desired quality (e.g., 10 Sigma).
-    - **Avoid Gaps**: Check this for Imaging to ensure full surface coverage.
-
-- **Navigation Tip**: **Double-click** any plot at any time to instantly reset the view to its full extents. Use the **Mouse Wheel** to zoom and **Left-Click & Drag** to pan.
+1. **Input Parameters**: Confirm **Initial Spot Size (µm)** and **Initial Rep-Rate (Hz)** match the conditions used to acquire the loaded file, and select your target **Mode** (`Spot`, `Line`, or `Imaging`).
+2. **Optimisation Parameters**:
+   * **Sync Strategy**:
+     * **Adaptive Integer Sync (Auto)**: Sweeps repetition rates and acquisition times to guarantee an exact integer number of pulses per cycle.
+     * **Strict Pulse Target (Manual)**: Locks directly to the requested pulse count.
+     * **Oversampling (Time-Driven)**: Optimises for steady-state oversampling (`Sync Target (RSD %)`).
+     * **Combined Integer Sync (Auto)**: Sweeps above the oversampling minimum to achieve both steady-state stability and integer pulse synchronisation.
+   * **Sync Target (Pulses)** or **Sync Target (RSD %)**: Set your pulse count per cycle (e.g., `5` pulses) or target steady-state RSD (e.g., `5.0%`).
+   * **Target SNR (Sigma)** & **Minimum SNR (Sigma)**: Set your required detection quality (e.g., `Target SNR = 10`).
+   * **Scale Signal with Rep-Rate**: Check for bulk mounts where higher repetition rates proportionally increase signal intensity; leave unchecked for thin sections that exhaust cleanly in a few shots.
 
 ### Step 4.2: Interpret Results
 
-The software calculates the optimal settings automatically.
+The optimiser recalculates automatically whenever any parameter changes:
 
-1. **Review Settings**: Look at the **Optimised Settings** panel for your ideal **Spot Size**, **Rep-Rate**, and **Speed**.
-2. **Review Synchronization Advisor**:
-   - Check the advisor diagnostics in the results summary. Ensure it displays green icons indicating **Synchronised**, **Oversampling Mode**, or **Stable Steady State** (all channels meeting target RSD). If a yellow/red status warning appears, adjust dwell or rep-rates accordingly.
-3. **Check Constraints**: Look at the **Results Table**.
-    - **Orange Rows**: These isotopes cannot meet the Target SNR even at the maximum allowable settings.
-    - **Blue Rows**: These are limited by your hardware speed (Min Dwell).
-4. **Refine**:
-    - *Spot Size too big?* Reduce the **Target SNR** or **Sync Target (Pulses)**.
-    - *Scan too slow?* Uncheck **Avoid Gaps** (if acceptable) or increase **Spot Size** manually.
+1. **Optimised Settings Panel**:
+   * Review the recommended **Spot Size**, **Rep-Rate**, **Acq Time**, **Speed**, **Overlap**, and **Dosage**.
+   * Click the blue **`(int)` / `(1 dp)` / `(2 dp)`** links next to **Speed**, **Overlap**, or **Dosage** to match the decimal precision accepted by your laser control software.
+2. **Synchronisation Advisor**:
+   * Confirm the advisor badges show green indicators (**🟢 Synchronised**, **🟢 Oversampling Mode**, or **🟢 Stable Steady State**).
+3. **Optimised Dwell Time Distribution Table**:
+   * Review the individual **Optimised Dwell Times** and **Resultant SNR** for each isotope.
+   * **Orange Rows**: Channels that cannot reach **Minimum SNR** (forced to minimum dwell on sequential systems).
+   * **Blue Rows**: High-intensity channels constrained by the hardware minimum dwell time.
+   * Change any channel's **Mode** (`Auto`, `Even`, `Exclude`, `Set to Min`, `Custom`) to tailor how the cycle budget is allocated.
+4. **Manual Spot Size Override**:
+   * To lock a specific beam diameter (e.g., `20 µm`), set the **Spot Size (µm)** spin box in the **Optimised Settings** panel to `20`. Set it back to `0` (`Auto`) to resume automatic spot size optimisation.
 
-### Step 4.3: Manual Overrides
+### Step 4.3: Verify in the Pulse Train Simulator
 
-- **Force Spot Size**: If you strictly need a specific beam diameter (e.g., 25µm), enter it in the **Spot Size** spinbox (toggle off "Auto"). Valid Rep-Rate and Speed will be re-calculated for that fixed spot.
+1. Switch to the **Pulse Train Simulator** tab.
+2. Inspect the simulated detector traces and the **Pulse Simulation Stability** table at the bottom to verify the predicted steady-state **RSD (%)** and confirm there are no beat-frequency artefacts before running your final experiment.

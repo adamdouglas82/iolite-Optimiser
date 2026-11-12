@@ -4,6 +4,18 @@ This file tracks technical notes, design decisions, and environment quirks from 
 
 ---
 
+## Session: v1.0.7 SPR Cutoff, Background Auto-Detection, Logging Toggle & Settings Hardening (Nov 2026)
+
+* **Conversation ID**: `54e22cab-7b47-48ea-bd64-2dcb70d6af44`
+* **Key Tasks & Technical Quirks**:
+  * **Updater SSL & Speed Fix (`89beb87`)**: Bypassed macOS SSL certificate verification (`ssl._create_unverified_context()`) and replaced the GitHub API request in `SettingsDialog.check_for_updates` with a single-hop IPv4 TLS `HEAD` request to `/releases/latest` reading the `302 Location` header, polling at `50 ms` on the main thread.
+  * **Interactive SPR Peak Cutoff Line (`1daf04d`, `7b069af`)**: Added a theme-contrasting dashed horizontal line (`self.spr_cutoff_line`) and floating label (`"Peak Cutoff: <val>"`) on the SPR plot, excluded it from `rescale_to_visible`, and enabled hover (`Qt.SizeVerCursor`) + left-click dragging (auto-unchecking `chk_spr_auto_prom`). Updated `_auto_detect_spr_prominence` and `_update_all_channel_stats` to use `round(max(1.0, float(y_max) * 0.3), 0)` without the `10 * bg_std` override that skewed results when pulses started near `t=0`.
+  * **SPR Background Auto-Detection (`7e62510`)**: Updated `_auto_detect_spr_bg` to estimate baseline noise via the lower quartile (`p25`) and require at least `5.0 s` of continuous gas blank at either the start or end of the file, ephemerally unchecking `Subtract Background` if neither region qualifies.
+  * **Persistent Enable Logging Toggle (`885309d`)**: Wrapped `IoLog` in `_ConditionalIoLog` (default `enabled = False`, keeping `saveLogToFile` active unconditionally so `check_timestamp_error_in_log` still captures C++ importer timestamp errors), added an `Enable Logging` checkbox in `SettingsDialog` persisted in `settings.json`, and removed ~35 obsolete development debug logs.
+  * **Settings Teardown & Null Safeguard (`7c00be6`)**: Fixed a shutdown race where unparented `save_timer` fired after C++ Qt destroyed layout-parented widgets, causing `self._get(...)` to return `None` and overwrite `iolite Optimiser Settings.json` with `null` values. Parented all debounce `QTimer` instances to `self`, guarded `save_persistent_settings` with `ui_ready` and dead-widget checks while filtering out `None` values, and stripped `None` values in `load_persistent_settings` so existing corrupted files self-heal on startup.
+
+---
+
 ## Session: Pulse Train Simulator Legend and Scaling Alignment (July 2026)
 
 * **Conversation ID**: `9691bbdc-1788-4c84-8ebf-e5a1a1ae9d99`

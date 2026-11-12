@@ -1,8 +1,8 @@
-# Advanced Optimiser Tab Manual
+# Method Optimiser Tab Manual
 
 ## Overview
 
-The **Optimiser Tab** determines the best combination of **Spot Size**, **Laser Repetition Rate**, and **Scan Speed** (or Dwell Times) to achieve your analytical goals. It works by "working backwards" from your desired signal quality (SNR) and hardware limits to find the most efficient sampling capability.
+The **Method Optimiser** tab determines the optimal combination of **Spot Size**, **Laser Repetition Rate**, **Stage Scan Speed**, and **Dwell / Acquisition Times** to achieve your analytical goals. It works backwards from your target signal quality (SNR) and hardware constraints to find the most efficient sampling parameters.
 
 ---
 
@@ -12,277 +12,155 @@ The **Optimiser Tab** determines the best combination of **Spot Size**, **Laser 
 
 #### **Top Controls**
 
-- **Import Optimisation File**: Loads or refreshes the optimization input data from a file in your iolite session.
-- **Settings**: Opens the detailed **Hardware Configuration** dialog.
+* **Import File**: Loads an ablation test or PreScan file into the Optimiser (and automatically unloads the temporary raw channels from your active iolite session once read).
+* **Settings**: Opens the **Hardware Configuration** dialog.
 
 #### **Hardware Configuration Dialog**
 
-Accessible via the "Settings" button. This establishes the physical limits of your system. A version label (e.g. `Version: dev`) is displayed at the bottom-left of this dialog, alongside **GitHub Repo**, **Report Issue**, and **Check for Updates** buttons to interact with the repository on GitHub.
+Accessible via the **Settings** button, this dialog establishes the physical limits of your ICP-MS and laser ablation system.
 
-- **ICP-MS Hardware**:
-  - **Manufacturer/Model**: Presets minimum dwell times and switching speeds.
-  - **Custom Models**: Choose "Custom Model" (ICP) or "Custom Laser" (Platform) to manually define limits:
-    - **ICP Custom Fields**:
-      - **Type**: Quadrupole, Sector-Field, Multi-Collector (MC), or TOF.
-      - **Allowed Dwell Times**: (MC only) Comma-separated list of valid integration times.
-      - **Min Dwell / Dwell Resolution**: (Quad/TOF) The hardware speed and rounding limits.
-      - **Washout Margin (%)**: (TOF only) A percentage "Signal Capture Buffer". Extends the target washout time proportionally to ensure the entire Single Pulse Response is captured natively within the stage's speed budget.
-    - **Laser Custom Fields**:
-      - **Mode**: Choose "Maximum Rep-Rate" (continuous) or "Discrete" (specific allowed frequencies).
-      - **Max Speed**: Physical limit of the sample stage.
-      - **Rep-Rate Resolution**: Custom rounding resolution for the laser repetition rate.
-- **Laser Hardware**:
-  - **Platform/Source**: Presets maximum repetition rates and frequency precision.
-  - **Cell Type**: Defines the maximum stage speed (washout behavior is handled separately).
+* **ICP-MS Hardware**:
+  * **Manufacturer / Model**: Presets minimum dwell times, resolution steps, and instrument architecture (`Quadrupole`, `Sector-Field`, `Multi-Collector`, or `TOF`).
+  * **Dwell Times in**: Choose `Auto` (uses `ms` for Quadrupole/Sector-Field/TOF and `s` for Multi-Collector), `ms`, or `s`.
+  * **Custom Models**: Select `Custom Model` to manually define:
+    * **Type**: `Quadrupole`, `Sector-Field`, `Multi-Collector`, or `TOF`.
+    * **Minimum Dwell Time (ms)** & **Dwell Resolution (ms)**: Hardware integration speed and rounding step limits.
+    * **Allowed Dwell Times (ms)**: *(Multi-Collector only)* Comma-separated list of valid integration times.
+  * **Washout Margin (%)**: *(TOF only)* A percentage signal capture buffer added to the baseline washout time so the full Single Pulse Response peak is captured within the stage speed budget.
+* **Laser Hardware**:
+  * **Platform / Laser Source**: Presets maximum repetition rates and frequency step resolution.
+  * **Cell Type**: Defines the maximum stage translation speed.
+  * **Custom Laser**: Select `Custom` (Platform) or `Custom Laser` (Source) to manually configure:
+    * **Mode**: `Maximum Rep-Rate` (continuous up to a maximum frequency) or `Discrete` (comma-separated list of allowed frequencies).
+    * **Max Rep-Rate (Hz)** & **Rep-Rate Resolution (Hz)**: Upper frequency limit and step size.
+    * **Max Speed (µm s⁻¹)**: Physical translation speed limit of the sample stage (`Custom Stage`).
+* **Plot Options**:
+  * **Limit Visible Plots**: Restricts the initial number of plotted channels (default `5`) to keep the plot legible when loading files with many masses.
+* **Utilities & Diagnostics**:
+  * **Enable Logging**: *(Default: Off, persisted across restarts)* When checked, diagnostic messages, warnings, and error tracebacks are written to the iolite **Messages** log (including startup events).
+  * **GitHub Repo** & **Report Issue**: Opens the project repository or issue tracker in your default web browser.
+  * **Check for Updates**: Queries GitHub for the latest release version and offers a direct link to the release notes if a newer version is available.
 
 #### **Input Parameters**
 
-Basic setup for your experiment.
+Basic setup from your test or PreScan recording:
 
-- **Initial Spot Size**: The starting point for optimization (often adjusted automatically).
-- **Washout**: The time (ms) required for the signal to decay (usually determined via the **SPR Tab**). Supports extremely fast sub-1ms definitions (e.g., `0.25 ms`).
-- **Initial Rep-Rate**: A baseline frequency guess (Hz).
-- **Number of Analytes**: Specifies how many isotopes/analytes are measured (saved persistently).
-- **Suggest PreScan Params**: Triggers a calculation dialog presenting optimal settings for a PreScan scan:
-  - **Dwell Time per Analyte**: `washout_ms / num_analytes`, bounded by minimum dwell and rounded to the instrument's dwell resolution.
-  - **Target Cycle Time**: `dwell_time * num_analytes`.
-  - **Suggested Rep-Rate**: Dynamically swept starting from the oversampling limit ($2.0 / \text{washout}$ s) to select the lowest rate that achieves a statistical Lockwood RSD $\le 5\%$.
-  - **Suggested Stage Speed**: `spot_size / cycle_time`.
-  - **Suggested Dosage**: `rep_rate * cycle_time` (pulses/pixel).
-  - **Suggested Overlap**: Spatial overlap distance and percentage between adjacent pulses.
-- **Mode**:
-  - **Spot**: Analysis of a single location.
-    - **Total Pulses**: Total laser pulses per spot.
-  - **Line**: Continuous scanning along a path.
-    - **Line Length**: Total distance (µm).
-  - **Imaging**: 2D mapping (raster scan).
-    - **Image Width / Height**: Dimensions of the area (µm).
+* **Initial Spot Size (µm)**: The beam diameter used during the test scan.
+* **Washout (ms)**: The time required for a single pulse signal to decay (typically applied directly from the **Determine SPR** tab). Supports fast sub-millisecond cells down to `0.01 ms`.
+* **Initial Rep-Rate (Hz)**: The laser repetition rate used during the test scan.
+* **Mode**:
+  * **Spot**: Static ablation at a single location (configures **Number of Shots**).
+  * **Line**: Continuous translation along a transect (configures **Line Length (µm)**).
+  * **Imaging**: 2D raster mapping (configures **Image Width (µm)** and **Image Height (µm)**).
+* **Number of Analytes**: Total number of isotopes/masses in your proposed analytical method (used by the PreScan calculator and saved persistently).
+* **Suggest PreScan Params**: Opens a calculator dialog recommending initial PreScan conditions before acquiring a test line:
+  * **Dwell Time per Analyte**: `Washout / Number of Analytes`, snapped to your instrument's minimum dwell time and resolution.
+  * **Target Cycle Time**: `Dwell Time * Number of Analytes`.
+  * **Suggested Rep-Rate**: Sweeps upward from the oversampling threshold (`2.0 / Washout`) to find the lowest valid laser frequency achieving a steady-state Lockwood RSD `<= 5%`.
+  * **Suggested Stage Speed**, **Dosage**, and **Overlap**: Derived from your spot size and cycle time, capped at the cell's maximum stage speed.
 
 #### **Optimisation Parameters**
 
-The "Goals" you want the algorithm to achieve.
+The analytical targets for the optimisation algorithm:
 
-- **Sync Strategy**:
-  - **Adaptive Integer Sync (Auto)**: Automatically sweeps rep-rates and acquisition times to guarantee a perfect integer pulse count sync (0% rounding error) close to your target.
-  - **Strict Pulse Target (Manual)**: Snaps directly to the exact target pulses (may lead to non-integer pulses due to hardware rounding).
-  - **Oversampling (Time-Driven)**: Purely time-driven target based on the Lockwood oversampling RSD target, ignoring snapping.
-  - **Combined Integer Sync (Auto)**: Combines oversampling with snapping by sweeping frequencies above the oversampling minimum to find a perfect integer count.
-- **Sync Target (Pulses)**: The target number of laser shots that must occur during a single mass spectrometer integration (`Acq Time`) to ensure signal stability. Used in integer sync modes.
-- **Sync Target (RSD %)**: The target Relative Standard Deviation (RSD) limit for signal stability during steady-state oversampling modes (usually set to `5.0%`).
-- **Prefer Exact Pulses per Acq**: (For Auto sync strategies only). When checked, forces the auto-sync search algorithm to prioritize finding a laser rep-rate that delivers *exactly* the requested integer number of pulses per cycle, rather than settling for the closest available integer sync.
-- **Target SNR (Sigma)**: The desired Signal-to-Noise ratio for the limiting isotope.
-  - **Robust Methodology**: The optimiser calculates a **Detection Ratio** based on the scientific Critical Level ($L_c$), then scales it back to a familiar "Sigma SNR" for the UI. This provides a more rigorous assessment than simple background standard deviation:
-    1. **Noise Floor**: Determined by the maximum of the theoretical **Poisson Variance** (counting statistics) and the **Observed Variance** (experimental jitter) of the background.
-    2. **Critical Level ($L_c$)**: Calculated using the **Square Root Transform** rule (Stapleton's Rule) for variance stabilization. This defines the 95% confidence threshold for detection.
-    3. **Sigma-Equivalent Scaling**: The final Detection Ratio is multiplied by $z\sqrt{2}$ ($\approx 2.326$) so that a value of **10.0** in the UI corresponds to the standard 10-sigma **Limit of Quantification (LoQ)**.
-  - This approach is conservative and robust, ensuring that targets represent accurate confidence intervals rather than just multiples of potentially "lucky" low-noise baselines.
-- **Min Duty Cycle**: Sets a floor for efficiency (Time Measuring / Total Time).
-  - If the calculated duty cycle is too low (mostly settling time), the optimiser will increase dwell times to improve the ratio.
-- **Minimum SNR**: Lower limit for acceptance; channels below this may trigger warnings.
-- **Scale Signal with Rep-Rate**:
-  - **Checked (Linear Scaling)**: Assumes signal intensity (CPS) increases linearly with Frequency (Hz).
-    - **Why?** Higher Rep-Rate delivers more pulses per second, ablating more material per second, which generates a higher ion signal.
-    - **Use Case**: **Geological Samples** (e.g., blocks/mounts) where there is "infinite" depth. As the laser fires active shots, it drills deeper into fresh material, maintaining the signal increase.
-  - **Unchecked (Fixed Sensitivity)**: Assumes signal intensity is determined by Spot Size alone, regardless of frequency.
-    - **Use Case**: **Thin Sections / Bio-Imaging**. If the laser already fully ablates the entire thickness of the sample (e.g., a 30µm tissue section) with a single shot, firing faster *does not* generate more signal—it simply consumes the sample faster. Checking this box here would dangerously overestimate your SNR.
-- **Avoid Gaps**:
-  - **Goal**: Prevents "striping" in images by ensuring the stage doesn't move faster than the laser can fire.
-  - **How**: Constraints the calculation so `Speed <= Spot Size * Rep Rate`.
-  - **Pros**: Guarantees full surface coverage.
-  - **Cons**: May force a slower stage speed or higher Rep-Rate (potentially increasing washout issues).
+* **Sync Strategy**:
+  * **Adaptive Integer Sync (Auto)**: Automatically sweeps repetition rates and acquisition times to guarantee a perfect integer pulse count per cycle (`0%` rounding error) close to your target.
+  * **Strict Pulse Target (Manual)**: Directly calculates acquisition times for your exact pulse target (hardware rounding may produce non-integer pulse counts).
+  * **Oversampling (Time-Driven)**: Focuses purely on meeting the washout time and target steady-state RSD constraints without integer pulse snapping.
+  * **Combined Integer Sync (Auto)**: Sweeps repetition rates above the oversampling minimum to guarantee both steady-state stability and an integer pulse count per cycle.
+* **Sync Target (Pulses)**: *(Synchronised modes)* Target number of laser pulses per mass spectrometer acquisition cycle (`Acq Time`).
+* **Sync Target (RSD %)**: *(Oversampling modes)* Target Relative Standard Deviation limit (default `5.0%`) for steady-state signal stability.
+* **Prefer Exact Pulses per Acq**: *(Adaptive Integer Sync mode)* When checked, prioritises finding a repetition rate that delivers the exact requested pulse count rather than the closest achievable integer sync.
+* **Avoid Gaps**: *(Strict Pulse Target mode)* Ensures `Speed <= Spot Size * Rep-Rate` so adjacent laser shots never leave unablated gaps along the scan line.
+* **Min Duty Cycle (%)**: Sets a minimum floor for measurement efficiency (`Total Dwell Time / Total Cycle Time`). If switching overhead dominates the cycle, dwell times are increased to meet this floor.
+* **Target SNR (Sigma)**: Desired Signal-to-Noise Ratio for the limiting isotope:
+  * **Noise Floor**: Uses the greater of theoretical Poisson counting variance and observed background variance.
+  * **Critical Level (Lc)**: Computed using Stapleton's Square Root Transform rule (`95%` confidence threshold for detection, robust even at zero background counts).
+  * **Sigma-Equivalent Scaling**: Scales the detection ratio by `2.326` (`z * sqrt(2)`) so a target of `10.0` corresponds to the standard `10-sigma` Limit of Quantification (LoQ).
+* **Minimum SNR (Sigma)**: Lower acceptance threshold; channels that cannot reach this SNR are flagged (and set to minimum dwell on sequential instruments to preserve cycle budget).
+* **Scale Signal with Rep-Rate**:
+  * **Checked (Linear Scaling)**: Assumes signal intensity (CPS) scales linearly with repetition rate (appropriate for bulk geological mounts where firing faster ablates deeper into fresh material).
+  * **Unchecked (Fixed Sensitivity)**: Assumes signal intensity depends only on spot size (appropriate for thin sections or bio-imaging where a single shot already ablates the full sample thickness).
 
 #### **Optimised Settings (Results Summary)**
 
-The calculated "Ideal" instrument settings.
+Displays the recommended instrument parameters:
 
-- **Spot Size**: The recommended beam diameter.
-- **Rep-Rate**: The optimal laser frequency (Hz).
-- **Speed**: The optimal stage translation speed (µm/s).
-- **Acq Time / Budget**: The total integration cycle time calculated to match the laser synchronization.
-- **Est. Time**: Total predicted duration of the analysis (HH:MM:SS).
-- **Est. Data Points**: (Displayed in Spot/Line modes only) The predicted total number of mass spectrometer measurements that will be collected over the run.
-- **Pixels Per Sec**: (Displayed in Imaging mode only) The scanning rate of pixels per second based on the optimised scan speed and spot size.
+* **Spot Size (µm)**: Recommended beam diameter (`Auto` by default; enter a non-zero value to lock a manual spot size override).
+* **Rep-Rate (Hz)**: Optimised laser firing frequency.
+* **Acq Time (ms / s)**: Total mass spectrometer integration cycle time (dwell budget plus hardware overhead).
+* **Speed (µm s⁻¹)**: *(Line / Imaging modes)* Optimised stage scan speed, derived from `Speed = Rep-Rate * (Spot Size - Overlap)`. Click the blue **`(int)` / `(1 dp)` / `(2 dp)`** link in the label to cycle speed rounding precision; the displayed Overlap and Dosage automatically adjust to reflect the rounded stage speed.
+* **Overlap (µm & %)**: *(Line / Imaging modes)* Spatial overlap between consecutive laser pulses (`(1 dp)` / `(2 dp)` toggle).
+* **Dosage (Pulses)**: *(Line / Imaging modes)* Effective number of laser pulses per spot diameter (`(int)` / `(1 dp)` / `(2 dp)` toggle).
+* **Est. Time**: Predicted total run duration (`HH:MM:SS`).
+* **Est. Data Points** *(Spot / Line modes)* or **Pixels Per Sec** *(Imaging mode)*: Predicted total sweeps or spatial pixel rate.
 
 ### 2. Right Panel: Visualisation & Details
 
-#### **Signal Plot (Top)**
-
-- Displays real-time signal traces for the selected channels.
-- **Regions**:
-  - **Background (Blue)**: Time range for baseline calculation.
-  - **Signal (Red)**: Time range for signal intensity calculation.
-  - **Auto Select Regions**: Automatically finds the rising/falling edges of the signal.
-
 #### **Plot Controls**
 
-To maximize vertical display efficiency, controls are split into two stacked rows:
+Arranged in two compact rows above the signal plot:
 
-- **Row 1**: Theme override dropdown (Auto/Dark/Light), Normalise checkbox, Pan/Zoom Y checkbox, Auto-Rescale Y checkbox, Show Background checkbox.
-- **Row 2**: Auto Select Regions checkbox, Background time spinboxes, Signal time spinboxes.
+* **Row 1**:
+  * **Theme**: Toggle `Auto`, `Dark`, or `Light` plot styling.
+  * **Normalise**: Scales all channel traces to a `0` to `1` range for visual comparison.
+  * **Pan / Zoom Y**: Enables vertical zooming and panning.
+  * **Auto-Rescale Y**: Defaults to Checked (ephemeral; resets to On when new data is loaded). Automatically scales the Y-axis to fit visible traces.
+* **Row 2**:
+  * **Auto Select Regions**: Automatically detects the **Background (Blue)** and **Signal (Red)** time windows.
+  * **Background (s)** & **Signal (s)**: Spin boxes for fine-tuning the start and end times of both regions.
 
-- **Theme**: Toggle Dark/Light mode.
-- **Normalise**: Scales all traces to 0-1 range for easy comparison.
-- **Auto-Rescale Y**:
-  - **Checked (Default/Ephemeral)**: The plot automatically snaps to the full data range. This is reset to ON whenever new data is loaded or the application starts.
-  - **Unchecked**: The plot keeps your current zoom level. Switch this off to "lock" your view while adjusting parameters.
-- **Pan/Zoom Y**: Enables vertical zooming interaction.
-- **Double-Click**: Resets the plot to show the full data range (both X and Y).
-- **Interactive Region Adjustment**:
-  - **Shift + Click & Drag**: Hold the **Shift** key and click near a region edge (Blue or Red line) to drag it to a new location.
-  - **Auto-Swap Validation**: If you drag a region "start" line past its "end" line, the software automatically sorts the values on release. This ensures the start is always less than the end, preventing calculation errors.
-  - **Cursor Feedback**: When holding Shift, the cursor will change to a horizontal resize cursor ↔ when you are within the 1% selection "hitbox" of a region edge.
+#### **Interactive Signal Plot (Top)**
 
-#### **Synchronization Advisor**
+* **Region Adjustment**: Hold **Shift** and **Left-Click & Drag** any vertical region boundary (blue or red dashed edge) to move it directly on the plot. If start and end lines are crossed, they are automatically swapped on release.
+* **Legend Interactions**:
+  * **Single-Click** a channel in the legend to show or hide its trace.
+  * **Double-Click** a channel in the legend to isolate it (hiding all other channels); double-click again to restore all channels.
+* **Zoom & Pan**: Scroll the **Mouse Wheel** to zoom, **Left-Click & Drag** to pan, and **Double-Click** the plot canvas to reset the view to full extents.
 
-Displays real-time diagnostic indicators based on the active Sync Strategy:
+#### **Synchronisation Advisor**
 
-- **🟢 Synchronised**: Green indicator representing perfect snapping to integer pulse counts.
-- **🟢 Oversampling Mode**: Green indicator indicating no integer snapping is required (pure time-driven).
-- **🟢 Stable Steady State**: Green indicator indicating all channels are within the target RSD limits.
-- **🔴 Unstable Steady State**: Red indicator informing the user that the rep rate is too low for oversampling ($< 2.0 / \text{washout}$ s).
-- **🟡 Unstable Steady State**: Yellow indicator showing that the statistical Lockwood RSD is above the target limit, and listing the required dwell time adjustment to achieve stability.
-- **🟡 Unsynchronised**: Yellow indicator warning of potential beating artifacts if a non-integer pulse count is detected during manual overrides.
+Displays real-time diagnostic badges in the status summary box:
+
+* **🟢 Synchronised**: Perfect integer number of laser pulses per acquisition cycle.
+* **🟢 Oversampling Mode**: Time-driven oversampling active.
+* **🟢 Stable Steady State**: All active channels meet the target steady-state Lockwood RSD limit.
+* **🔴 Unstable Steady State**: Laser repetition rate is below the minimum oversampling threshold (`< 2.0 / Washout`).
+* **🟡 Unstable Steady State**: Steady-state Lockwood RSD exceeds the target limit (displays the required acquisition time to reach stability).
+* **🟡 Unsynchronised**: Non-integer pulse count per cycle; warns of potential beat-frequency aliasing.
 
 #### **Optimised Dwell Time Distribution (Table)**
 
-Detailed breakdown per channel.
+Per-channel breakdown at the bottom of the right panel:
 
-- **Mode**:
-  - **Auto**: Software calculates the optimal dwell.
-  - **Even**: Software splits the entire available dwell budget perfectly among all `Even` channels. Calculates exact hardware intervals so no time is lost to drift or rounding errors.
-  - **Exclude**: Channel is ignored.
-  - **Set to Min**: Forces the channel to the hardware minimum dwell.
-  - **Custom**: Allows manual entry of a specific dwell time.
-- **Optimised Dwell Times**: The calculated integration time for each isotope.
-- **SNR**: Comparison of Initial vs. Resultant Signal-to-Noise Ratios.
-
----
-
-## CSV File Importing & Preferences
-
-When loading external standard or tuning data via a CSV file, iolite requires the timestamp column format to exactly match the format configuration selected in preferences. If a mismatch occurs, the import will fail to parse and show a dialog:
-
-- **Error popup**: Displays detailed failure information extracted from the iolite application log.
-- **Smart Suggestions**: Analyses the failed timestamp structure and suggests the exact matching preferences layout to configure in your iolite settings (e.g. suggesting `yyyy MM dd hh mm ss` or `dd MM yyyy hh mm ss`).
+* **Mode**:
+  * **Auto**: Optimiser distributes dwell time to meet the **Target SNR** for all `Auto` channels.
+  * **Even**: Splits the remaining acquisition budget equally across all `Even` channels.
+  * **Exclude**: Removes the channel from the method and plot.
+  * **Set to Min**: Locks the channel to the instrument's minimum dwell time.
+  * **Custom**: Allows typing a custom dwell time directly in the **Optimised Dwell Times** column.
+* **Optimised Dwell Times**: Calculated integration time per channel.
+* **Initial SNR** & **Resultant SNR**: Comparison of baseline test SNR against predicted SNR under the optimised settings (channels with zero background counts display `(Lc)` to indicate Square Root Transform critical-level estimation).
 
 ---
 
-## Workflow Guide
+## CSV File Importing & Timestamp Preferences
 
-### Step 1: Hardware Setup
-
-1. Click **Settings**.
-2. Select your **ICP-MS** and **Laser** models.
-3. If your specific model isn't listed, choose "Custom" and enter the **Min Dwell Time** (ICP) and **Max Rep Rate** (Laser) manually.
-
-### Step 2: Load Data
-
-1. Ensure your iolite session has representative data (e.g., a "Tuning" line).
-2. Click **Import Optimisation File** and select your data file.
-3. **Missing Dwell Times?**
-    - If your data lacks embedded dwell time metadata (common with some CSV imports), a dialog will appear.
-    - **Set to Global**: Apply a single dwell time (e.g., 10ms) to all channels.
-    - **Individual**: Manually enter the dwell time for specific channels if they differ.
-4. Verify the plot shows the signal traces.
-5. **Check Regions**: Ensure the **Background (Blue)** and **Signal (Red)** regions are correctly identifying the baseline and signal plateau.
-    - **Manual Selection**: Hold **Shift** and drag the lines in the plot for the fastest adjustment.
-    - **Precise Selection**: Use the spinboxes in the left panel.
-    - **Auto Select**: Click "Auto Select Regions" for a computer-estimated starting point.
-    - Note: Values are automatically swapped if the selection becomes inverted.
-
-### Step 3: Define Goals
-
-1. Set the **Mode** (usually "Imaging" or "Line").
-2. Enter your **Washout** time (can be applied from the SPR Tab).
-3. Set your target quality metrics (e.g., **Sync Target (Pulses)** = 10, **Target SNR** = 10).
-4. Select a **Sync Strategy** to dictate how calculations are prioritized.
-
-### Step 4: Run Optimization
-
-The optimization runs automatically whenever you change a parameter.
-
-1. Watch the **Optimised Settings** panel.
-2. The software will display the recommended **Spot Size**, **Rep-Rate**, and **Speed**.
-3. Check the **Results Table** at the bottom. Are any important isotopes failing to reach the target SNR?
-    - *Orange Highlight*: Cannot reach Target SNR (set to Min).
-    - *Blue Highlight*: Hardware limited (cannot go faster).
-4. If the Spot Size is too large/small, adjust the **Target SNR** or **Sync Target (Pulses)** to constrain it.
-
-### Step 5: Advanced Logic & Overrides
-
-1. **Min SNR Constraints**:
-    - **Quadrupoles**: If a channel cannot meet the Minimum SNR, its dwell time is forced to the *Minimum Dwell* allowed by hardware to save time for other channels.
-    - **MC / TOF**: Since all channels are measured simultaneously, the dwell time cannot be reduced individually. Instead, the channel is flagged with an Orange warning in the table.
-2. **Min Duty Cycle**:
-    - Forces the total integration time to be long enough relative to the magnet settling time (overhead). Useful for ensuring you aren't wasting 50%+ of your analysis time just switching masses.
-3. **Manual Overrides**:
-    - If you need to force a specific spot size:
-    - Change the **Spot Size** spinbox in the "Optimised Settings" panel (it normally says "Auto").
-    - This locks the spot size and re-optimises only the Rep-Rate and Speed.
-    - Set it back to 0 (or "Auto") to resume full optimization.
-4. If you need to force a specific rep-rate:
-    - This is usually derived from the spot size and washout. To influence it, try changing the **Avoid Gaps** setting or **Washout** value.
-
----
-
-## Tips & Tricks
-
-- **Linking SPR**: Use the SPR Tab first to determine the exact washout time for your cell/tubing, then "Apply" it to the Optimiser.
-- **Duty Cycle**: For Sequential ICP-MS (Quadrupoles), a higher Duty Cycle means more efficient use of time. For TOF/MC, this is always 100%.
-- **Avoid Gaps**: Essential for imaging. It ensures that `Speed <= Spot Size * Rep Rate`, preventing "striping" artifacts in your map.
-
----
-
-## Status Messages
-
-The Optimiser provides feedback through the status bar and log to explain why certain settings were chosen or constrained. Understanding these messages can help you troubleshoot why a specific result was calculated.
-
-### General Optimization Messages
-
-- **"Optimum Spot Size [X] µm - Based on Minimum SNR of [Isotope]"**
-  - Indicates that the Spot Size was calculated specifically to satisfy the SNR target for the weakest isotope listed.
-- **"Optimum Spot Size [X] µm - Overridden to [Y] µm"**
-  - Appears when you have manually set the Spot Size spinbox to a specific value (Y), overriding the calculated optimum (X).
-
-### Hardware Constraints
-
-- **"Constraint: Acq Time increased for Rep Rate Limit"**
-  - The Acquisition Time had to be extended because the required Dwell Times + Washout would require a Laser Rep-Rate higher than the laser can physically fire.
-- **"Constraint: Acq Time increased for Stage Speed Limit"**
-  - The Acquisition Time had to be extended because the stage would need to move faster than the cell's maximum speed to cover the spot size in the calculated time.
-- **"Constraint: Acq Time increased for Duty Cycle ([X]%)"**
-  - The total integration time was increased to ensure that the measurement time vs. overhead (settling) time met your "Min Duty Cycle" target.
-- **"Constraint: Acq Time increased for Dwell Budget ([X] ms)"**
-  - The total time was increased because the minimum required dwell times for all elected isotopes exceeded the initial budget derived from the Washout Time. Note: For Simultaneous systems (TOF / Multi-Collector), this budget represents the *maximum single* active dwell assignment required. For Sequential systems (Quadrupole), this budget is the *cumulative sum* of all dwell assignments.
-
-### Channel-Specific Warnings
-
-These messages list specific isotopes that are affecting the optimization logic.
-
-- **"The following channels do not meet the minimum SNR target..."**
-  - **Orange Warning**: These channels have a calculated SNR below your "Minimum SNR" threshold.
-  - For **MC/TOF** systems, this is just a warning.
-  - For **Quadrupole** systems, these channels have been forced to the minimum dwell time to save budget.
-- **"The following channels cannot be set lower than the hardware minimum ([X] ms)..."**
-  - **Blue Warning**: The algorithm wants to reduce the dwell time for these channels (usually high-signal ones) to optimise speed, but is blocked by the hard limit of the instrument (e.g., 1ms or 10ms minimum dwell).
-- **"The following channels had zero counts in the background. The detection limit ($L_c$) has been calculated using the Square Root Transform rule..."**
-  - **Gray Warning**: Indicates that the background signal was perfectly zero (common in simulated data or extremely short baselines). To prevent division-by-zero errors in the SNR calculation, a theoretical detection limit ($L_c$) was calculated using the Square Root Transform rule for variance stabilization. The results matrix displays these estimated targets with a grey `(Lc)` subscript.
+When importing CSV data files, iolite requires the timestamp column format to match the format configured in iolite's preferences. If an import fails due to a timestamp mismatch, the plugin automatically inspects the iolite log and displays a dialog with the failed timestamp string and suggested format layouts (e.g., `yyyy MM dd hh mm ss` or `dd MM yyyy hh mm ss`).
 
 ---
 
 ## Scientific References
 
-The algorithms and logic used in the iolite Optimiser are based on established statistical principles and laser ablation literature:
-
-- **SNR and Detection Limits**:
-  - Tanner, S. D. (2010). "Shorter signals for improved signal to noise ratio, the influence of Poisson distribution" *Journal of Analytical Atomic Spectrometry (JAAS)*, 25, 405–407.
-  - Donard, A., et al. "Determination of relative rare earth element distributions in very small quantities of uranium ore concentrates using femtosecond UV laser ablation– SF-ICP-MS coupling" J. Anal. At. Spectrom., (2015), 30, 2420–2428
-- **Optimization Workflow & Loop Logic**:
-  - Van Malderen, S. J., et al. "Considerations on data acquisition in laser ablation-inductively coupled plasma-mass spectrometry with low-dispersion interfaces" Spectrochimica Acta Part B, (2018), 140, 29–34
-  - Van Elteren, J. T., et al. "Insights into the selection of 2D LA-ICP-MS (multi) elemental mapping conditions" J. Anal. At. Spectrom., (2019), 34, 1919
-  - Lockwood, E. T. (2024). "Multiplexed elemental bioimaging with quadrupole ICP-MS andhigh-frequency laser ablation systems" J. Anal. At. Spectrom., 39, 1125
-- **Single Pulse Response and Washout Analysis**:
-  - Ulianov, A., et al. "The ICPMS signal as a Poisson process: a review of basic concepts" J. Anal. At. Spectrom., (2015), 30, 1297–1321
-- **Statistical Framework**:
-  - Currie, L. A. "Limits for qualitative detection and quantitative determination: Application to Radiochemistry." Anal. Chem., (1968), 40, 586-593.
-  - Currie, L. A. "The Measurement of Environmental Levels of Rare Gas Nuclides and the Treatment of Very Low-Level Counting Data", IEEE Trans. Nucl. Sci., (1972), NS19, (1), 119-126.
+* **SNR and Detection Limits**:
+  * Tanner, S. D. (2010). "Shorter signals for improved signal to noise ratio, the influence of Poisson distribution", *J. Anal. At. Spectrom.*, 25, 405–407.
+  * Donard, A., et al. (2015). "Determination of relative rare earth element distributions in very small quantities of uranium ore concentrates using femtosecond UV laser ablation–SF-ICP-MS coupling", *J. Anal. At. Spectrom.*, 30, 2420–2428.
+* **Optimisation Workflow & Synchronisation Logic**:
+  * Van Malderen, S. J., et al. (2018). "Considerations on data acquisition in laser ablation-inductively coupled plasma-mass spectrometry with low-dispersion interfaces", *Spectrochimica Acta Part B*, 140, 29–34.
+  * Van Elteren, J. T., et al. (2019). "Insights into the selection of 2D LA-ICP-MS (multi) elemental mapping conditions", *J. Anal. At. Spectrom.*, 34, 1919.
+  * Lockwood, E. T., et al. (2024). "Multiplexed elemental bioimaging with quadrupole ICP-MS and high-frequency laser ablation systems", *J. Anal. At. Spectrom.*, 39, 1125.
+* **Single Pulse Response & Washout Analysis**:
+  * Ulianov, A., et al. (2015). "The ICPMS signal as a Poisson process: a review of basic concepts", *J. Anal. At. Spectrom.*, 30, 1297–1321.
+* **Statistical Framework**:
+  * Currie, L. A. (1968). "Limits for qualitative detection and quantitative determination: Application to Radiochemistry", *Anal. Chem.*, 40, 586–593.
+  * Currie, L. A. (1972). "The Measurement of Environmental Levels of Rare Gas Nuclides and the Treatment of Very Low-Level Counting Data", *IEEE Trans. Nucl. Sci.*, NS19, (1), 119–126.

@@ -2,69 +2,73 @@
 
 ## Overview
 
-The **Pulse Train Simulator** tab simulates the detector response signals resulting from a series of laser pulses. By modelling individual pulse profiles, it visualizes the composite signal at the detector—helping users understand how parameters like repetition rate, dwell/acquisition times, and washout decay interact. It is particularly useful for identifying signal aliasing, carryover, and transient peak resolution.
+The **Pulse Train Simulator** tab simulates the detector response resulting from a series of laser pulses. By modelling individual pulse profiles and sequential mass spectrometer sweeps, it visualises the composite signal at the detector — helping you evaluate how repetition rate, dwell/acquisition times, and washout decay interact to cause or prevent signal aliasing, beat patterns, and carryover.
 
 ---
 
 ## User Interface
 
-The tab is divided into two primary sections: **Simulation Settings & Overrides** (Left) and the **Interactive Simulator Plot** (Right).
+The tab is divided into two primary sections: **Simulation Settings & Overrides** (Left) and **Visualisation & Stability Statistics** (Right).
 
 ### 1. Left Panel: Settings & Adjustments
 
 #### **Simulation Settings**
 
-Establish the temporal boundaries and pulse shape characteristics of the simulation.
+Establish the temporal boundaries and pulse shape characteristics of the simulation:
 
-- **Background Time**: The simulated duration (seconds) preceding active laser ablation, representing the baseline gas blank.
-- **Signal Duration**: The active duration (seconds) of simulated laser firing/ablation.
-- **Pulse Shape**:
-  - **Real Composite Peak**: Reconstructs the pulse train utilizing the actual average pulse shape extracted from the **SPR tab** data. (Only available if SPR data has been loaded and analysed).
-  - **Model Washout Peak (Lognormal)**: Models the signal using a theoretical lognormal distribution curve. (Default shape if no composite peak is loaded).
-  - **Sawtooth Approximation**: A geometric sawtooth approximation representing linear rise and decay signals.
+* **BG Time**: The simulated baseline duration (default `5.0 s`) before and after active laser ablation, representing the gas blank.
+* **Signal Duration**: The active duration (default `30.0 s`, minimum `15.0 s`) of simulated laser firing.
+* **Pulse Shape**:
+  * **Real Composite Peak**: Reconstructs the pulse train using the actual normalised composite pulse shape extracted from the **Determine SPR** tab (automatically selected when SPR data is available).
+  * **Model Washout Peak (Lognormal)**: Models the signal using a theoretical lognormal washout curve (default when no SPR composite peak is loaded).
+  * **Sawtooth Approximation**: A geometric triangular/sawtooth approximation representing linear rise and decay profiles.
 
 #### **Overrides / Manual Adjustment**
 
-Manually adjust the simulation parameters. By default, these parameters are initialized to match the values calculated on the **Optimiser tab**.
+By default, simulation parameters are synchronised with the optimal values computed on the **Method Optimiser** tab. You can manually adjust them here to explore "what-if" scenarios:
 
-- **Reset to Optimum**: Instantly reverts all overrides and aligns the simulator inputs back to the optimal settings computed by the Optimiser tab.
-- **Rep Rate**: The laser repetition frequency (Hz).
-- **Acq Time**: The mass spectrometer acquisition integration cycle time (ms).
-- **Pulses / Acq**: The average number of laser shots per acquisition cycle.
-- **Washout**: The decay time (ms) for the pulse response.
-- **Interactive Recalculation**: Adjusting one of **Rep Rate**, **Acq Time**, or **Pulses / Acq** will dynamically update the other parameters to satisfy the relationship:
-  $$\text{Pulses} = \text{Rep Rate} \times \text{Acq Time}$$
+* **Reset to Optimum**: Reverts all manual overrides back to the current settings from the **Method Optimiser** tab.
+* **Rep Rate**: Laser repetition frequency (`Hz`).
+* **Acq Time**: Mass spectrometer acquisition cycle time (`ms`).
+* **Pulses / Acq**: Average number of laser shots per acquisition cycle (`Pulses = Rep Rate * Acq Time`).
+* **Washout**: Target decay time (`ms`) used to scale the individual pulse profile width.
+* **Interactive Recalculation**: Adjusting **Rep Rate**, **Acq Time**, or **Pulses / Acq** dynamically updates the linked parameters according to `Pulses = Rep Rate * (Acq Time / 1000)`.
 
 ---
 
-### 2. Right Panel: Visualisation
+### 2. Right Panel: Visualisation & Stability Statistics
 
 #### **Plot Controls**
 
-- **Theme**: Select `Auto` (inherits system theme), `Dark`, or `Light` styling.
-- **Normalise**: Scales the trace amplitude to a 0–1 range, making it easy to examine shapes and relative carryover.
-- **Pan / Zoom Y**: Enables mouse interactions to zoom or pan along the vertical Y-axis.
-- **Auto-Rescale Y**: When enabled, automatically snaps the vertical axis to display the full simulated signal range whenever parameters change.
-- **Show Background**: Toggles visualization of the baseline background noise level.
+* **Theme**: Select `Auto` (inherits system theme), `Dark`, or `Light` styling.
+* **Normalise**: Scales each trace to a `0` to `1` range so pulse shapes and relative oscillation amplitudes can be compared across isotopes with different abundances.
+* **Pan / Zoom Y**: Enables vertical zooming and panning with the mouse.
+* **Auto-Rescale Y**: Automatically snaps the vertical axis to fit the visible simulated traces whenever parameters change.
+* **Show Background**: Toggles display of the baseline background noise floor.
 
-#### **Interactive Simulation Plot**
+#### **Interactive Simulation Plot (Top)**
 
-- Renders the resulting simulated detector signal trace over time.
-- **Legend**:
-  - Displays the active channels and simulated traces.
-  - **Interaction**: Click on items in the legend to toggle their visibility on the canvas.
-- **Interactive Dwell Boundaries**:
-  - Displays vertical dotted lines representing individual integration slice boundaries.
-  - Helps visualize how "jitter" and alignment changes occur from cycle to cycle when unsynchronized.
+* Renders the simulated detector signal traces over time for all active channels.
+* **Legend Interactions**:
+  * **Single-Click** a legend item to show or hide that channel's trace.
+  * **Double-Click** a legend item to isolate that single channel; double-click again to restore all channels.
+* **Zoom & Pan**: Use the **Mouse Wheel** to zoom, **Left-Click & Drag** to pan, and **Double-Click** the plot canvas to reset the view to full extents.
+
+#### **Pulse Simulation Stability (Signal Area ± 1s crop) Table (Bottom)**
+
+Evaluates the steady-state stability of the simulated signal across the central ablation plateau (excluding a `1 s` buffer at the rising and falling edges):
+
+* **Channel**: Isotope name.
+* **Mean Intensity**: Average simulated intensity (`CPS`) across the steady-state plateau.
+* **RSD (%)**: Relative Standard Deviation of the simulated signal across the plateau (reflecting any beat-frequency aliasing or incomplete washout mixing).
+* **Ideal Match (%)**: Agreement between the discrete mass spectrometer sampling and the continuous theoretical pulse train integral.
+* **Max Error (%)**: Maximum single-cycle deviation from the steady-state mean.
+* **Duty Cycle (%)**: Percentage of the total acquisition cycle spent actively measuring that channel.
 
 ---
 
-## Advanced Options
+## Modelling Details
 
-The simulator implements additional advanced options to model complex physical behaviors:
-
-- **Washout Scaling**: Scales the decay rate of the pulse profiles to simulate changes in gas flow or tubing lengths.
-- **Simulator dt (Resolution) Scaling**: Adjusts the resolution of the integration grid to resolve fine details of extremely fast transient signals and prevent aliasing artifacts in modeling.
-- **Hide Pulse Train Channels**: Toggle to show/hide individual pulse channels to keep the layout clean when analyzing many isotopes.
-- **SNR/CPS-based Intensity Scaling**: Adjusts simulated amplitudes to reflect actual counts-per-second (CPS) and signal-to-noise ratios calculated from your loaded iolite standard block.
-- **Sequential Sampling**: Models sequential mass spectrometer sweeps (rotating through quadrupole mass selections) to visualize how skew/drift manifests in multi-element sequential analysis.
+* **Washout Scaling**: When using a **Real Composite Peak** from the SPR tab, the pulse profile is dynamically scaled so its `10%` or `1%` width matches the active **Washout (ms)** parameter in the simulator.
+* **Sequential vs. Simultaneous Sampling**: For sequential instruments (`Quadrupole`, `Sector-Field`), the simulator models the exact time-staggered dwell windows and settling overheads as the mass analyser steps from isotope to isotope across each cycle. For simultaneous instruments (`TOF`, `Multi-Collector`), all channels integrate across the same synchronised window.
+* **Adaptive Simulation Resolution (`dt`)**: Automatically selects a sub-millisecond time-grid step (`dt`) fine enough to resolve narrow transient pulses and short dwell windows without numerical aliasing.
