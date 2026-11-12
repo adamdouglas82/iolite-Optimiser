@@ -62,7 +62,7 @@ To preserve display height on compact screens, plot controls are arranged in two
   * **Hide Summary Stats**: Hides or shows the floating statistics overlay box on the main SPR plot.
 * **Row 2** *(visible when **Subtract Background** is checked)*:
   * **Auto Select Region**: Automatically locates a `>= 5 s` baseline region at the start or end of the recording.
-  * **Background (s)**: Start and end time spin boxes for the background region (can also be adjusted on the plot via **Shift + Left-Click & Drag**).
+  * **Background (s)**: Start and end time spin boxes for the background region (can also be adjusted directly on the plot by hovering over the region boundaries and dragging).
 
 #### **SPR Plot (Top Left)**
 
@@ -73,7 +73,7 @@ To preserve display height on compact screens, plot controls are arranged in two
 * **Interactions**:
   * **Click Peak Marker or Label**: Toggles whether an individual pulse is excluded or included in the washout statistics.
   * **Drag Peak Cutoff Line**: Hover over the dashed horizontal **Peak Cutoff** line until the vertical resize cursor appears, then **Left-Click & Drag** up or down to adjust the threshold interactively.
-  * **Shift + Click & Drag Background Edge**: Adjusts the start or end boundary of the blue background region.
+  * **Drag Background Edge**: Hover over either boundary of the shaded background region until the horizontal resize cursor appears, then **Left-Click & Drag** to adjust the start or end time interactively.
 
 #### **Composite Plot (Top Right)**
 

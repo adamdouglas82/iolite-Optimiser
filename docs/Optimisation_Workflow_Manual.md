@@ -62,7 +62,7 @@ Once the system washout time is known, you can calculate ideal conditions for a 
    * Enter a **Global Dwell Time** (or individual channel dwell times), select the channels to include (or load a saved channel preset), and click **OK**.
 3. **Verify Background & Signal Regions**:
    * Inspect the signal plot to confirm the **Background (Blue)** region covers the gas blank and the **Signal (Red)** region covers the steady ablation plateau.
-   * **Quick Adjustment**: Hold **Shift** and **Left-Click & Drag** the vertical region edges directly on the plot, or edit the **Background (s)** and **Signal (s)** spin boxes.
+   * **Quick Adjustment**: Hover over the vertical region edges on the plot (the cursor changes to `↔`) and **Left-Click & Drag** them directly, or edit the **Background (s)** and **Signal (s)** spin boxes.
 
 ---
 

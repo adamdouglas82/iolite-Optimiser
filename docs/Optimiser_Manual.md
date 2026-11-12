@@ -112,7 +112,7 @@ Arranged in two compact rows above the signal plot:
 
 #### **Interactive Signal Plot (Top)**
 
-* **Region Adjustment**: Hold **Shift** and **Left-Click & Drag** any vertical region boundary (blue or red dashed edge) to move it directly on the plot. If start and end lines are crossed, they are automatically swapped on release.
+* **Region Adjustment**: Hover over any vertical region boundary (background or signal edge; the cursor changes to a horizontal resize arrow `↔`) and **Left-Click & Drag** to move it directly on the plot. If start and end lines are crossed, they are automatically swapped on release.
 * **Legend Interactions**:
   * **Single-Click** a channel in the legend to show or hide its trace.
   * **Double-Click** a channel in the legend to isolate it (hiding all other channels); double-click again to restore all channels.
