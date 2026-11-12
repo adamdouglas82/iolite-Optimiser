@@ -4764,7 +4764,7 @@ class ioliteOptimiser(QWidget):
         self.lbl_pulses = QLabel("Sync Target (Pulses):"); self.lbl_pulses.setFixedWidth(lbl_w_in)
         self.grid_qual.addWidget(self.lbl_pulses, 1, 0)
         self.spin_pulses = QDoubleSpinBox()
-        self.spin_pulses.setRange(1, 100); self.spin_pulses.setValue(self.persistent_settings.get('pulses', 5)); self.spin_pulses.setDecimals(1)
+        self.spin_pulses.setRange(1, 100); self.spin_pulses.setValue(round(float(self.persistent_settings.get('pulses', 5)))); self.spin_pulses.setDecimals(0); self.spin_pulses.setSingleStep(1.0)
         self.spin_pulses.setFixedWidth(spin_w_in)
         self.grid_qual.addWidget(self.spin_pulses, 1, 1)
 
@@ -4775,7 +4775,7 @@ class ioliteOptimiser(QWidget):
         self.grid_qual.addWidget(self.lbl_rsd, 1, 0)
         
         self.spin_rsd = QDoubleSpinBox()
-        self.spin_rsd.setRange(0.1, 20.0); self.spin_rsd.setValue(self.persistent_settings.get('target_rsd', 5.0)); self.spin_rsd.setDecimals(1)
+        self.spin_rsd.setRange(0.1, 20.0); self.spin_rsd.setValue(self.persistent_settings.get('target_rsd', 5.0)); self.spin_rsd.setDecimals(1); self.spin_rsd.setSingleStep(0.1)
         self.spin_rsd.setFixedWidth(spin_w_in)
         self.spin_rsd.setToolTip("Target RSD % (relative standard deviation limit) for oversampling steady state")
         self.spin_rsd.setVisible(False)
@@ -5981,8 +5981,6 @@ class ioliteOptimiser(QWidget):
             self.spin_min_dwell.setSingleStep(getattr(self, 'precision', 0.1))
             
         dosage_dps = self._get_dosage_precision_dps()
-        if hasattr(self, 'spin_pulses'):
-            self.spin_pulses.setDecimals(dosage_dps)
         if hasattr(self, 'spin_dosage'):
             self.spin_dosage.setDecimals(dosage_dps)
             
