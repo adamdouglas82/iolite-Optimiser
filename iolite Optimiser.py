@@ -633,7 +633,7 @@ class Logic:
         return {
             'base_snr': base_snr,
             'effective_noise_var': effective_noise_var,
-            'is_zero_bg': (total_bg_counts == 0),
+            'is_zero_bg': bool(total_bg_counts == 0),
             'L_c_counts': L_c_counts
         }
 
@@ -8248,29 +8248,15 @@ class ioliteOptimiser(QWidget):
                     sig_cps = m_sig
                     blk_cps = m_blk
                     std_blk_counts = s_blk * ref_dt_s
-                    
-                    # For SNR scaling (Counts Math)
-                    math_sig = m_sig * ref_dt_s
-                    math_blk = m_blk * ref_dt_s
-                    math_std_blk = s_blk * ref_dt_s
                 else:
                     # Input is Counts -> Convert to CPS
                     sig_cps = m_sig / ref_dt_s
                     blk_cps = m_blk / ref_dt_s
                     std_blk_counts = s_blk
-                    
-                    # For SNR scaling (Counts Math)
-                    math_sig = m_sig
-                    math_blk = m_blk
-                    math_std_blk = s_blk
 
-                # Calculate Robust SNR (summing variances in quadrature in Counts domain)
-                # Matches logic.py reference: sqrt(Poisson_Variance + Flicker_Variance)
-                # Poisson Var = Mean Counts (math_blk)
-                # Flicker Var = StdDev Counts^2 (math_std_blk^2)
-                # Note: This follows user's logic that these sum in quadrature.
-                noise = (max(0, math_blk) + math_std_blk**2)**0.5
-                initial_snr = (math_sig - math_blk) / noise if noise > 0 else 0
+                std_blk_counts_val = 0.0 if (s_blk is None or pd.isna(s_blk)) else float(std_blk_counts)
+                snr_res = Logic.calculate_robust_snr(sig_cps, blk_cps, ref_dt_s, std_blk_counts_val)
+                initial_snr = snr_res['base_snr']
 
                 # Fetch session-specific config for this isotope
                 iso_conf = self.isotope_configs.setdefault(col, {"status": "Auto", "custom_time_s": 0.01})
@@ -8279,7 +8265,7 @@ class ioliteOptimiser(QWidget):
                     'name': col,
                     'sig_cps': sig_cps,
                     'blk_cps': blk_cps,
-                    'stdev_blank_counts': std_blk_counts if s_blk is not None else 0,
+                    'stdev_blank_counts': std_blk_counts_val,
                     'baseline_dt_s': ref_dt_s,
                     'dwell': ref_dt_s, 
                     'status': iso_conf['status'],
@@ -8444,7 +8430,7 @@ class ioliteOptimiser(QWidget):
             if df_res is not None:
                 min_snr_isos = [row['Isotope'] for row in df_res if row.get('Constraint') == "Min SNR"]
                 min_icp_isos = [row['Isotope'] for row in df_res if row.get('Constraint') == "Min ICP"]
-                zero_bg_isos = [row['Isotope'] for row in df_res if row.get('IsZeroBG') is True]
+                zero_bg_isos = [row['Isotope'] for row in df_res if row.get('IsZeroBG')]
                 
                 target_sigma = c.get('lower_sigma_limit', 0)
                 snr_thresh = c.get('snr_threshold', 0)
@@ -8463,7 +8449,7 @@ class ioliteOptimiser(QWidget):
                         final_notes.append((f"The following channels cannot be set lower than the hardware minimum&nbsp;({min_dwell_ms}&nbsp;ms):", ", ".join(min_icp_isos), "blue"))
                 
                 if zero_bg_isos:
-                    final_notes.append(("The following channels had zero counts in the background. The detection limit (L<sub>c</sub>) has been calculated using the Square Root Transform rule for variance stabilisation:", ", ".join(zero_bg_isos), "gray"))
+                    final_notes.append(("The following channels had zero background counts (detection limit L<sub>c</sub> estimated for zero-count noise):", ", ".join(zero_bg_isos), "gray"))
             
 
             
@@ -8481,6 +8467,7 @@ class ioliteOptimiser(QWidget):
                             hdr, det, colour_key = note
                             if colour_key == "blue": marker_colour = "#3399FF"
                             elif colour_key == "red": marker_colour = "#FF0000"
+                            elif colour_key == "gray": marker_colour = "#9E9E9E"
                             else: marker_colour = "#FF6D00" # Default/Orange
                             summary += f"<div style='margin-left: 15px; text-indent: -15px;'><span style='color: {marker_colour}'>•</span> {hdr}</div>"
                             summary += f"<div style='margin-left: 30px; text-indent: -15px;'><span style='color: {marker_colour}'>•</span> <b>{det}</b></div>"
