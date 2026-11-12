@@ -4804,39 +4804,55 @@ class ioliteOptimiser(QWidget):
         self.spin_snr.setFixedWidth(spin_w_in)
         self.grid_qual.addWidget(self.spin_snr, 2, 4)
 
-        # Row 3: Image Width and Height / Shots
+        # Row 3: Min Dwell Time (Left) and Mode-Specific Dimension (Right in Spot/Line; Row 4 in Imaging)
+        self.lbl_min_dwell = QLabel("Min Dwell Time (ms):"); self.lbl_min_dwell.setFixedWidth(lbl_w_in)
+        self.grid_qual.addWidget(self.lbl_min_dwell, 3, 0)
+        self.spin_min_dwell = QDoubleSpinBox()
+        self.spin_min_dwell.setRange(0.0001, 1000.0)
+        self.spin_min_dwell.setDecimals(2)
+        init_opt_min = self.persistent_settings.get('opt_min_dwell', self.persistent_settings.get('min_dwell', 0.1))
+        self.spin_min_dwell.setValue(float(init_opt_min))
+        self.spin_min_dwell.setFixedWidth(spin_w_in)
+        self.spin_min_dwell.setToolTip(
+            "Minimum dwell time override per analyte channel (ms).\n"
+            "Bounded below by the ICP-MS hardware minimum dwell time.\n"
+            "Raise this value to enforce a longer minimum dwell time during optimisation\n"
+            "without altering the hardware minimum setting."
+        )
+        self.spin_min_dwell.valueChanged.connect(self._on_min_dwell_changed)
+        self.grid_qual.addWidget(self.spin_min_dwell, 3, 1)
+
+        # Row 3 / 4: Image Width and Height / Line Length / Shots
         self.lbl_width = QLabel("Image Width (µm):"); self.lbl_width.setFixedWidth(lbl_w_in)
-        self.grid_qual.addWidget(self.lbl_width, 3, 0)
+        self.grid_qual.addWidget(self.lbl_width, 4, 0)
         self.spin_width = QDoubleSpinBox()
         self.spin_width.setRange(1, 1000000); self.spin_width.setValue(self.persistent_settings.get('img_width', 1000.0)); self.spin_width.setDecimals(0)
         self.spin_width.setFixedWidth(spin_w_in)
-        self.grid_qual.addWidget(self.spin_width, 3, 1)
+        self.grid_qual.addWidget(self.spin_width, 4, 1)
 
         # Line Length widget (Line Mode counterpart)
         self.lbl_line_len = QLabel("Line Length (µm):"); self.lbl_line_len.setFixedWidth(lbl_w_in)
         self.lbl_line_len.setVisible(False)
-        self.grid_qual.addWidget(self.lbl_line_len, 3, 0)
+        self.grid_qual.addWidget(self.lbl_line_len, 3, 3)
         self.spin_line_len = QDoubleSpinBox()
         self.spin_line_len.setRange(1, 1000000); self.spin_line_len.setValue(self.persistent_settings.get('line_length', 1000.0)); self.spin_line_len.setDecimals(0)
         self.spin_line_len.setFixedWidth(spin_w_in)
         self.spin_line_len.setVisible(False)
         self.spin_line_len.valueChanged.connect(self._on_ui_change)
-        self.grid_qual.addWidget(self.spin_line_len, 3, 1)
+        self.grid_qual.addWidget(self.spin_line_len, 3, 4)
 
         self.lbl_height = QLabel("Image Height (µm):"); self.lbl_height.setFixedWidth(lbl_w_in)
-        self.grid_qual.addWidget(self.lbl_height, 3, 3)
+        self.grid_qual.addWidget(self.lbl_height, 4, 3)
         self.spin_height = QDoubleSpinBox()
         self.spin_height.setRange(1, 1000000); self.spin_height.setValue(self.persistent_settings.get('img_height', 1000.0)); self.spin_height.setDecimals(0)
         self.spin_height.setFixedWidth(spin_w_in)
-        self.grid_qual.addWidget(self.spin_height, 3, 4)
+        self.grid_qual.addWidget(self.spin_height, 4, 4)
         
-        # Shots (Overlapping Height in Layout, visibility toggled)
+        # Shots (Positioned at Row 3 Right in Spot Mode)
         self.lbl_shots = QLabel("Number of Shots:"); self.lbl_shots.setFixedWidth(lbl_w_in)
-        # self.grid_qual.addWidget(self.lbl_shots, 3, 0) # Managed by mode update
         self.spin_shots = QSpinBox()
         self.spin_shots.setRange(1, 100000000); self.spin_shots.setValue(int(self.persistent_settings.get('shots', 100)))
         self.spin_shots.setFixedWidth(spin_w_in)
-        # self.grid_qual.addWidget(self.spin_shots, 3, 1) # Managed by mode update
 
         # Row 4: Sync Dosage Checkbox and Dosage Input (UI elements commented out but preserved)
         self.chk_sync_dosage = QCheckBox("Sync Dosage")
@@ -5198,7 +5214,7 @@ class ioliteOptimiser(QWidget):
         # Custom Field Signals
         self.cmb_cust_type.currentTextChanged.connect(self._handle_cust_type_changed)
         self.cmb_cust_type.currentIndexChanged.connect(self._on_ui_change)
-        self.spin_cust_min.valueChanged.connect(self._on_ui_change)
+        self.spin_cust_min.valueChanged.connect(self._on_cust_min_changed)
         self.spin_cust_prec.valueChanged.connect(self._on_ui_change)
         self.edit_cust_dwells.textChanged.connect(self._on_ui_change)
         self.cmb_cust_rr_type.currentIndexChanged.connect(self._on_ui_change)
@@ -5303,7 +5319,7 @@ class ioliteOptimiser(QWidget):
             
         if is_custom:
             self.icp_tech = self._get(self.cmb_cust_type, 'currentText')
-            self.min_dwell = self._get(self.spin_cust_min, 'value')
+            hw_min = self._get(self.spin_cust_min, 'value')
             self.precision = self._get(self.spin_cust_prec, 'value')
             if self.icp_tech == "Multi-Collector":
                 self.allowed_dwells = self._parse_rr_list(self._get(self.edit_cust_dwells, 'text'))
@@ -5311,13 +5327,26 @@ class ioliteOptimiser(QWidget):
                 self.allowed_dwells = None
         else:
             spec = ICP_SPECS.get(mfr, {}).get(model, {})
-            self.min_dwell = spec.get('min_dwell', 0.1)
+            hw_min = spec.get('min_dwell', 0.1)
             self.precision = spec.get('prec', 0.1)
             
             # CRITICAL: Update Tech Type (Quad vs MC) from Spec
             raw_type = spec.get('type', 'Quadrupole')
             self.icp_tech = TYPE_TO_TECH_MAP.get(raw_type, raw_type)
             self.allowed_dwells = spec.get('allowed_dwells', None)
+
+        self.min_dwell = hw_min
+        if hasattr(self, 'spin_min_dwell'):
+            self._block_signals(self.spin_min_dwell, True)
+            self.spin_min_dwell.setMinimum(self.min_dwell)
+            if not getattr(self, 'ui_ready', False):
+                saved_opt_min = float(self.persistent_settings.get('opt_min_dwell', self.min_dwell))
+                target_min = max(self.min_dwell, saved_opt_min)
+            else:
+                target_min = self.min_dwell
+            self.spin_min_dwell.setValue(target_min)
+            self.spin_min_dwell.setEnabled(self.icp_tech not in ["Multi-Collector", "TOF"])
+            self._block_signals(self.spin_min_dwell, False)
         
         # Always update status
         self._update_icp_status()
@@ -5519,7 +5548,7 @@ class ioliteOptimiser(QWidget):
         is_custom_icp = (icp_mfr == "Custom" or icp_mod == "Custom Model")
         if is_custom_icp:
             self.icp_tech = self._get(self.cmb_cust_type, 'currentText')
-            self.min_dwell = self._get(self.spin_cust_min, 'value')
+            hw_min = self._get(self.spin_cust_min, 'value')
             self.precision = self._get(self.spin_cust_prec, 'value')
             if self.icp_tech == "Multi-Collector":
                 self.allowed_dwells = self._parse_rr_list(self._get(self.edit_cust_dwells, 'text'))
@@ -5529,9 +5558,19 @@ class ioliteOptimiser(QWidget):
             spec = ICP_SPECS.get(icp_mfr, {}).get(icp_mod, {})
             raw_type = spec.get('type', "Quadrupole")
             self.icp_tech = TYPE_TO_TECH_MAP.get(raw_type, raw_type)
-            self.min_dwell = spec.get('min_dwell', 0.1)
+            hw_min = spec.get('min_dwell', 0.1)
             self.precision = spec.get('prec', 0.1)
             self.allowed_dwells = spec.get('allowed_dwells', None)
+
+        self.min_dwell = hw_min
+        if hasattr(self, 'spin_min_dwell'):
+            self._block_signals(self.spin_min_dwell, True)
+            self.spin_min_dwell.setMinimum(self.min_dwell)
+            cur_val = self._get(self.spin_min_dwell, 'value')
+            if cur_val < self.min_dwell:
+                self.spin_min_dwell.setValue(self.min_dwell)
+            self.spin_min_dwell.setEnabled(self.icp_tech not in ["Multi-Collector", "TOF"])
+            self._block_signals(self.spin_min_dwell, False)
 
         # --- LASER STATE SYNC ---
         is_custom_laser = (las_mod == "Custom Laser")
@@ -5639,6 +5678,29 @@ class ioliteOptimiser(QWidget):
                 self._block_signals(self.spin_dosage, False)
         self._on_ui_change()
 
+    def _get_effective_min_dwell(self):
+        hw_min = getattr(self, 'min_dwell', 0.1)
+        if hasattr(self, 'spin_min_dwell') and getattr(self, 'icp_tech', 'Quadrupole') not in ["Multi-Collector", "TOF"]:
+            opt_min = self._get(self.spin_min_dwell, 'value')
+            if opt_min is not None:
+                return max(hw_min, float(opt_min))
+        return hw_min
+
+    def _on_min_dwell_changed(self, value):
+        self._on_ui_change()
+
+    def _on_cust_min_changed(self, value):
+        prev_hw_min = getattr(self, 'min_dwell', value)
+        self.min_dwell = value
+        if hasattr(self, 'spin_min_dwell'):
+            self._block_signals(self.spin_min_dwell, True)
+            cur_opt = self._get(self.spin_min_dwell, 'value')
+            self.spin_min_dwell.setMinimum(value)
+            if cur_opt < value or abs(cur_opt - prev_hw_min) < 1e-7:
+                self.spin_min_dwell.setValue(value)
+            self._block_signals(self.spin_min_dwell, False)
+        self._on_ui_change()
+
     def _on_ui_change(self, *args):
         # Refresh visibility of custom fields
         self._update_custom_visibility()
@@ -5698,37 +5760,37 @@ class ioliteOptimiser(QWidget):
         
         # 2. Re-populate based on Mode
         if is_spot:
-            # Spot: Shots at (3,0)
+            # Spot: Shots at (3,3)-(3,4) next to Min Dwell Time
             if hasattr(self, 'lbl_shots'): 
-                self.grid_qual.addWidget(self.lbl_shots, 3, 0)
+                self.grid_qual.addWidget(self.lbl_shots, 3, 3)
                 self.lbl_shots.setVisible(True)
             if hasattr(self, 'spin_shots'): 
-                self.grid_qual.addWidget(self.spin_shots, 3, 1)
+                self.grid_qual.addWidget(self.spin_shots, 3, 4)
                 self.spin_shots.setVisible(True)
                 
         elif is_line:
-            # Line: Length at (3,0)
+            # Line: Length at (3,3)-(3,4) next to Min Dwell Time
             if hasattr(self, 'lbl_line_len'):
-                self.grid_qual.addWidget(self.lbl_line_len, 3, 0)
+                self.grid_qual.addWidget(self.lbl_line_len, 3, 3)
                 self.lbl_line_len.setVisible(True)
             if hasattr(self, 'spin_line_len'):
-                self.grid_qual.addWidget(self.spin_line_len, 3, 1)
+                self.grid_qual.addWidget(self.spin_line_len, 3, 4)
                 self.spin_line_len.setVisible(True)
                 
         else: # Imaging
-            # Imaging: Width at (3,0), Height at (3,2)
+            # Imaging: Width at (4,0), Height at (4,3)
             if hasattr(self, 'lbl_width'):
-                self.grid_qual.addWidget(self.lbl_width, 3, 0)
+                self.grid_qual.addWidget(self.lbl_width, 4, 0)
                 self.lbl_width.setVisible(True)
             if hasattr(self, 'spin_width'):
-                self.grid_qual.addWidget(self.spin_width, 3, 1)
+                self.grid_qual.addWidget(self.spin_width, 4, 1)
                 self.spin_width.setVisible(True)
                 
             if hasattr(self, 'lbl_height'):
-                self.grid_qual.addWidget(self.lbl_height, 3, 3)
+                self.grid_qual.addWidget(self.lbl_height, 4, 3)
                 self.lbl_height.setVisible(True)
             if hasattr(self, 'spin_height'):
-                self.grid_qual.addWidget(self.spin_height, 3, 4)
+                self.grid_qual.addWidget(self.spin_height, 4, 4)
                 self.spin_height.setVisible(True)
 
         # 3. Dynamic visibility for Optimised Settings (Results Summary)
@@ -5914,6 +5976,9 @@ class ioliteOptimiser(QWidget):
         if hasattr(self, 'spin_pulse_at'):
             self.spin_pulse_at.setDecimals(icp_dps)
             self.spin_pulse_at.setSingleStep(getattr(self, 'precision', 0.1))
+        if hasattr(self, 'spin_min_dwell'):
+            self.spin_min_dwell.setDecimals(icp_dps)
+            self.spin_min_dwell.setSingleStep(getattr(self, 'precision', 0.1))
             
         dosage_dps = self._get_dosage_precision_dps()
         if hasattr(self, 'spin_pulses'):
@@ -5975,6 +6040,7 @@ class ioliteOptimiser(QWidget):
                     # Add internal states that are expensive or complex to derive
                     'icp_tech': self.icp_tech,
                     'min_dwell': self.min_dwell,
+                    'opt_min_dwell': self._get(self.spin_min_dwell, 'value') if hasattr(self, 'spin_min_dwell') else self.min_dwell,
                     'precision': self.precision,
                     'max_rr': self.max_rr,
                     'max_speed': self.max_speed,
@@ -8099,6 +8165,7 @@ class ioliteOptimiser(QWidget):
 
             pulses_val = self._get(self.spin_pulses, 'value')
             rsd_val = self._get(self.spin_rsd, 'value') if hasattr(self, 'spin_rsd') else 5.0
+            eff_min_dwell = self._get_effective_min_dwell()
 
             c = {
                 'icp_mfr': mfr,
@@ -8106,7 +8173,7 @@ class ioliteOptimiser(QWidget):
                 'icp_technology': self.icp_tech,
                 'system_type': self.icp_tech, # Required by calculate_sigma_for_spot
                 'precision_ms': self.precision,
-                'min_dwell_ms': self.min_dwell,
+                'min_dwell_ms': eff_min_dwell,
                 'max_rr_hz': self.max_rr,
                 'allowed_rr': self.allowed_rr,
                 'allowed_dwells': self.allowed_dwells,
@@ -8233,23 +8300,23 @@ class ioliteOptimiser(QWidget):
                         if iso.get('status') == "Custom":
                             reqs.append(iso.get('custom_time_s', 0) * 1000.0)
                         else:
-                            reqs.append(self.min_dwell)
-                    min_dwell_total = max(reqs) if reqs else self.min_dwell
+                            reqs.append(eff_min_dwell)
+                    min_dwell_total = max(reqs) if reqs else eff_min_dwell
                 else:
                     # Sequential systems: Sum of all active dwells
                     for iso in isotope_data:
                         stat = iso.get('status', 'Auto')
                         if stat == "Exclude": continue
                         if stat == "Custom":
-                            min_dwell_total += iso.get('custom_time_s', self.min_dwell / 1000.0) * 1000.0
+                            min_dwell_total += iso.get('custom_time_s', eff_min_dwell / 1000.0) * 1000.0
                         else:
-                            min_dwell_total += self.min_dwell
+                            min_dwell_total += eff_min_dwell
             c['min_dwell_needed_ms'] = min_dwell_total
 
             # Count Even channels and calculate fixed costs for perfect split synchronization
             num_even = 0
             fixed_costs_s = 0.0
-            min_dwell_s = self.min_dwell / 1000.0
+            min_dwell_s = eff_min_dwell / 1000.0
             
             for iso in isotope_data:
                 stat = iso.get('status', 'Auto')
@@ -8276,9 +8343,9 @@ class ioliteOptimiser(QWidget):
                 elif stat == "Custom":
                     active_dwells_ms.append(iso.get('custom_time_s', min_dwell_s) * 1000.0)
                 elif stat == "Set to Min":
-                    active_dwells_ms.append(self.min_dwell)
+                    active_dwells_ms.append(eff_min_dwell)
                 else:
-                    active_dwells_ms.append(self.min_dwell)
+                    active_dwells_ms.append(eff_min_dwell)
             c['active_dwells_ms'] = active_dwells_ms
 
             c['log_prefix'] = "Initial Sync"
@@ -8390,7 +8457,10 @@ class ioliteOptimiser(QWidget):
                     else:
                         final_notes.append(("The following channels could not reach the minimum SNR target and have been set to the minimum dwell time:", ", ".join(min_snr_isos), "orange"))
                 if min_icp_isos:
-                    final_notes.append((f"The following channels cannot be set lower than the hardware minimum&nbsp;({min_dwell_ms}&nbsp;ms):", ", ".join(min_icp_isos), "blue"))
+                    if min_dwell_ms > getattr(self, 'min_dwell', 0.1) + 1e-7:
+                        final_notes.append((f"The following channels cannot be set lower than the selected minimum dwell time&nbsp;({min_dwell_ms}&nbsp;ms):", ", ".join(min_icp_isos), "blue"))
+                    else:
+                        final_notes.append((f"The following channels cannot be set lower than the hardware minimum&nbsp;({min_dwell_ms}&nbsp;ms):", ", ".join(min_icp_isos), "blue"))
                 
                 if zero_bg_isos:
                     final_notes.append(("The following channels had zero counts in the background. The detection limit (L<sub>c</sub>) has been calculated using the Square Root Transform rule for variance stabilisation:", ", ".join(zero_bg_isos), "gray"))
@@ -8910,7 +8980,7 @@ class ioliteOptimiser(QWidget):
             spot_size = self._get(self.spin_spot, 'value')
 
             # Dwell / Cycle time resolution and hardware constraints
-            min_dwell = getattr(self, 'min_dwell', 0.1)
+            min_dwell = self._get_effective_min_dwell()
             precision = getattr(self, 'precision', 0.1)
             allowed_dwells = getattr(self, 'allowed_dwells', None)
             
