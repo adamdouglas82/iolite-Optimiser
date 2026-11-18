@@ -46,7 +46,12 @@
 
 import math
 import os
+import re
 import json
+import zipfile
+import xml.etree.ElementTree as ET
+from datetime import datetime
+from urllib.parse import unquote
 import socket
 import ssl
 import traceback
@@ -1858,6 +1863,300 @@ class PresetManagerDialog(QDialog):
                 del self.presets[name]
                 self.list_widget.takeItem(self.list_widget.row(item))
                 self.preview.clear()
+
+
+class ImportedFileSelectDialog(QDialog):
+    """Dialog to choose a single file when an imported container (e.g. LAX) loads multiple files."""
+    _UUID_DASHED_RE = re.compile(r'[\(\{]?[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}[\)\}]?')
+    _UUID_HEX32_RE = re.compile(r'[\(\{]?[0-9a-fA-F]{32}[\)\}]?')
+
+    def __init__(self, imported_files, tab="opt", container_path=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select SPR File" if tab == "spr" else "Select Optimisation File")
+        self.files = list(imported_files)
+        self.selected_file = None
+
+        lax_entries = self._extract_lax_metadata(container_path)
+        has_lax = bool(lax_entries)
+        used_lax = set()
+        rows_data = []
+
+        for i, f in enumerate(self.files):
+            f_path = self._get(f, 'filePath')
+            f_name_raw = self._get(f, 'fileName')
+            clean_name = self._clean_filename(f_name_raw, f_path)
+            if not clean_name:
+                clean_name = f"File {i + 1}"
+
+            dt_str = "-"
+            st = self._get(f, 'startTime')
+            if st is not None:
+                try:
+                    if hasattr(st, 'toString'):
+                        s = st.toString("yyyy-MM-dd HH:mm:ss")
+                        if s:
+                            dt_str = str(s)
+                except Exception:
+                    pass
+                if dt_str == "-":
+                    try:
+                        ts = st.toSecsSinceEpoch()
+                        if ts is not None:
+                            dt_str = datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        pass
+
+            dur_str = "-"
+            try:
+                et = self._get(f, 'endTime')
+                if st is not None and et is not None:
+                    dur = float(et.toSecsSinceEpoch()) - float(st.toSecsSinceEpoch())
+                    if dur >= 0:
+                        dur_str = f"{dur:.1f} s"
+            except Exception:
+                pass
+
+            ch_str = "-"
+            try:
+                chs = self._get(f, 'channelList')
+                if chs is not None:
+                    n_ch = sum(1 for c in chs if str(c).strip().lower() != "totalbeam")
+                    ch_str = str(n_ch)
+            except Exception:
+                pass
+
+            pattern_name = ""
+            if has_lax:
+                pattern_name = self._match_lax_pattern(f_path, f_name_raw, clean_name, dt_str, lax_entries, used_lax)
+
+            tooltip = str(f_path) if f_path else (str(f_name_raw) if f_name_raw else "")
+            rows_data.append((clean_name, pattern_name, dt_str, dur_str, ch_str, tooltip))
+
+        layout = QVBoxLayout(self)
+
+        lbl = QLabel("Multiple files were loaded from this container. Select the file to load:")
+        lbl.setWordWrap(True)
+        lbl.setStyleSheet("font-weight: bold;")
+        layout.addWidget(lbl)
+
+        self.table = QTableWidget()
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        if hasattr(QAbstractItemView, 'SingleSelection'):
+            self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table.setAlternatingRowColors(True)
+
+        header = self.table.horizontalHeader()
+        if has_lax:
+            self.resize(700, 360)
+            self.table.setColumnCount(5)
+            self.table.setHorizontalHeaderLabels(["File Name", "Pattern", "Date / Time", "Duration", "Channels"])
+            header.setSectionResizeMode(0, QHeaderView.Stretch)
+            for col in (1, 2, 3, 4):
+                header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        else:
+            self.resize(620, 360)
+            self.table.setColumnCount(4)
+            self.table.setHorizontalHeaderLabels(["File Name", "Date / Time", "Duration", "Channels"])
+            header.setSectionResizeMode(0, QHeaderView.Stretch)
+            for col in (1, 2, 3):
+                header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+
+        self.table.setRowCount(len(rows_data))
+        for i, (clean_name, pattern_name, dt_str, dur_str, ch_str, tooltip) in enumerate(rows_data):
+            item_name = QTableWidgetItem(clean_name)
+            item_name.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+            if tooltip:
+                item_name.setToolTip(tooltip)
+            self.table.setItem(i, 0, item_name)
+
+            if has_lax:
+                if pattern_name:
+                    item_pat = QTableWidgetItem(pattern_name)
+                    item_pat.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                else:
+                    item_pat = QTableWidgetItem("Deleted")
+                    item_pat.setTextAlignment(Qt.AlignCenter)
+                    item_pat.setForeground(QColor("gray"))
+                    f_pat = item_pat.font()
+                    f_pat.setItalic(True)
+                    item_pat.setFont(f_pat)
+                self.table.setItem(i, 1, item_pat)
+                rest = ((2, dt_str), (3, dur_str), (4, ch_str))
+            else:
+                rest = ((1, dt_str), (2, dur_str), (3, ch_str))
+
+            for col, txt in rest:
+                item = QTableWidgetItem(txt)
+                item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(i, col, item)
+
+        if self.files:
+            self.table.selectRow(0)
+        self.table.cellDoubleClicked.connect(lambda r, c: self.accept())
+        layout.addWidget(self.table)
+
+        h_btns = QHBoxLayout()
+        h_btns.addStretch()
+        self.btn_load = QPushButton("Load Selected")
+        self.btn_load.setDefault(True)
+        self.btn_load.clicked.connect(self.accept)
+        h_btns.addWidget(self.btn_load)
+
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.clicked.connect(self.reject)
+        h_btns.addWidget(self.btn_cancel)
+        layout.addLayout(h_btns)
+
+    @classmethod
+    def _clean_filename(cls, raw_name, fallback_path=None):
+        candidate = str(raw_name).strip() if raw_name else (str(fallback_path).strip() if fallback_path else "")
+        if not candidate:
+            return ""
+        base = os.path.basename(candidate.replace('\\', '/'))
+        base = unquote(base).strip()
+        if not base:
+            return ""
+
+        stem, ext = os.path.splitext(base)
+        cleaned = stem
+        for pat in (cls._UUID_DASHED_RE.pattern, cls._UUID_HEX32_RE.pattern):
+            cleaned = re.sub(rf'^{pat}[\s._-]+', '', cleaned)
+            cleaned = re.sub(rf'[\s._-]+{pat}$', '', cleaned)
+            cleaned = re.sub(rf'^{pat}$', '', cleaned)
+            cleaned = re.sub(pat, '', cleaned)
+        cleaned = cleaned.strip(' _-.')
+        if not cleaned:
+            cleaned = stem
+        return f"{cleaned}{ext}"
+
+    @staticmethod
+    def _extract_lax_metadata(container_path):
+        if not container_path or not str(container_path).lower().endswith('.lax'):
+            return []
+        if not os.path.isfile(container_path) or not zipfile.is_zipfile(container_path):
+            return []
+
+        entries = []
+        try:
+            with zipfile.ZipFile(container_path, 'r') as zf:
+                names = zf.namelist()
+                patterns = {}
+                exp_times = {}
+                dt_formats = ('%d/%m/%Y %H:%M:%S', '%m/%d/%Y %H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y/%m/%d %H:%M:%S')
+                if 'Experiment.xml' in names:
+                    try:
+                        root = ET.fromstring(zf.read('Experiment.xml'))
+                        for pat in root.iter('Pattern'):
+                            pid = (pat.findtext('PatternId') or '').strip().lower()
+                            pname = (pat.findtext('Name') or '').strip()
+                            if pid and pname:
+                                patterns[pid] = pname
+                        for item in root.iter('PatternIcpIoliteDataItem'):
+                            dl_path = (item.findtext('DataLogFilePath') or '').strip().replace('\\', '/')
+                            ts_txt = (item.findtext('ExperimentId') or item.findtext('IcpDataReceiveTime') or '').strip()
+                            m_guid = re.search(r'/ScanData/([0-9a-f-]{36})/([^/]+/)+([^/]+)$', dl_path, re.I)
+                            if m_guid and ts_txt:
+                                g_key = m_guid.group(1).lower()
+                                fn_key = unquote(m_guid.group(3)).lower()
+                                for fmt in dt_formats:
+                                    try:
+                                        exp_times[(g_key, fn_key)] = datetime.strptime(ts_txt, fmt)
+                                        break
+                                    except ValueError:
+                                        pass
+                    except Exception:
+                        pass
+
+                uuid_re = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
+                for zname in names:
+                    if not zname.startswith('ScanData/') or zname.endswith('/'):
+                        continue
+                    parts = [p for p in zname.split('/') if p]
+                    guid = parts[1].lower() if len(parts) > 2 and uuid_re.match(parts[1]) else ""
+                    inner_filename = unquote(parts[-1])
+                    entries.append({
+                        'guid': guid,
+                        'filename': inner_filename,
+                        'pattern': patterns.get(guid, ""),
+                        'exp_dt': exp_times.get((guid, inner_filename.lower())),
+                    })
+        except Exception:
+            return []
+        return entries
+
+    @staticmethod
+    def _match_lax_pattern(f_path, f_name_raw, clean_name, qt_dt_str, lax_entries, used_indices):
+        uuid_find_re = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', re.I)
+        raw_blobs = [str(f_path or ''), str(f_name_raw or '')]
+        found_guids = []
+        for blob in raw_blobs:
+            found_guids.extend(g.lower() for g in uuid_find_re.findall(blob))
+
+        if found_guids:
+            for idx, entry in enumerate(lax_entries):
+                if idx in used_indices or not entry.get('guid'):
+                    continue
+                if entry['guid'] in found_guids:
+                    used_indices.add(idx)
+                    return entry.get('pattern', "")
+
+        qt_dt = None
+        if qt_dt_str and qt_dt_str != "-":
+            try:
+                qt_dt = datetime.strptime(qt_dt_str, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                qt_dt = None
+
+        clean_lower = clean_name.lower()
+        name_matches = [
+            (idx, entry) for idx, entry in enumerate(lax_entries)
+            if idx not in used_indices and clean_lower == entry['filename'].lower()
+        ]
+        if len(name_matches) == 1:
+            idx, entry = name_matches[0]
+            used_indices.add(idx)
+            return entry.get('pattern', "")
+
+        candidates = name_matches if name_matches else [
+            (idx, entry) for idx, entry in enumerate(lax_entries) if idx not in used_indices
+        ]
+        if qt_dt is not None and candidates:
+            timed = [
+                (abs((qt_dt - entry['exp_dt']).total_seconds()), idx, entry)
+                for idx, entry in candidates if entry.get('exp_dt') is not None
+            ]
+            if timed:
+                timed.sort(key=lambda t: t[0])
+                delta_s, best_idx, best_entry = timed[0]
+                if delta_s <= 300.0:
+                    used_indices.add(best_idx)
+                    return best_entry.get('pattern', "")
+
+        return ""
+
+    def _get(self, obj, attr):
+        if not obj or not hasattr(obj, attr): return None
+        try:
+            val = getattr(obj, attr)
+            return val() if callable(val) else val
+        except Exception:
+            return None
+
+    def accept(self):
+        row = self._get(self.table, 'currentRow')
+        if (row is None or row < 0) and self.files:
+            row = 0
+        if row is not None and 0 <= row < len(self.files):
+            self.selected_file = self.files[row]
+        else:
+            self.selected_file = None
+        self.done(QDialog.Accepted)
+
+    def reject(self):
+        self.selected_file = None
+        self.done(QDialog.Rejected)
 
 
 class DataConfigDialog(QDialog):
@@ -6279,51 +6578,126 @@ class ioliteOptimiser(QWidget):
             return
         
         norm_file_path = os.path.normpath(file_path)
+
+        def _norm_path(p):
+            return os.path.normpath(str(p)).lower() if p else ""
+
+        def _file_key(f):
+            fp, fn, st_epoch = "", "", None
+            try:
+                fp = _norm_path(f.filePath())
+            except Exception:
+                pass
+            try:
+                n = f.fileName()
+                fn = str(n).strip().lower() if n else ""
+            except Exception:
+                pass
+            try:
+                st = f.startTime()
+                if st is not None:
+                    st_epoch = st.toSecsSinceEpoch()
+            except Exception:
+                pass
+            return (fp, fn, st_epoch)
         
         try:
             # Record loaded files before importing
             files_before = data.importedFiles()
-            existing_paths = {f.filePath().lower() for f in files_before}
+            existing_keys = {_file_key(f) for f in files_before}
+            existing_paths = {k[0] for k in existing_keys if k[0]}
             
             res = data.importData(norm_file_path)
             
-            # Check loaded files after importing
+            # Check loaded files after importing (collect ALL newly added entries for multi-file containers)
             files_after = data.importedFiles()
+            newly_imported_files = [f for f in files_after if _file_key(f) not in existing_keys]
             
-            # Find the new file added during this import (if any)
-            newly_imported_file = None
-            for f in files_after:
-                if f.filePath().lower() not in existing_paths:
-                    newly_imported_file = f
-                    break
-            
-            # Resolve target path using the newly added file or fallback to match name of existing file
-            target_path = None
-            if newly_imported_file:
-                target_path = newly_imported_file.filePath()
-            else:
+            candidates = list(newly_imported_files)
+            if not candidates:
                 target_base = os.path.basename(norm_file_path.replace('\\', '/')).lower()
                 for f in files_after:
-                    f_path = f.filePath().replace('\\', '/').lower()
+                    try:
+                        raw_fp = f.filePath()
+                    except Exception:
+                        raw_fp = ""
+                    f_path = raw_fp.replace('\\', '/').lower()
                     f_base = os.path.basename(f_path)
-                    if f_path == norm_file_path.lower() or f_base == target_base:
-                        target_path = f.filePath()
-                        break
-            
-            if res or target_path is not None:
-                # Use the actual internal path recognized by iolite (e.g. Mac path embedded inside io4)
-                self.refresh_data(tab=tab, file_path=target_path or norm_file_path)
-                try:
-                    data.unloadFile(target_path or norm_file_path)
-                except Exception as ue:
-                    IoLog.warning(f"iolite Optimiser: Failed to unload file: {ue}")
-            else:
-                IoLog.warning(f"iolite Optimiser: Import returned False and not found in imported list for {norm_file_path}")
-                log_err = self.check_timestamp_error_in_log()
-                msg = "No file was imported.\n\nPlease check if the time stamp format in the file is set correctly in iolite."
-                if log_err:
-                    msg += f"\n\nDetails from iolite log:\n{log_err}"
-                QMessageBox.warning(self, "Import Failed", msg)
+                    if _norm_path(raw_fp) == _norm_path(norm_file_path) or f_base == target_base:
+                        candidates.append(f)
+
+            try:
+                if len(candidates) > 1:
+                    dlg = ImportedFileSelectDialog(candidates, tab=tab, container_path=norm_file_path, parent=self)
+                    if dlg.exec_() and dlg.selected_file is not None:
+                        sel_file = dlg.selected_file
+                        try:
+                            sel_path = sel_file.filePath() or norm_file_path
+                        except Exception:
+                            sel_path = norm_file_path
+                        self.refresh_data(tab=tab, file_path=sel_path, target_file=sel_file)
+                elif len(candidates) == 1:
+                    sel_file = candidates[0]
+                    try:
+                        sel_path = sel_file.filePath() or norm_file_path
+                    except Exception:
+                        sel_path = norm_file_path
+                    self.refresh_data(tab=tab, file_path=sel_path, target_file=sel_file)
+                elif res:
+                    # Fallback for formats that load input series without registering in importedFiles()
+                    self.refresh_data(tab=tab, file_path=norm_file_path)
+                else:
+                    IoLog.warning(f"iolite Optimiser: Import returned False and not found in imported list for {norm_file_path}")
+                    log_err = self.check_timestamp_error_in_log()
+                    msg = "No file was imported.\n\nPlease check if the time stamp format in the file is set correctly in iolite."
+                    if log_err:
+                        msg += f"\n\nDetails from iolite log:\n{log_err}"
+                    QMessageBox.warning(self, "Import Failed", msg)
+            finally:
+                if newly_imported_files:
+                    unload_targets = []
+                    seen_norm = set()
+                    for f in newly_imported_files:
+                        try:
+                            raw_p = f.filePath()
+                        except Exception:
+                            raw_p = ""
+                        raw_p = raw_p or norm_file_path
+                        np_lower = _norm_path(raw_p)
+                        if np_lower and np_lower not in existing_paths and np_lower not in seen_norm:
+                            seen_norm.add(np_lower)
+                            unload_targets.append((raw_p, np_lower))
+
+                    max_attempts = len(newly_imported_files)
+                    for raw_p, np_lower in unload_targets:
+                        for _ in range(max_attempts):
+                            try:
+                                rem_before = sum(
+                                    1 for f in data.importedFiles()
+                                    if _file_key(f) not in existing_keys and _norm_path(f.filePath()) == np_lower
+                                )
+                            except Exception:
+                                rem_before = 0
+                            try:
+                                data.unloadFile(raw_p)
+                            except Exception as ue:
+                                IoLog.warning(f"iolite Optimiser: Failed to unload file: {ue}")
+                                break
+                            try:
+                                rem_after = sum(
+                                    1 for f in data.importedFiles()
+                                    if _file_key(f) not in existing_keys and _norm_path(f.filePath()) == np_lower
+                                )
+                            except Exception:
+                                break
+                            if rem_after == 0 or rem_after >= rem_before:
+                                break
+                elif res and not candidates:
+                    if _norm_path(norm_file_path) not in existing_paths:
+                        try:
+                            data.unloadFile(norm_file_path)
+                        except Exception as ue:
+                            IoLog.warning(f"iolite Optimiser: Failed to unload file: {ue}")
         except Exception as e:
             msg = f"Failed to import/load file: {e}"
             IoLog.error(f"iolite Optimiser: {msg}")
@@ -6334,9 +6708,9 @@ class ioliteOptimiser(QWidget):
                 msg += "\n\nPlease check if the time stamp format in the file is set correctly in iolite."
             QMessageBox.critical(self, "Import Error", msg)
 
-    def refresh_data(self, tab=None, file_path=None):
+    def refresh_data(self, tab=None, file_path=None, target_file=None):
         # Do NOT force tab index if None. None means "Refresh All".
-        if not file_path:
+        if not file_path and target_file is None:
             return
 
         try:
@@ -6346,7 +6720,7 @@ class ioliteOptimiser(QWidget):
             
             # --- SPR TAB DATA ---
             if tab == "spr" or tab is None:
-                new_df_spr, new_meta_spr = self.get_input_dataframe(tab="spr", file_path=file_path)
+                new_df_spr, new_meta_spr = self.get_input_dataframe(tab="spr", file_path=file_path, target_file=target_file)
                 if new_df_spr is not None:
                     # Fully clear previous SPR state to prevent data pollution
                     if hasattr(self, 'spr_all_raw_results'): self.spr_all_raw_results.clear()
@@ -6377,7 +6751,7 @@ class ioliteOptimiser(QWidget):
 
             # --- OPTIMISER TAB DATA ---
             if tab == "opt" or tab is None:
-                new_df_opt, new_meta_opt = self.get_input_dataframe(tab="opt", file_path=file_path)
+                new_df_opt, new_meta_opt = self.get_input_dataframe(tab="opt", file_path=file_path, target_file=target_file)
                 if new_df_opt is not None:
                     self.opt_df = new_df_opt
                     self.opt_metadata = new_meta_opt # Store specifically for Optimiser
@@ -7859,27 +8233,28 @@ class ioliteOptimiser(QWidget):
             IoLog.error(f"iolite Optimiser: {msg}")
             self.lbl_result.setText(msg)
 
-    def get_input_dataframe(self, tab=None, file_path=None):
+    def get_input_dataframe(self, tab=None, file_path=None, target_file=None):
         try:
-            if not file_path:
+            if not file_path and target_file is None:
                 return None, {}
 
-            # 1. Check loaded files in iolite session
-            files = data.importedFiles()
-            target_file = None
+            files = None
+            if target_file is None:
+                # 1. Check loaded files in iolite session
+                files = data.importedFiles()
 
-            norm_target = os.path.normpath(file_path).lower()
-            target_base = os.path.basename(file_path.replace('\\', '/')).lower()
-            for f in files:
-                try:
-                    f_path = os.path.normpath(f.filePath()).lower()
-                    f_base = os.path.basename(f.filePath().replace('\\', '/')).lower()
-                    f_name = os.path.normpath(f.fileName()).lower()
-                    if f_path == norm_target or f_name == target_base or (f_base == target_base and f_base != ""):
-                        target_file = f
-                        break
-                except Exception:
-                    pass
+                norm_target = os.path.normpath(file_path).lower()
+                target_base = os.path.basename(file_path.replace('\\', '/')).lower()
+                for f in files:
+                    try:
+                        f_path = os.path.normpath(f.filePath()).lower()
+                        f_base = os.path.basename(f.filePath().replace('\\', '/')).lower()
+                        f_name = os.path.normpath(f.fileName()).lower()
+                        if f_path == norm_target or f_name == target_base or (f_base == target_base and f_base != ""):
+                            target_file = f
+                            break
+                    except Exception:
+                        pass
 
             # 2. Get channels corresponding to target file
             if target_file is not None:
