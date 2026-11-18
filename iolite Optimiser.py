@@ -5237,9 +5237,6 @@ class ioliteOptimiser(QWidget):
         # 2.5. Apply Theme EARLY (Before Opt)
         # Initializes the plot background color and system_state
         self.apply_theme(trigger_opt=False)
-
-        # 3. Initial Data Loading & Optimization
-        self.refresh_data()
     
     def _on_result_link_clicked(self, link):
         if link == "#set_dwells":
@@ -6339,6 +6336,8 @@ class ioliteOptimiser(QWidget):
 
     def refresh_data(self, tab=None, file_path=None):
         # Do NOT force tab index if None. None means "Refresh All".
+        if not file_path:
+            return
 
         try:
             # Reset Auto-Rescale to ON for new data (Ephemeral)
@@ -7862,27 +7861,26 @@ class ioliteOptimiser(QWidget):
 
     def get_input_dataframe(self, tab=None, file_path=None):
         try:
+            if not file_path:
+                return None, {}
+
             # 1. Check loaded files in iolite session
             files = data.importedFiles()
             target_file = None
-            
-            if file_path:
-                norm_target = os.path.normpath(file_path).lower()
-                target_base = os.path.basename(file_path.replace('\\', '/')).lower()
-                for f in files:
-                    try:
-                        f_path = os.path.normpath(f.filePath()).lower()
-                        f_base = os.path.basename(f.filePath().replace('\\', '/')).lower()
-                        f_name = os.path.normpath(f.fileName()).lower()
-                        if f_path == norm_target or f_name == target_base or (f_base == target_base and f_base != ""):
-                            target_file = f
-                            break
-                    except Exception:
-                        pass
 
-            if not target_file and files:
-                target_file = files[0]
-            
+            norm_target = os.path.normpath(file_path).lower()
+            target_base = os.path.basename(file_path.replace('\\', '/')).lower()
+            for f in files:
+                try:
+                    f_path = os.path.normpath(f.filePath()).lower()
+                    f_base = os.path.basename(f.filePath().replace('\\', '/')).lower()
+                    f_name = os.path.normpath(f.fileName()).lower()
+                    if f_path == norm_target or f_name == target_base or (f_base == target_base and f_base != ""):
+                        target_file = f
+                        break
+                except Exception:
+                    pass
+
             # 2. Get channels corresponding to target file
             if target_file is not None:
                 ch_names = target_file.channelList()
@@ -7891,9 +7889,11 @@ class ioliteOptimiser(QWidget):
                     ch = data.timeSeries(name)
                     if ch:
                         channels.append(ch)
-            else:
+            elif not files:
                 channels = data.timeSeriesList(data.Input)
-                
+            else:
+                return None, {}
+
             if not channels: return None, {}
             
             # --- PRE-COMPUTE TIME SLICING AND CYCLE TIME EARLY ---
