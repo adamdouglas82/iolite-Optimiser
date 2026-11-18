@@ -3633,6 +3633,8 @@ class ioliteOptimiser(QWidget):
                 self._spr_comp_line, = self.spr_ax_comp.plot(self._spr_comp_t_ms, self._spr_comp_y, color=safe_palette[0], lw=2)
                 self._spr_comp_ext_left, = self.spr_ax_comp.plot([], [], color=safe_palette[0], lw=2, linestyle=(0, (1.5, 0.45)), alpha=0.85)
                 self._spr_comp_ext_right, = self.spr_ax_comp.plot([], [], color=safe_palette[0], lw=2, linestyle=(0, (1.5, 0.45)), alpha=0.85)
+                self._spr_comp_ext_left._exclude_from_rescale = True
+                self._spr_comp_ext_right._exclude_from_rescale = True
                 self.spr_ax_comp.set_xlabel("Rel. Time (ms)", fontsize='medium', color=fg_col)
                 # Stable composite title anchored to axis top
                 self.spr_ax_comp.set_title("Composite Peak", fontsize='medium', color=fg_col, y=1.0, pad=10)
@@ -6785,7 +6787,8 @@ class ioliteOptimiser(QWidget):
                     if line.get_visible():
                         ydata = line.get_ydata()
                         if ydata is not None and len(ydata) > 0:
-                            y_valid = ydata[~np.isnan(ydata)]
+                            y_arr = np.asarray(ydata, dtype=float)
+                            y_valid = y_arr[~np.isnan(y_arr)]
                             if len(y_valid) > 0:
                                 ymin = min(ymin, np.min(y_valid))
                                 ymax = max(ymax, np.max(y_valid))
